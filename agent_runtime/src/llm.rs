@@ -1,0 +1,166 @@
+//! LLM client abstraction and OpenAI-compatible implementation.
+
+use serde::{Deserialize, Serialize};
+use std::future::Future;
+use thiserror::Error;
+
+// ── Error ────────────────────────────────────────────────────────
+
+#[derive(Debug, Error)]
+pub enum LlmError {
+    #[error("HTTP request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("missing AXIOMLAB_LLM_ENDPOINT env var")]
+    MissingEndpoint,
+    #[error("missing AXIOMLAB_LLM_API_KEY env var")]
+    MissingApiKey,
+    #[error("LLM returned empty response")]
+    EmptyResponse,
+}
+
+// ── Message types ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatResponse {
+    choices: Vec<Choice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Choice {
+    message: ChatMessage,
+}
+
+// ── Trait ─────────────────────────────────────────────────────────
+
+/// An async LLM backend that can generate completions.
+pub trait LlmBackend: Send + Sync {
+    fn chat(&self, messages: &[ChatMessage], temperature: f64)
+        -> impl Future<Output = Result<String, LlmError>> + Send;
+}
+
+// ── OpenAI-compatible implementation ─────────────────────────────
+
+/// Client for any OpenAI-compatible chat endpoint
+/// (OpenAI, Azure, Ollama, vLLM, etc.).
+pub struct OpenAiClient {
+    client: reqwest::Client,
+    endpoint: String,
+    api_key: String,
+    model: String,
+}
+
+impl OpenAiClient {
+    /// Build from environment variables:
+    /// - `AXIOMLAB_LLM_ENDPOINT` (e.g. `https://api.openai.com/v1`)
+    /// - `AXIOMLAB_LLM_API_KEY`
+    /// - `AXIOMLAB_LLM_MODEL` (default: `gpt-4o`)
+    pub fn from_env() -> Result<Self, LlmError> {
+        let endpoint =
+            std::env::var("AXIOMLAB_LLM_ENDPOINT").map_err(|_| LlmError::MissingEndpoint)?;
+        let api_key =
+            std::env::var("AXIOMLAB_LLM_API_KEY").map_err(|_| LlmError::MissingApiKey)?;
+        let model =
+            std::env::var("AXIOMLAB_LLM_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
+        Ok(Self {
+            client: reqwest::Client::new(),
+            endpoint,
+            api_key,
+            model,
+        })
+    }
+
+    /// Build with explicit values (useful for tests / non-env setups).
+    pub fn new(endpoint: String, api_key: String, model: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            endpoint,
+            api_key,
+            model,
+        }
+    }
+}
+
+impl LlmBackend for OpenAiClient {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        temperature: f64,
+    ) -> Result<String, LlmError> {
+        let url = format!("{}/chat/completions", self.endpoint);
+        let body = ChatRequest {
+            model: self.model.clone(),
+            messages: messages.to_vec(),
+            temperature,
+        };
+        let resp: ChatResponse = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        resp.choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .ok_or(LlmError::EmptyResponse)
+    }
+}
+
+// ── In-process mock (for tests and offline dev) ──────────────────
+
+/// A deterministic mock backend that echoes the last user message.
+pub struct MockLlm;
+
+impl LlmBackend for MockLlm {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _temperature: f64,
+    ) -> Result<String, LlmError> {
+        messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| format!("MOCK_RESPONSE: {}", m.content))
+            .ok_or(LlmError::EmptyResponse)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mock_echoes_last_user_message() {
+        let mock = MockLlm;
+        let msgs = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: "You are a lab assistant.".into(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "Measure the pH.".into(),
+            },
+        ];
+        let reply = mock.chat(&msgs, 0.0).await.unwrap();
+        assert!(reply.contains("Measure the pH."));
+    }
+}

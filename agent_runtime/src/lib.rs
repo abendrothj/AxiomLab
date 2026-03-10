@@ -7,4 +7,7 @@
 //! and resource limits.
 
 pub mod sandbox;
+pub mod llm;
+pub mod tools;
+pub mod experiment;
 pub mod orchestrator;

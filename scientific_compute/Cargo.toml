@@ -8,4 +8,6 @@ license.workspace = true
 [dependencies]
 nalgebra = { workspace = true }
 uom = { workspace = true }
+rustfft = { workspace = true }
+num-complex = { workspace = true }
 thiserror = { workspace = true }

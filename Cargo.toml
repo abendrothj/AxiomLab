@@ -19,6 +19,17 @@ repository = "https://github.com/yourusername/AxiomLab"
 # Phase 1 – Pure Rust scientific compute
 nalgebra = "0.33"
 uom = "0.36"
+rustfft = "6"
+num-complex = "0.4"
+
+# Phase 2 – Agent runtime
+reqwest = { version = "0.12", features = ["json"] }
+
+# Phase 3 – Proof synthesis
+regex = "1"
+
+# Phase 4 – Aeneas / Lean
+tempfile = "3"
 
 # Shared
 serde = { version = "1", features = ["derive"] }
