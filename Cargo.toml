@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "scientific_compute",
+    "physical_types",
+    "agent_runtime",
+    "verus_proofs",
+    "proof_synthesizer",
+    "aeneas_lean_semantics",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/yourusername/AxiomLab"
+
+[workspace.dependencies]
+# Phase 1 – Pure Rust scientific compute
+nalgebra = "0.33"
+uom = "0.36"
+
+# Shared
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"

@@ -1,0 +1,11 @@
+[package]
+name = "scientific_compute"
+description = "Pure Rust physics and math primitives for autonomous scientific workflows."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nalgebra = { workspace = true }
+uom = { workspace = true }
+thiserror = { workspace = true }

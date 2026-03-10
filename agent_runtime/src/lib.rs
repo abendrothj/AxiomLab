@@ -1,0 +1,10 @@
+//! # agent_runtime
+//!
+//! Sandboxed agent orchestrator for AxiomLab.
+//!
+//! Provides a restricted control-plane that mediates every interaction
+//! between the LLM agent and laboratory hardware, enforcing allowlists
+//! and resource limits.
+
+pub mod sandbox;
+pub mod orchestrator;

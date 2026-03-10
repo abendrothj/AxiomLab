@@ -1,0 +1,10 @@
+[package]
+name = "physical_types"
+description = "Compile-time dimensional analysis via the `uom` crate for AxiomLab."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+uom = { workspace = true }
+thiserror = { workspace = true }

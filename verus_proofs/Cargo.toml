@@ -1,0 +1,12 @@
+[package]
+name = "verus_proofs"
+description = "Verus-based concurrency and hardware-invariant SMT proofs for AxiomLab."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# NOTE: actual Verus verification requires the verus compiler driver;
+# this crate compiles with standard `rustc` for development and CI,
+# and the verus-specific proof blocks are conditionally included.
+
+[dependencies]
