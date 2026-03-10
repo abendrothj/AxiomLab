@@ -10,3 +10,6 @@ license.workspace = true
 # and the verus-specific proof blocks are conditionally included.
 
 [dependencies]
+
+[dev-dependencies]
+tokio = { workspace = true }

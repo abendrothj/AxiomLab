@@ -10,3 +10,5 @@
 //! 4. Repeat until the proof is accepted or a retry limit is hit.
 
 pub mod agent;
+pub mod compiler;
+pub mod diagnostics;

@@ -6,12 +6,12 @@
 
 | Crate | Phase | Purpose |
 |---|---|---|
-| `scientific_compute` | 1 | Pure-Rust linear algebra, FFT, and numerical primitives (no C/Fortran FFI). |
-| `physical_types` | 1 | Compile-time dimensional analysis via `uom` – prevents unit-mismatch bugs at the type level. |
-| `agent_runtime` | 2 | Sandboxed agent orchestrator: allowlisted filesystem access, resource limits, tool dispatch. |
-| `verus_proofs` | 3 | Verus SMT specifications for concurrent hardware control and resource invariants. |
-| `proof_synthesizer` | 3 | VeruSAGE-inspired agent loop that auto-generates Verus proof annotations. |
-| `aeneas_lean_semantics` | 4 | Rust MIR → Lean 4 translation for theorem-prover-level algorithmic verification. |
+| `scientific_compute` | 1 | Pure-Rust linear algebra (`nalgebra`), FFT (`rustfft`), and numerical primitives — no C/Fortran FFI. |
+| `physical_types` | 1 | Compile-time dimensional analysis via `uom` — prevents unit-mismatch bugs at the type level. |
+| `agent_runtime` | 2 | Sandboxed agent orchestrator: path + command allowlists, resource limits, LLM-driven tool dispatch, experiment lifecycle state machine. |
+| `verus_proofs` | 3 | Verus-compatible specs (macro shim for dual `rustc`/Verus compilation), concurrency token proofs, hardware-bound invariants, verified resource allocator. |
+| `proof_synthesizer` | 3 | VeruSAGE-inspired observe→reason→act loop: invokes Verus compiler, parses diagnostics, asks LLM to refine proof annotations until verification succeeds. |
+| `aeneas_lean_semantics` | 4 | End-to-end Rust MIR → Aeneas → Lean 4 pipeline: MIR export, Aeneas translation, Lean type-checking. |
 
 ## Quick Start
 
