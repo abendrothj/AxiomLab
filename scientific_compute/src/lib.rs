@@ -7,6 +7,7 @@
 pub mod linalg;
 pub mod fft;
 pub mod discovery;
+pub mod lab_data;
 
 /// Re-export core numeric types used across the workspace.
 pub use nalgebra;

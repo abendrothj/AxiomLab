@@ -18,6 +18,8 @@ services:
       - VERUS_PATH=/usr/local/bin/verus
       - AENEAS_PATH=/usr/local/bin/aeneas
       - RUST_LOG=info
+      # Signal to tests that we're running inside Docker (enables full verification)
+      - AXIOMLAB_DOCKER=1
       # Pass through optional LLM config
       - AXIOMLAB_LLM_ENDPOINT=${AXIOMLAB_LLM_ENDPOINT:-}
       - AXIOMLAB_LLM_API_KEY=${AXIOMLAB_LLM_API_KEY:-}

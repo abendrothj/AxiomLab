@@ -160,8 +160,10 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
                     .ok_or("missing sensor_id")?
                     .to_owned();
                 tracing::info!(sensor_id = %id, "reading sensor");
-                // In a real deployment this would poll the hardware driver.
-                Ok(serde_json::json!({ "sensor_id": id, "value": 7.04, "unit": "pH" }))
+                // SIMULATION STUB — returns a fixed value.
+                // In production: poll the hardware sensor driver for `id`.
+                // TODO: inject a SensorDriver trait to replace this stub.
+                Ok(serde_json::json!({ "sensor_id": id, "value": 7.04, "unit": "pH", "source": "STUB" }))
             })
         }),
     );

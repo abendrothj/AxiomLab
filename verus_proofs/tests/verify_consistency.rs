@@ -122,6 +122,7 @@ fn safety_functions_consistent_with_predicates() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
 fn verus_proofs_still_hold() {
     match verify::verify_lab_safety() {
         Some(result) => {

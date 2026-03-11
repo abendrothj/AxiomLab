@@ -261,11 +261,16 @@ fn discovery_detects_nonlinear_data() {
     let y: Vec<f64> = x.iter().map(|&xi| xi * xi).collect(); // quadratic
 
     let fit = linear_regression(&x, &y).unwrap();
-    // R² for a linear fit to quadratic data should be decent but not > 0.99
-    // (it'll be around 0.97 for this range)
     println!("R² for quadratic data with linear fit: {:.4}", fit.r_squared);
-    // The point is: the agent would see R² < 0.99 and know to try a
-    // nonlinear model — demonstrating genuine scientific reasoning.
+
+    // A linear fit to quadratic data should NOT pass the linearity threshold.
+    // If the agent sees R² < 0.99, it knows to try a nonlinear model.
+    assert!(
+        fit.r_squared < 0.99,
+        "R² for a linear fit to quadratic data must be < 0.99; got {:.4}. \
+         If this fails, the agent would wrongly conclude the data is linear.",
+        fit.r_squared
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -314,6 +319,7 @@ fn main() {
 "#;
 
 #[tokio::test]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
 async fn discovery_rejects_unsafe_dilution_series() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available");

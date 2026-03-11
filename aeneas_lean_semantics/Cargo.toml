@@ -16,3 +16,4 @@ tempfile = { workspace = true }
 [dev-dependencies]
 scientific_compute = { path = "../scientific_compute" }
 num-complex = { workspace = true }
+tracing-subscriber = "0.3"

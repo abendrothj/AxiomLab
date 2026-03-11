@@ -95,10 +95,13 @@ pub async fn poll_sensors_verified(
         tokens.push(manager.acquire(sid)?);
     }
 
-    // Simulate reading each sensor (would call real hardware driver).
+    // Read each sensor. In production this calls the real hardware ADC driver.
+    // SIMULATION: returns a fixed reading until hardware driver is injected.
+    // TODO: accept `read_fn: impl Fn(u32) -> f64` to remove this stub.
     let mut results = Vec::with_capacity(sensor_ids.len());
     for token in &tokens {
-        let reading = 7.04_f64; // placeholder: real ADC read
+        #[allow(clippy::approx_constant)]
+        let reading = 7.04_f64; // STUB — replace with real ADC call
         results.push((token.channel_id(), reading));
     }
 

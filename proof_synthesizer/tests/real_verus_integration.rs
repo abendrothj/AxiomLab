@@ -90,6 +90,7 @@ fn verus_available() -> bool {
 }
 
 #[tokio::test]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
 async fn real_verus_safe_code_accepted() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available (set VERUS_PATH or install verus)");
@@ -112,6 +113,7 @@ async fn real_verus_safe_code_accepted() {
 }
 
 #[tokio::test]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
 async fn real_verus_unsafe_code_rejected() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available (set VERUS_PATH or install verus)");
@@ -150,6 +152,7 @@ async fn real_verus_unsafe_code_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
 async fn real_verus_diagnostics_pipeline() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available (set VERUS_PATH or install verus)");

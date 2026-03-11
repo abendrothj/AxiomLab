@@ -23,6 +23,35 @@ cargo build
 cargo test
 ```
 
+## Docker Testing & Verification
+
+AxiomLab includes formal verification infrastructure (Verus, Aeneas, Lean 4) available inside Docker.
+
+### Local development (macOS/Linux):
+```bash
+# Regular tests only (skip Verus, Aeneas, Lean tests)
+cargo test
+
+# This skips tests marked #[ignore] that need Docker
+```
+
+### Full verification inside Docker:
+```bash
+# Start the container and run all tests (including ignored ones)
+docker compose run --rm axiomlab cargo test -- --include-ignored
+
+# Run only ignored tests (Verus, Aeneas, Lean)
+docker compose run --rm axiomlab cargo test -- --ignored
+
+# Run specific Docker-only test
+docker compose run --rm axiomlab cargo test real_aeneas_translates_simple_function -- --ignored
+
+# Build and start interactive shell
+docker compose run --rm axiomlab bash
+```
+
+**Inside Docker:** All 29 Verus safety proofs are validated, Aeneas translation is executable, and Lean type-checker confirms theorem correctness.
+
 ## License
 
 MIT

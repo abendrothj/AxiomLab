@@ -200,6 +200,7 @@ fn verus_available() -> bool {
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
 async fn e2e_titration_verified() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available");
@@ -268,6 +269,7 @@ async fn e2e_titration_verified() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
 async fn e2e_unsafe_titration_blocked() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available");
