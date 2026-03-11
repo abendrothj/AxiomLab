@@ -1,16 +1,15 @@
-//! Verified resource allocator for lab consumables.
+//! Resource allocator for lab consumables.
 //!
 //! Tracks reagent volumes, tip-rack slots, and well-plate positions.
-//! Under Verus, an SMT proof guarantees that the allocator never
-//! over-commits a resource.
-
-use crate::verus_shim::*;
+//! Runtime enforcement ensures the allocator never over-commits.
+//!
+//! NOTE: Formal verification of allocation invariants is planned
+//! for `verus_verified/resource_allocator.rs`.
 
 /// A fixed-capacity resource pool (e.g., a well plate with N wells).
 pub struct ResourcePool {
     capacity: u64,
     allocated: u64,
-    _ghost_sum: Ghost<u64>,
 }
 
 impl ResourcePool {
@@ -18,35 +17,30 @@ impl ResourcePool {
         Self {
             capacity,
             allocated: 0,
-            _ghost_sum: Ghost::new(0),
         }
     }
 
     /// Allocate `amount` units from the pool.
     ///
-    /// Precondition: `allocated + amount <= capacity`.
+    /// Fails if `allocated + amount > capacity`.
     pub fn allocate(&mut self, amount: u64) -> Result<u64, &'static str> {
-        requires!(self.allocated + amount <= self.capacity);
-
+        if self.allocated + amount > self.capacity {
+            return Err("allocation would exceed capacity");
+        }
         self.allocated += amount;
-        self._ghost_sum = Ghost::new(self.allocated);
-
-        invariant!(self.allocated <= self.capacity);
-        ensures!(|_r: &Result<u64, &'static str>| self.allocated <= self.capacity);
-
+        debug_assert!(self.allocated <= self.capacity);
         Ok(self.allocated)
     }
 
     /// Return `amount` units back to the pool.
     ///
-    /// Precondition: `amount <= allocated`.
+    /// Fails if `amount > allocated`.
     pub fn deallocate(&mut self, amount: u64) -> Result<u64, &'static str> {
-        requires!(amount <= self.allocated);
-
+        if amount > self.allocated {
+            return Err("cannot deallocate more than allocated");
+        }
         self.allocated -= amount;
-        self._ghost_sum = Ghost::new(self.allocated);
-
-        invariant!(self.allocated <= self.capacity);
+        debug_assert!(self.allocated <= self.capacity);
         Ok(self.allocated)
     }
 
@@ -81,7 +75,9 @@ impl WellPlate {
     }
 
     fn index(&self, row: u32, col: u32) -> Result<usize, &'static str> {
-        requires!(row < self.rows && col < self.cols);
+        if row >= self.rows || col >= self.cols {
+            return Err("well position out of range");
+        }
         Ok((row * self.cols + col) as usize)
     }
 

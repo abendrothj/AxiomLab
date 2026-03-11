@@ -1,71 +1,104 @@
-//! Hardware-bound invariant specifications.
+//! Hardware-bound safety enforcement.
 //!
-//! Defines physical constraints on laboratory hardware as formal
-//! preconditions.  Under Verus these become SMT-verified `requires`
-//! clauses; under standard `rustc` they are runtime assertions.
+//! Constants are AUTO-GENERATED from `verus_verified/lab_safety.rs` at
+//! build time.  That file is the single source of truth — formally
+//! verified by the real Verus compiler + Z3 SMT solver.
+//!
+//! The runtime functions here mirror the verified Verus functions
+//! exactly: same bounds, same logic, same semantics.  The difference
+//! is that Verus proves safety at *compile time* (preconditions are
+//! statically discharged), while these functions enforce safety at
+//! *runtime* (preconditions are checked dynamically).
+//!
+//! This duality guarantees:
+//! - The constants used at runtime are IDENTICAL to those Verus verified.
+//! - Any constant change requires editing the Verus source and re-verifying.
 
-use crate::verus_shim::*;
+// ── Constants: generated from verus_verified/lab_safety.rs ───────
 
-// ── Physical constants ───────────────────────────────────────────
+include!(concat!(env!("OUT_DIR"), "/verus_constants.rs"));
 
-pub const MAX_ARM_EXTENSION_MM: u64 = 1200;
-pub const MIN_ARM_EXTENSION_MM: u64 = 0;
-pub const MAX_TEMPERATURE_MILLI_K: u64 = 500_000; // 500 K in mK
-pub const MIN_TEMPERATURE_MILLI_K: u64 = 200_000; // 200 K in mK
-pub const MAX_PRESSURE_PA: u64 = 200_000;         // 200 kPa
-pub const MAX_VOLUME_UL: u64 = 50_000;            // 50 mL in µL
+// ── Runtime predicate functions (mirrors of Verus spec fns) ──────
 
-// ── Specification functions ──────────────────────────────────────
+/// Arm extension within safe range.
+/// Mirrors: `pub open spec fn arm_in_range` in lab_safety.rs
+#[inline]
+pub fn arm_in_range(mm: u64) -> bool {
+    MIN_ARM_EXTENSION_MM <= mm && mm <= MAX_ARM_EXTENSION_MM
+}
 
-// Spec: arm extension must be within [MIN, MAX].
-spec_fn!(arm_in_range, (mm: u64) -> bool, {
-    mm >= MIN_ARM_EXTENSION_MM && mm <= MAX_ARM_EXTENSION_MM
-});
+/// Temperature within safe operating envelope.
+/// Mirrors: `pub open spec fn temp_in_range` in lab_safety.rs
+#[inline]
+pub fn temp_in_range(mk: u64) -> bool {
+    MIN_TEMPERATURE_MILLI_K <= mk && mk <= MAX_TEMPERATURE_MILLI_K
+}
 
-// Spec: temperature must be within the safe operating envelope.
-spec_fn!(temp_in_range, (mk: u64) -> bool, {
-    mk >= MIN_TEMPERATURE_MILLI_K && mk <= MAX_TEMPERATURE_MILLI_K
-});
-
-// Spec: pressure within safe limits.
-spec_fn!(pressure_in_range, (pa: u64) -> bool, {
+/// Pressure within vessel rating.
+/// Mirrors: `pub open spec fn pressure_in_range` in lab_safety.rs
+#[inline]
+pub fn pressure_in_range(pa: u64) -> bool {
     pa <= MAX_PRESSURE_PA
-});
+}
 
-// Spec: dispense volume within syringe capacity.
-spec_fn!(volume_in_range, (ul: u64) -> bool, {
+/// Dispense volume within syringe capacity.
+/// Mirrors: `pub open spec fn volume_in_range` in lab_safety.rs
+#[inline]
+pub fn volume_in_range(ul: u64) -> bool {
     ul <= MAX_VOLUME_UL
-});
+}
 
-// ── Verified executive functions ─────────────────────────────────
+// ── Runtime-checked safety functions ─────────────────────────────
+//
+// These mirror the Verus `safe_*` functions in lab_safety.rs.
+// Same logic: validate → dispatch or reject.
 
 /// Command the robotic arm to extend to `mm` millimetres.
-/// Verified precondition: `arm_in_range(mm)` must hold.
+/// Returns `Err` if `mm` is outside the verified safety range.
 pub fn move_arm_verified(mm: u64) -> Result<u64, &'static str> {
-    requires!(arm_in_range(mm));
-    ensures!(|result: &Result<u64, &'static str>| result.is_ok());
-    Ok(mm)
+    if arm_in_range(mm) { Ok(mm) } else { Err("arm position out of verified range") }
 }
 
 /// Set reactor temperature to `mk` milli-kelvins.
 pub fn set_temperature_verified(mk: u64) -> Result<u64, &'static str> {
-    requires!(temp_in_range(mk));
-    ensures!(|result: &Result<u64, &'static str>| result.is_ok());
-    Ok(mk)
+    if temp_in_range(mk) { Ok(mk) } else { Err("temperature out of verified range") }
 }
 
 /// Set chamber pressure to `pa` pascals.
 pub fn set_pressure_verified(pa: u64) -> Result<u64, &'static str> {
-    requires!(pressure_in_range(pa));
-    ensures!(|result: &Result<u64, &'static str>| result.is_ok());
-    Ok(pa)
+    if pressure_in_range(pa) { Ok(pa) } else { Err("pressure out of verified range") }
 }
 
 /// Dispense `ul` microlitres from the syringe pump.
 pub fn dispense_verified(ul: u64) -> Result<u64, &'static str> {
-    requires!(volume_in_range(ul));
-    ensures!(|result: &Result<u64, &'static str>| result.is_ok());
-    Ok(ul)
+    if volume_in_range(ul) { Ok(ul) } else { Err("volume out of verified range") }
+}
+
+/// Execute a composite lab command — all four actuators.
+/// Mirrors: `pub fn execute_lab_command` in lab_safety.rs.
+pub fn execute_lab_command(
+    arm_mm: u64,
+    temp_mk: u64,
+    pressure_pa: u64,
+    volume_ul: u64,
+) -> Result<(u64, u64, u64, u64), &'static str> {
+    if !arm_in_range(arm_mm) { return Err("arm out of range"); }
+    if !temp_in_range(temp_mk) { return Err("temperature out of range"); }
+    if !pressure_in_range(pressure_pa) { return Err("pressure out of range"); }
+    if !volume_in_range(volume_ul) { return Err("volume out of range"); }
+    Ok((arm_mm, temp_mk, pressure_pa, volume_ul))
+}
+
+/// Clamp arm value to the safe range.
+/// Mirrors: `pub fn clamp_arm` in lab_safety.rs.
+pub fn clamp_arm(mm: u64) -> u64 {
+    if mm < MIN_ARM_EXTENSION_MM {
+        MIN_ARM_EXTENSION_MM
+    } else if mm > MAX_ARM_EXTENSION_MM {
+        MAX_ARM_EXTENSION_MM
+    } else {
+        mm
+    }
 }
 
 #[cfg(test)]
@@ -127,5 +160,41 @@ mod tests {
     #[test]
     fn volume_over() {
         assert!(!volume_in_range(60_000)); // 60 mL – over capacity
+    }
+
+    // ── composite command ──
+    #[test]
+    fn composite_command_safe() {
+        let result = execute_lab_command(600, 300_000, 101_325, 5_000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn composite_command_rejects_bad_arm() {
+        assert!(execute_lab_command(5000, 300_000, 101_325, 5_000).is_err());
+    }
+
+    // ── clamp ──
+    #[test]
+    fn clamp_identity_in_range() {
+        assert_eq!(clamp_arm(600), 600);
+    }
+
+    #[test]
+    fn clamp_to_max() {
+        assert_eq!(clamp_arm(9999), MAX_ARM_EXTENSION_MM);
+    }
+
+    // ── constants come from Verus source ──
+    #[test]
+    fn constants_match_verus_source() {
+        // These values must match verus_verified/lab_safety.rs exactly.
+        // If this test fails, the build.rs extraction is broken.
+        assert_eq!(MAX_ARM_EXTENSION_MM, 1200);
+        assert_eq!(MIN_ARM_EXTENSION_MM, 0);
+        assert_eq!(MAX_TEMPERATURE_MILLI_K, 500_000);
+        assert_eq!(MIN_TEMPERATURE_MILLI_K, 200_000);
+        assert_eq!(MAX_PRESSURE_PA, 200_000);
+        assert_eq!(MAX_VOLUME_UL, 50_000);
     }
 }

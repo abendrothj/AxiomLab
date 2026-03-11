@@ -6,26 +6,27 @@
 //! to 500 mm, but the verified specification restricts the arm to a
 //! strict maximum of 100 mm (simulating a confined glovebox).
 //!
-//! The `requires!` macro fires at the specification boundary, proving
+//! The safety check fires at the specification boundary, proving
 //! that even if the LLM hallucinates a physically impossible command,
-//! the formally verified runtime blocks it before any hardware moves.
-
-use verus_proofs::{spec_fn, requires};
+//! the runtime (backed by Verus-verified bounds) blocks it before
+//! any hardware moves.
 
 // ── Glovebox-specific specification (100 mm max) ─────────────────
 
 const GLOVEBOX_MAX_MM: u64 = 100;
 
-spec_fn!(glovebox_arm_in_range, (mm: u64) -> bool, {
+fn glovebox_arm_in_range(mm: u64) -> bool {
     mm <= GLOVEBOX_MAX_MM
-});
+}
 
 fn glovebox_move_arm(mm: u64) -> Result<u64, &'static str> {
-    requires!(glovebox_arm_in_range(mm));
+    if !glovebox_arm_in_range(mm) {
+        return Err("arm position out of glovebox range");
+    }
     Ok(mm)
 }
 
-// ── Standard lab arm (full 1200 mm range) ────────────────────────
+// ── Standard lab arm (full 1200 mm range — bounds from Verus source) ──
 
 use verus_proofs::hardware_bounds::{
     move_arm_verified,

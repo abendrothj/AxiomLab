@@ -1,22 +1,23 @@
-//! Concurrency proofs for multi-threaded hardware control.
+//! Concurrency control for multi-threaded hardware access.
 //!
 //! Models the problem of safely sharing hardware channels across
-//! concurrent tasks.  Under Verus, ghost token-passing proves the
-//! absence of data races without runtime overhead.
+//! concurrent tasks using a token-based ownership pattern.
+//!
+//! NOTE: The concurrency proofs (ghost token-passing, linear types)
+//! are planned for Verus verification in `verus_verified/concurrency.rs`.
+//! This module provides the runtime enforcement.
 
-use crate::verus_shim::*;
 use std::sync::{Arc, Mutex};
 
 // ── Token-based channel ownership ────────────────────────────────
 
-/// A ghost permission token for exclusive access to a hardware channel.
+/// A permission token for exclusive access to a hardware channel.
 ///
-/// Under Verus this would be a `tracked` linear type; under plain Rust
-/// we model it with a mutex-guarded flag.
+/// In the verified version (verus_verified/), this becomes a `tracked`
+/// linear type with ghost state. Here it provides runtime enforcement.
 #[derive(Debug)]
 pub struct ChannelToken {
     channel_id: u32,
-    _ghost: Ghost<bool>, // ghost: whether this token is "live"
 }
 
 impl ChannelToken {
@@ -46,7 +47,9 @@ impl ChannelManager {
     /// Returns a token proving ownership; fails if the channel is
     /// already held or out of range.
     pub fn acquire(&self, channel_id: u32) -> Result<ChannelToken, &'static str> {
-        requires!(channel_id < self.total_channels);
+        if channel_id >= self.total_channels {
+            return Err("channel id out of range");
+        }
 
         let mut taken = self.taken.lock().map_err(|_| "lock poisoned")?;
         if taken[channel_id as usize] {
@@ -54,16 +57,13 @@ impl ChannelManager {
         }
         taken[channel_id as usize] = true;
 
-        Ok(ChannelToken {
-            channel_id,
-            _ghost: Ghost::new(true),
-        })
+        Ok(ChannelToken { channel_id })
     }
 
     /// Release a previously acquired channel, consuming the token.
     pub fn release(&self, token: ChannelToken) -> Result<(), &'static str> {
         let mut taken = self.taken.lock().map_err(|_| "lock poisoned")?;
-        invariant!(taken[token.channel_id as usize]);
+        debug_assert!(taken[token.channel_id as usize], "releasing un-acquired channel");
         taken[token.channel_id as usize] = false;
         Ok(())
     }
@@ -86,7 +86,9 @@ pub async fn poll_sensors_verified(
     manager: &ChannelManager,
     sensor_ids: &[u32],
 ) -> Result<Vec<(u32, f64)>, &'static str> {
-    requires!(sensor_ids.len() <= manager.available() as usize);
+    if sensor_ids.len() > manager.available() as usize {
+        return Err("not enough available channels");
+    }
 
     let mut tokens = Vec::new();
     for &sid in sensor_ids {
@@ -105,7 +107,6 @@ pub async fn poll_sensors_verified(
         manager.release(token)?;
     }
 
-    ensures!(|_r: &Result<Vec<(u32, f64)>, &'static str>| manager.available() == manager.available());
     Ok(results)
 }
 
