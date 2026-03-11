@@ -18,3 +18,4 @@ scientific_compute = { path = "../scientific_compute" }
 
 [dev-dependencies]
 agent_runtime = { path = "../agent_runtime" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

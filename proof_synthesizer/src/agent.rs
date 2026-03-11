@@ -134,6 +134,11 @@ pub async fn synthesize_proof(
         });
 
         let reply = llm_chat(&http, config, &history).await?;
+        if std::env::var("ORA_DEBUG").is_ok() {
+            eprintln!("[ORA {attempt}] Verus out:\n{}\n[ORA {attempt}] LLM reply:\n{}",
+                &result.output[..result.output.len().min(600)],
+                &reply[..reply.len().min(800)]);
+        }
         history.push(Msg {
             role: "assistant".into(),
             content: reply.clone(),
@@ -219,15 +224,35 @@ fn extract_rust_block(text: &str) -> Option<String> {
 }
 
 const SYSTEM_PROMPT: &str = "\
-You are a Verus proof engineer. Given Rust source code and Verus \
-compiler errors, your task is to add or fix Verus proof annotations \
-(requires, ensures, invariant, proof blocks, ghost variables) so that \
-the code passes Verus verification. Rules:\n\
-- Preserve the original executable logic; only add/fix proof annotations.\n\
-- Use `requires(...)` for preconditions, `ensures(...)` for postconditions.\n\
-- Use `proof { ... }` blocks for auxiliary lemmas.\n\
-- For loop invariants use `invariant(...)` inside the loop body.\n\
-- Return the COMPLETE file, not a diff.";
+You are a Verus proof engineer. Given Rust/Verus source code and Verus \
+compiler errors, add or fix proof annotations so the code passes verification.\n\
+\n\
+Verus annotation syntax:\n\
+    requires expr,          // precondition on function entry\n\
+    ensures  expr,          // postcondition on function exit\n\
+    invariant               // loop invariant clauses (go BEFORE decreases)\n\
+            expr1,\n\
+            expr2,\n\
+    decreases expr,         // termination measure — required on every while/for loop\n\
+    proof { assert(...); }  // inline proof steps\n\
+\n\
+Fix rules:\n\
+1. 'precondition not satisfied': the calling function is missing a `requires` \
+clause — propagate it from the callee.\n\
+2. 'postcondition not satisfied' inside a loop function: add `invariant` \
+clauses to the while header (before `decreases`) that bound the loop variables \
+(e.g. `i <= n,`) so Verus can derive the result after loop exit.\n\
+3. 'loop must have a decreases clause': add `decreases expr,` to the while header.\n\
+\n\
+Loop annotation order example:\n\
+    while i < n\n\
+            invariant\n\
+                    i <= n,\n\
+            decreases n - i,\n\
+    { ... }\n\
+\n\
+Preserve all executable logic. Keep the verus! { ... } wrapper intact. \
+Return the COMPLETE corrected file inside ```rust ... ```, nothing else.";
 
 #[cfg(test)]
 mod tests {
