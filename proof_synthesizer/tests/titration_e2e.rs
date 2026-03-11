@@ -187,7 +187,12 @@ fn main() {
 "#;
 
 fn verus_available() -> bool {
-    find_verus().ok().map_or(false, |p| p.exists() || p.to_str() == Some("verus"))
+    find_verus().ok().map_or(false, |p| {
+        if p.exists() {
+            return true;
+        }
+        std::process::Command::new(&p).arg("--version").output().is_ok()
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════

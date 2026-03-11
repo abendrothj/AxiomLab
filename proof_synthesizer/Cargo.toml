@@ -14,3 +14,4 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }
+scientific_compute = { path = "../scientific_compute" }

@@ -913,6 +913,7 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "reqwest",
+ "scientific_compute",
  "serde",
  "serde_json",
  "tempfile",
