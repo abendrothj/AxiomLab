@@ -115,26 +115,17 @@ pub async fn synthesize_proof(
         let summary = diagnostics::summarize(&diags);
         warn!(attempt, errors = diags.len(), "Verus rejected — refining");
 
-        // Include full source only when it's short; on large files, the
-        // errors alone are usually sufficient context and the source can
-        // be supplied via diff in the reply.
+        // Always include full source. We intentionally avoid diff-mode
+        // replies because we do not apply unified diffs in this loop.
         let source_lines = current_source.lines().count();
-        let source_section = if source_lines <= 120 {
-            format!("\n\n## Current source ({source_lines} lines)\n```rust\n{current_source}\n```")
-        } else {
-            format!(
-                "\n\n## Current source\n({source_lines} lines — omitted to save context. \
-                 Respond with a unified diff only.)"
-            )
-        };
+        let source_section =
+            format!("\n\n## Current source ({source_lines} lines)\n```rust\n{current_source}\n```");
 
         let user_msg = format!(
             "Verus verification failed (attempt {attempt}/{max}).\n\
              ## Errors\n{summary}{source_section}\n\n\
-             Fix the proof annotations so Verus accepts.\n\
-             • If the source was included, you may return the complete corrected file \
-               in ```rust ... ``` OR a unified diff (`--- a/src\\n+++ b/src\\n@@ ...`).\n\
-             • If the source was omitted, respond with a unified diff only.",
+                         Fix the proof annotations so Verus accepts.\n\
+                         Return ONLY the complete corrected Rust source inside ```rust ... ```.",
             max = config.max_retries,
         );
         history.push(Msg {
