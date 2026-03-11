@@ -6,6 +6,8 @@ version = 4
 name = "aeneas_lean_semantics"
 version = "0.1.0"
 dependencies = [
+ "num-complex",
+ "scientific_compute",
  "serde",
  "serde_json",
  "tempfile",

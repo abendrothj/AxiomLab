@@ -14,17 +14,19 @@
 /// ```ignore
 /// spec_fn!(name, (arg: T) -> bool, { body });
 /// ```
+#[macro_export]
 macro_rules! spec_fn {
     ($name:ident, ($($arg:ident : $ty:ty),*) -> $ret:ty, $body:block) => {
         pub fn $name($($arg: $ty),*) -> $ret $body
     };
 }
-pub(crate) use spec_fn;
+pub use spec_fn;
 
 /// Runtime precondition check.
 ///
 /// Under Verus this maps to `requires(...)`.  Under standard Rust it
 /// panics if the predicate is false, acting as a runtime guard.
+#[macro_export]
 macro_rules! requires {
     ($pred:expr) => {
         if !$pred {
@@ -32,26 +34,28 @@ macro_rules! requires {
         }
     };
 }
-pub(crate) use requires;
+pub use requires;
 
 /// Runtime postcondition annotation (no-op under standard Rust).
 ///
 /// Under Verus this maps to `ensures(...)`.
+#[macro_export]
 macro_rules! ensures {
     ($pred:expr) => {
         // postcondition — checked by Verus at proof time, no-op under rustc
         let _ = $pred;
     };
 }
-pub(crate) use ensures;
+pub use ensures;
 
 /// Invariant assertion (runtime under rustc, proof-time under Verus).
+#[macro_export]
 macro_rules! invariant {
     ($pred:expr) => {
         debug_assert!($pred, "invariant violated");
     };
 }
-pub(crate) use invariant;
+pub use invariant;
 
 /// Ghost variable — exists only at proof time.
 ///
