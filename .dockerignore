@@ -1,0 +1,9 @@
+target/
+.git/
+*.md
+!README.md
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo

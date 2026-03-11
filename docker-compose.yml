@@ -1,0 +1,35 @@
+services:
+  axiomlab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    platform: linux/amd64
+    container_name: axiomlab
+    volumes:
+      # Mount source for live editing (overrides COPY in Dockerfile)
+      - .:/axiomlab
+      # Persist cargo registry + build cache across runs
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - axiomlab-target:/axiomlab/target
+    environment:
+      - VERUS_PATH=/usr/local/bin/verus
+      - AENEAS_PATH=/usr/local/bin/aeneas
+      - RUST_LOG=info
+      # Pass through optional LLM config
+      - AXIOMLAB_LLM_ENDPOINT=${AXIOMLAB_LLM_ENDPOINT:-}
+      - AXIOMLAB_LLM_API_KEY=${AXIOMLAB_LLM_API_KEY:-}
+      - AXIOMLAB_LLM_MODEL=${AXIOMLAB_LLM_MODEL:-}
+    working_dir: /axiomlab
+    # Default command: run all tests
+    command: cargo test
+    # Keep stdin open for interactive use with `docker compose run`
+    stdin_open: true
+    tty: true
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  axiomlab-target:
