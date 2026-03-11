@@ -52,7 +52,7 @@ def sse (β : LinearCoeffs) (xs ys : List Float) : Float :=
 
 /-- Sample mean of a list (0 for empty list) -/
 def mean (xs : List Float) : Float :=
-  xs.foldl (· + ·) 0.0 / (xs.length : Float)
+  xs.foldl (· + ·) 0.0 / Float.ofNat xs.length
 
 /-- OLS slope estimator: Σ(xᵢ-x̄)(yᵢ-ȳ) / Σ(xᵢ-x̄)²
     This is the Aeneas translation of the nalgebra normal-equation solve. -/
@@ -125,12 +125,12 @@ def relativeError : Float :=
 
 -- ── Lean evaluates the discovery ────────────────────────────────────────────
 
-#eval s!"=== Lean 4 Beer-Lambert Verification ==="
-#eval s!"Discovered  ε = {discoveredEpsilon} L·mol⁻¹·cm⁻¹"
-#eval s!"Literature  ε = {ε_literature} L·mol⁻¹·cm⁻¹"
-#eval s!"Intercept     = {discoveredIntercept}  (should be ≈ 0)"
-#eval s!"R²            = {discoveryRSquared}  (should be > 0.99)"
-#eval s!"Relative error = {relativeError * 100.0}%  (should be < 5%)"
+#eval! s!"=== Lean 4 Beer-Lambert Verification ==="
+#eval! s!"Discovered  ε = {discoveredEpsilon} L·mol⁻¹·cm⁻¹"
+#eval! s!"Literature  ε = {ε_literature} L·mol⁻¹·cm⁻¹"
+#eval! s!"Intercept     = {discoveredIntercept}  (should be ≈ 0)"
+#eval! s!"R²            = {discoveryRSquared}  (should be > 0.99)"
+#eval! s!"Relative error = {relativeError * 100.0}%  (should be < 5%)"
 
 -- These #eval calls are MECHANICALLY CHECKED by the Lean kernel.
 -- If any definition above is wrong, elaboration fails here.

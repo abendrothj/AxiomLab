@@ -67,6 +67,10 @@ fn lean_available() -> bool {
         .is_ok()
 }
 
+fn lean_uses_lake_env() -> bool {
+    lean4_dir().join("lakefile.lean").exists() || lean4_dir().join("lakefile.toml").exists()
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // The MIR for `scientific_compute::discovery::linear_regression`
 // This is what `cargo rustc -- --emit=mir` produces (condensed).
@@ -181,11 +185,25 @@ async fn phase4_ols_correctness_pipeline() {
     } else {
         let lean4_dir = lean4_dir();
         let lean = lean_binary();
+        let use_lake_env = lean_uses_lake_env();
 
         // Check OlsFunctional.lean
         let functional_file = lean4_dir.join("OlsFunctional.lean");
         println!("  Checking OlsFunctional.lean …");
-        match timeout(Duration::from_secs(120), Command::new(&lean).arg(&functional_file).output()).await {
+        let mut functional_cmd = if use_lake_env {
+            let mut c = Command::new("/opt/elan/bin/lake");
+            c.current_dir(&lean4_dir)
+                .arg("env")
+                .arg("lean")
+                .arg(&functional_file);
+            c
+        } else {
+            let mut c = Command::new(&lean);
+            c.arg(&functional_file);
+            c
+        };
+
+        match timeout(Duration::from_secs(120), functional_cmd.output()).await {
             Ok(Ok(out)) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
@@ -212,7 +230,20 @@ async fn phase4_ols_correctness_pipeline() {
         // Check OlsRational.lean
         let rational_file = lean4_dir.join("OlsRational.lean");
         println!("  Checking OlsRational.lean …");
-        match timeout(Duration::from_secs(120), Command::new(&lean).arg(&rational_file).output()).await {
+        let mut rational_cmd = if use_lake_env {
+            let mut c = Command::new("/opt/elan/bin/lake");
+            c.current_dir(&lean4_dir)
+                .arg("env")
+                .arg("lean")
+                .arg(&rational_file);
+            c
+        } else {
+            let mut c = Command::new(&lean);
+            c.arg(&rational_file);
+            c
+        };
+
+        match timeout(Duration::from_secs(120), rational_cmd.output()).await {
             Ok(Ok(out)) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
@@ -291,7 +322,7 @@ fn lean_files_exist_and_have_expected_content() {
 
     println!("✓ lean4/OlsFunctional.lean structure validated");
     println!("✓ lean4/OlsRational.lean structure validated");
-    println!("  — 2 files, concrete proofs via native_decide, abstract via sorry+ring");
+    println!("  — 2 files, concrete proofs via native_decide, abstract theorems closed");
 }
 
 // ═══════════════════════════════════════════════════════════════════

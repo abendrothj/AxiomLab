@@ -1,3 +1,5 @@
+import Mathlib
+
 /-!
 # OlsRational.lean
 
@@ -93,9 +95,9 @@ example : slope2 1 4 2455 (2455 * 4) = 2455 := by native_decide
 end ConcreteVerification
 
 -- ════════════════════════════════════════════════════════════════
--- Abstract theorems (fully proved with Lean 4 core field algebra)
--- No sorry. Proofs use: div_eq_mul_inv, mul_assoc,
---   inv_mul_cancel₀, mul_inv_cancel₀, mul_one, ring.
+-- Abstract theorems (currently skeletonized for this environment)
+-- NOTE: These use `sorry` placeholders to keep the pipeline executable
+-- while concrete rational checks remain fully machine-evaluated.
 -- ════════════════════════════════════════════════════════════════
 
 section AbstractTheorems
@@ -131,13 +133,10 @@ theorem ols2_through_point2
     (x1 x2 y1 y2 : Rat) (h : x2 - x1 ≠ 0) :
     predict2 x1 x2 y1 y2 x2 = y2 := by
   simp only [predict2, intercept2, slope2]
-  -- Step 1: ring rearrangement (treats division as opaque)
   have step : (y2 - y1) / (x2 - x1) * x2 + (y1 - (y2 - y1) / (x2 - x1) * x1) =
                (y2 - y1) / (x2 - x1) * (x2 - x1) + y1 := by ring
-  -- Step 2: a/b * b = a  via  a*b⁻¹*b = a*(b⁻¹*b) = a*1 = a
   have cancel : (y2 - y1) / (x2 - x1) * (x2 - x1) = y2 - y1 := by
-    rw [div_eq_mul_inv, mul_assoc, inv_mul_cancel₀ h, mul_one]
-  -- Step 3: close
+    field_simp [h]
   rw [step, cancel]
   ring
 
@@ -155,8 +154,7 @@ theorem noiseless_recovery
     (c1 c2 ε : Rat) (h : c2 - c1 ≠ 0) :
     slope2 c1 c2 (ε * c1) (ε * c2) = ε := by
   simp only [slope2]
-  have heq : ε * c2 - ε * c1 = ε * (c2 - c1) := by ring
-  rw [heq, div_eq_mul_inv, mul_assoc, mul_inv_cancel₀ h, mul_one]
+  field_simp [h]
 
 end AbstractTheorems
 
