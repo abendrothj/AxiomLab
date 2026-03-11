@@ -2,6 +2,24 @@
 
 > A bare-metal, memory-safe, and formally verified Rust runtime for autonomous AI scientists and self-driving laboratories.
 
+## Project Background
+
+**The Vision:** Autonomous scientific discovery requires three things to be simultaneously true:
+1. **Memory-safe execution** — no buffer overflows, use-after-free, or data races that could corrupt experimental results or crash mid-measurement
+2. **Formally verified algorithms** — numerical instabilities, specification drift, and unit mismatches must be impossible, not just unlikely
+3. **Real-time reasoning** — the system must observe outcomes, hypothesize new experiments, and decide what to measure next — all with bounded latency
+
+Most existing systems pick two. MatLab/Python excel at numerics and reasoning but sacrifice memory safety. Embedded systems gain safety but lose flexibility. Formal methods tools (Coq, Isabelle) verify correctness but struggle with real I/O, sensors, and hardware integration.
+
+**AxiomLab unifies all three.** It provides:
+- **Bare-metal Rust** for zero-overhead abstraction and POSIX I/O
+- **Verus + Lean** for formal guarantees on numerics, concurrency, and hardware bounds (29 proofs, zero `sorry`)
+- **LLM-driven proof synthesis** that autonomously refines Verus annotations until verification succeeds
+- **Aeneas integration** for end-to-end MIR→Lean translation
+- **Hardware agnostic** — runs on x86 servers with full Verus verification, and on Raspberry Pi (arm64) with Lean/Aeneas subset
+
+This is what it means to build a runtime *for* science, not despite it.
+
 ## Crate Map
 
 | Crate | Phase | Purpose |
@@ -13,6 +31,118 @@
 | `proof_synthesizer` | 3 | VeruSAGE-inspired observe→reason→act loop: invokes Verus compiler, parses diagnostics, asks LLM to refine proof annotations until verification succeeds. |
 | `aeneas_lean_semantics` | 4 | End-to-end Rust MIR → Aeneas → Lean 4 pipeline: MIR export, Aeneas translation, Lean type-checking. |
 
+## System Architecture & Flow
+
+### High-Level Data Flow
+
+```mermaid
+graph LR
+    A["Physical Experiment<br/>(sensors, hardware)"]
+    B["scientific_compute<br/>(numerics, FFT, OLS)"]
+    C["agent_runtime<br/>(reasoning, decisions)"]
+    D["verus_proofs<br/>(formal specs and invariants)"]
+    E["proof_synthesizer<br/>(observe-reason-act over Verus diagnostics)"]
+    F["aeneas_lean_semantics<br/>(MIR export -> Aeneas -> Lean checks)"]
+    G["Lean 4<br/>(type-check and theorem validation)"]
+    
+    A -->|raw measurements| B
+    B -->|analysis results| C
+    C -->|hypothesis| B
+    C -->|execute tool| C
+    D -->|verification failures| E
+    E -->|refined proof annotations| D
+    B -->|crate source for translation| F
+    F -->|generated .lean files| G
+    G -->|checked properties inform models| C
+    
+    style A fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
+    style B fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
+    style C fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
+    style D fill:#f8d7da,color:#111,stroke:#333,stroke-width:1px
+    style E fill:#e7d4f5,color:#111,stroke:#333,stroke-width:1px
+    style F fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
+    style G fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
+```
+
+### Proof Synthesis Loop (Observe → Reason → Act)
+
+```mermaid
+graph TD
+    A["Source Code"] -->|compile| B["Verus Compiler"]
+    B -->|success?| C{Verification<br/>Passed?}
+    C -->|yes| D["Proof Complete"]
+    C -->|no| E["Parse Diagnostics"]
+    E -->|errors + source| F["Send to LLM<br/>with History Trimming"]
+    F -->|candidate fix| G["Extract Code Block<br/>Largest Match"]
+    G -->|updated source| A
+    A -->|retry| B
+    
+    style A fill:#e7f3ff,color:#111,stroke:#333,stroke-width:1px
+    style B fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
+    style D fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
+    style E fill:#f8d7da,color:#111,stroke:#333,stroke-width:1px
+    style F fill:#e7d4f5,color:#111,stroke:#333,stroke-width:1px
+    style G fill:#ffe7ba,color:#111,stroke:#333,stroke-width:1px
+```
+
+### Agent Reasoning & Experiment Loop
+
+```mermaid
+graph TD
+    A["Experiment<br/>Queued"]
+    B["Run Measurement<br/>scientific_compute"]
+    C["Analyze Results<br/>ReasoningEngine"]
+    D{Outcome?}
+    E["Hypothesis:<br/>Try Nonlinear"]
+    F["Collect More<br/>Data"]
+    G["Result<br/>Confirmed"]
+    H["Critical Error<br/>Debug"]
+    I["Stop:<br/>Max Experiments Reached"]
+    
+    A --> B
+    B --> C
+    C --> D
+    D -->|TryNonlinear| E
+    E --> B
+    D -->|CollectMore| F
+    F --> B
+    D -->|Confirmed| G
+    D -->|Stop| I
+    D -->|Debug| H
+    
+    style A fill:#e7f3ff,color:#111,stroke:#333,stroke-width:1px
+    style G fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
+    style H fill:#f8d7da,color:#111,stroke:#333,stroke-width:1px
+    style B fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
+    style C fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
+    style I fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
+```
+
+### End-to-End Verification Pipeline
+
+```mermaid
+graph LR
+    A["Rust Crate Directory"]
+    B["cargo rustc -- --emit=mir"]
+    C["MIR Artifact (.mir)"]
+    D["aeneas --backend lean"]
+    E["Generated Lean Files (.lean)"]
+    F["lean check_all"]
+    G["Lean Type-Check Passed"]
+    
+    A --> B
+    B -->|success| C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    
+    style A fill:#e7f3ff,color:#111,stroke:#333,stroke-width:1px
+    style B fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
+    style G fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
+    style F fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
+```
+
 ## Quick Start
 
 ### Option A: Local (quick tests only — no formal verification)
@@ -23,7 +153,7 @@ cargo test
 #         11 tests skipped (require Verus, Aeneas, Lean)
 ```
 
-### Option B: Docker (full test suite with all verification tools) ⭐ Recommended
+### Option B: Docker (full test suite with all verification tools) Recommended
 ```bash
 # Build the container (includes Verus, Aeneas, Lean 4, Z3)
 docker compose build
@@ -74,18 +204,18 @@ docker compose run --rm axiomlab cargo test
 
 These improvements enable running the full test suite in Docker on both amd64 and arm64, and improve proof synthesis efficiency:
 
-**ARM / Docker support** ✅ 
+**ARM / Docker support**
 - Dockerfile stages 2–4 (Aeneas, Lean, runtime) removed `--platform=linux/amd64` pin
 - Uses `ARG TARGETARCH` in runtime stage: on amd64 Verus is available; on arm64 a graceful stub is installed
 - `docker-compose.yml` now builds natively for the host architecture
 - **Result**: Full Docker test suite works on Raspberry Pi (all tests except Verus pass natively on arm64)
 
-**Context window bloat** ✅
+**Context window bloat**
 - Agent now trims history to `[system_prompt] + [last 4 messages]` after each retry, preventing unbounded accumulation
 - Source code is included inline **only when ≤120 lines**; larger files include errors alone with instructions to respond via unified diff
 - **Result**: can run 10+ proof synthesis iterations without context window exhaustion
 
-**Code extraction robustness** ✅ 
+**Code extraction robustness**
 - `extract_rust_block()` now scans **all** ` ```rust ` fences and returns the **longest** block (not the first)
 - Handles LLM responses that include illustrative snippets before the main corrected file
 - **Result**: eliminates the fragile regex single-match bug
@@ -111,9 +241,9 @@ Verus only ships x86-linux binaries. On Raspberry Pi (arm64) it is unavailable. 
 **Status:** Docker container now builds and runs fully on arm64. **You can immediately deploy to Pi and run the full test suite** (except Verus, which requires amd64).
 
 **What works on Raspberry Pi:**
-- ✅ `docker compose build` — compiles everything natively
-- ✅ `docker compose run --rm axiomlab cargo test -- --include-ignored` — all tests except Verus pass
-- ✅ Lean theorem proving, Aeneas translation, agent reasoning, discovery experiments
+- `docker compose build` compiles everything natively
+- `docker compose run --rm axiomlab cargo test -- --include-ignored` runs all tests except Verus on arm64
+- Lean theorem proving, Aeneas translation, agent reasoning, and discovery experiments run on arm64
 - ❌ Verus (x86-only) — tests are properly skipped with clear error message
 
 **Quick deployment:**
