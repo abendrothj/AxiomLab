@@ -1,0 +1,6 @@
+{
+  "required_artifacts": ["ols_functional", "ols_rational"],
+  "require_zero_sorry": true,
+  "expected_git_commit": "a05dde9cedba8a0f00768a6c979fbb91bee9c0cc",
+  "expected_binary_hash": "9e2d6a780fd12a95d0f50f988100aae3b2bf07255a53f5cc4a6421ba088a9676"
+}

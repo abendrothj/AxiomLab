@@ -14,3 +14,4 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 scientific_compute = { path = "../scientific_compute" }
 physical_types = { path = "../physical_types" }
+proof_artifacts = { path = "../proof_artifacts" }

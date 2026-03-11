@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "generated_unix_secs": 1773265888,
+  "build": {
+    "git_commit": "a05dde9cedba8a0f00768a6c979fbb91bee9c0cc",
+    "binary_hash": "9e2d6a780fd12a95d0f50f988100aae3b2bf07255a53f5cc4a6421ba088a9676",
+    "workspace_hash": "5afa85b29a0e7f0e201eeb2f26f8fbe9c155bc603f961d27cf34615c981a4a5a"
+  },
+  "artifacts": [
+    {
+      "id": "ols_functional",
+      "source_path": "scientific_compute/src/discovery.rs",
+      "source_hash": "40c3f8ff5d96e421336eab6396d6d0f0d751e904a39df04eb0fc5cadedd63e76",
+      "mir_path": null,
+      "mir_hash": null,
+      "lean": [
+        {
+          "path": "lean4/OlsFunctional.lean",
+          "hash": "69dc7baf6963b84f4daae9ec097fcc07cec78575d8d788491970930378cfe26e",
+          "theorem_count": 0,
+          "sorry_count": 0,
+          "status": "Passed"
+        }
+      ],
+      "verus": null,
+      "theorem_count": 0,
+      "sorry_count": 0,
+      "status": "Passed",
+      "metadata": {
+        "criticality": "high",
+        "domain": "discovery"
+      }
+    },
+    {
+      "id": "ols_rational",
+      "source_path": "scientific_compute/src/discovery.rs",
+      "source_hash": "40c3f8ff5d96e421336eab6396d6d0f0d751e904a39df04eb0fc5cadedd63e76",
+      "mir_path": null,
+      "mir_hash": null,
+      "lean": [
+        {
+          "path": "lean4/OlsRational.lean",
+          "hash": "769e4a5d8d8096380b0649986fd309f32c7275290fd0ba3e7272aec29cf54f93",
+          "theorem_count": 15,
+          "sorry_count": 0,
+          "status": "Passed"
+        }
+      ],
+      "verus": null,
+      "theorem_count": 15,
+      "sorry_count": 0,
+      "status": "Passed",
+      "metadata": {
+        "criticality": "high",
+        "domain": "discovery"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "action": "move_arm",
+      "required_artifacts": [
+        "ols_functional",
+        "ols_rational"
+      ],
+      "rationale": "Only permit robotic actuation when discovery math proofs are valid"
+    },
+    {
+      "action": "dispense",
+      "required_artifacts": [
+        "ols_functional",
+        "ols_rational"
+      ],
+      "rationale": "Only permit liquid handling when discovery math proofs are valid"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ members = [
     "verus_proofs",
     "proof_synthesizer",
     "aeneas_lean_semantics",
+    "proof_artifacts",
 ]
 resolver = "2"
 

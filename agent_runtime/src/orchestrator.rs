@@ -11,6 +11,7 @@ use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
+use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -52,6 +53,8 @@ pub struct Orchestrator<L: LlmBackend> {
     sandbox: Sandbox,
     tools: ToolRegistry,
     config: OrchestratorConfig,
+    policy_engine: Option<RuntimePolicyEngine>,
+    policy_context: Option<ExecutionContext>,
 }
 
 impl<L: LlmBackend> Orchestrator<L> {
@@ -66,7 +69,20 @@ impl<L: LlmBackend> Orchestrator<L> {
             sandbox,
             tools,
             config,
+            policy_engine: None,
+            policy_context: None,
         }
+    }
+
+    /// Enable runtime proof-policy enforcement for tool calls.
+    pub fn with_runtime_policy(
+        mut self,
+        engine: RuntimePolicyEngine,
+        context: ExecutionContext,
+    ) -> Self {
+        self.policy_engine = Some(engine);
+        self.policy_context = Some(context);
+        self
     }
 
     /// Build the system prompt from tool specs.
@@ -181,6 +197,25 @@ impl<L: LlmBackend> Orchestrator<L> {
                 output: serde_json::Value::String(e.to_string()),
                 success: false,
             });
+        }
+
+        // Proof-policy check — action is allowed only when required proof
+        // artifacts are present, passed, and tied to this exact binary/commit.
+        if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
+            if let Err(e) = engine.authorize(tool_name, ctx) {
+                let report = engine.explain(tool_name);
+                return Some(ToolResult {
+                    name: tool_name.to_owned(),
+                    output: serde_json::json!({
+                        "error": e.to_string(),
+                        "decision": format!("{:?}", report.decision),
+                        "reason": report.reason,
+                        "policy": report.matched_policy,
+                        "artifacts_checked": report.artifacts_checked
+                    }),
+                    success: false,
+                });
+            }
         }
 
         let call = ToolCall {

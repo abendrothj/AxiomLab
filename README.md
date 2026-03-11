@@ -164,6 +164,22 @@ docker compose run --rm axiomlab cargo test -- --include-ignored
 #         Lean theorems, discovery experiments)
 ```
 
+### Production Proof Release Gate
+```bash
+./scripts/proof_release_gate.sh
+```
+
+This one command now executes the full proof release gate:
+- Generates a signed proof manifest and incremental cache under `.artifacts/proof/`
+- Enforces CI proof policy (required artifacts, zero `sorry`, build identity match)
+- Runs proof artifact subsystem tests
+- Runs runtime policy enforcement integration tests in `agent_runtime`
+
+Key outputs:
+- `.artifacts/proof/manifest.json`
+- `.artifacts/proof/cache.json`
+- `.artifacts/proof/policy.json`
+
 ## Docker Testing & Verification
 
 AxiomLab includes formal verification infrastructure (Verus, Aeneas, Lean 4, Z3) inside Docker.
