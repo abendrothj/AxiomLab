@@ -115,12 +115,27 @@ pub async fn synthesize_proof(
         let summary = diagnostics::summarize(&diags);
         warn!(attempt, errors = diags.len(), "Verus rejected — refining");
 
+        // Include full source only when it's short; on large files, the
+        // errors alone are usually sufficient context and the source can
+        // be supplied via diff in the reply.
+        let source_lines = current_source.lines().count();
+        let source_section = if source_lines <= 120 {
+            format!("\n\n## Current source ({source_lines} lines)\n```rust\n{current_source}\n```")
+        } else {
+            format!(
+                "\n\n## Current source\n({source_lines} lines — omitted to save context. \
+                 Respond with a unified diff only.)"
+            )
+        };
+
         let user_msg = format!(
-            "The following Rust source failed Verus verification.\n\n\
-             ## Source\n```rust\n{current_source}\n```\n\n\
-             ## Verus errors\n{summary}\n\n\
-             Fix the proof annotations so Verus accepts. \
-             Return ONLY the complete corrected Rust source inside ```rust ... ```."
+            "Verus verification failed (attempt {attempt}/{max}).\n\
+             ## Errors\n{summary}{source_section}\n\n\
+             Fix the proof annotations so Verus accepts.\n\
+             • If the source was included, you may return the complete corrected file \
+               in ```rust ... ``` OR a unified diff (`--- a/src\\n+++ b/src\\n@@ ...`).\n\
+             • If the source was omitted, respond with a unified diff only.",
+            max = config.max_retries,
         );
         history.push(Msg {
             role: "user".into(),
@@ -132,6 +147,14 @@ pub async fn synthesize_proof(
             role: "assistant".into(),
             content: reply.clone(),
         });
+
+        // Trim history to system prompt + the two most recent turns so the
+        // context window doesn't grow without bound across retries.
+        if history.len() > 5 {
+            let system = history[0].clone();
+            let recent = history[history.len() - 4..].to_vec();
+            history = std::iter::once(system).chain(recent).collect();
+        }
 
         // ── 3. Act: extract corrected source ──
         if let Some(code) = extract_rust_block(&reply) {
@@ -180,15 +203,28 @@ async fn llm_chat(
 }
 
 fn extract_rust_block(text: &str) -> Option<String> {
-    let start = text.find("```rust")?;
-    let code_start = start + 7;
-    let end = text[code_start..].find("```")?;
-    let code = text[code_start..code_start + end].trim();
-    if code.is_empty() {
-        None
-    } else {
-        Some(code.to_owned())
+    // Scan all ```rust ... ``` fences and return the *longest* one.
+    // LLMs sometimes emit a short illustrative snippet before the main
+    // corrected file; grabbing the largest block is more robust than
+    // grabbing the first.
+    let mut best: Option<String> = None;
+    let mut search = text;
+    while let Some(fence_start) = search.find("```rust") {
+        let code_start = fence_start + 7;
+        match search[code_start..].find("```") {
+            Some(end) => {
+                let code = search[code_start..code_start + end].trim();
+                if !code.is_empty()
+                    && best.as_ref().map_or(true, |b: &String| code.len() > b.len())
+                {
+                    best = Some(code.to_owned());
+                }
+                search = &search[code_start + end + 3..];
+            }
+            None => break,
+        }
     }
+    best
 }
 
 const SYSTEM_PROMPT: &str = "\

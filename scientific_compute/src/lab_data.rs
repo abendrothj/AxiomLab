@@ -20,7 +20,7 @@
 //! 500,0.35
 //! ```
 
-use std::io::{self, BufRead};
+use std::io;
 use std::str::FromStr;
 use thiserror::Error;
 

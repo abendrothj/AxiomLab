@@ -232,7 +232,7 @@ mod tests {
             max_experiments: 5,
         };
 
-        let (decision, _) = engine.decide_next_step(&result);
+        let (_decision, _) = engine.decide_next_step(&result);
         // After this call, experiment_count = 5, so next call should return Stop
         assert_eq!(engine.experiment_count, 5);
 

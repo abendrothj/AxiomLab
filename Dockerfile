@@ -26,8 +26,9 @@ RUN curl -fsSL \
     && chmod +x /opt/verus/verus-* -R 2>/dev/null; \
     find /opt/verus -type f -name 'verus' -executable | head -3
 
-# ── Stage 2: Build Aeneas + Charon (OCaml project) ───────────────
-FROM --platform=linux/amd64 ocaml/opam:debian-12-ocaml-5.2 AS aeneas-builder
+# ── Stage 2: Build Aeneas + Charon (OCaml project) ─────────────
+# No platform pin — builds natively on amd64, arm64, etc.
+FROM ocaml/opam:debian-12-ocaml-5.2 AS aeneas-builder
 
 RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
         cmake git curl build-essential pkg-config libssl-dev libgmp-dev \
@@ -49,8 +50,9 @@ WORKDIR /home/opam/aeneas
 RUN eval $(opam env) && make setup-charon
 RUN eval $(opam env) && make
 
-# ── Stage 3: Install elan + Lean 4 ───────────────────────────────
-FROM --platform=linux/amd64 debian:bookworm-slim AS lean-builder
+# ── Stage 3: Install elan + Lean 4 ─────────────────────────────
+# No platform pin — elan installs the correct Lean binary for the host arch.
+FROM debian:bookworm-slim AS lean-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates git \
@@ -64,8 +66,10 @@ RUN curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init
 
 RUN ${ELAN_HOME}/bin/lean --version
 
-# ── Stage 4: Final runtime image ─────────────────────────────────
-FROM --platform=linux/amd64 rust:1.85-bookworm AS runtime
+# ── Stage 4: Final runtime image ───────────────────────────────
+# No platform pin — runs natively on all supported arches.
+# Verus is x86-only; on arm64 a graceful stub is installed instead.
+FROM rust:1.85-bookworm AS runtime
 
 LABEL maintainer="AxiomLab" \
       description="Formally verified Rust runtime for autonomous scientific discovery"
@@ -74,17 +78,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev git libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Copy Verus (pre-built release) ──
+# ── Copy Verus (pre-built x86-linux release) ──
 COPY --from=verus-fetch /opt/verus /opt/verus
-# The zip extracts into a versioned directory. Symlink the binary.
-RUN VERUS_BIN=$(find /opt/verus -name 'verus' -type f | head -1) \
-    && ln -sf "$VERUS_BIN" /usr/local/bin/verus \
-    && Z3_BIN=$(find /opt/verus -name 'z3' -type f | head -1) \
-    && ln -sf "$Z3_BIN" /usr/local/bin/z3
+# Symlink Verus + Z3 only when running on amd64; install a graceful stub on
+# other architectures (arm64 / Raspberry Pi) so the rest of the toolchain works.
+ARG TARGETARCH
+RUN VERUS_BIN=$(find /opt/verus -name 'verus' -type f 2>/dev/null | head -1) \
+    && if [ "${TARGETARCH}" = "amd64" ] && [ -n "${VERUS_BIN}" ] && [ -x "${VERUS_BIN}" ]; then \
+        ln -sf "${VERUS_BIN}" /usr/local/bin/verus; \
+        Z3_BIN=$(find /opt/verus -name 'z3' -type f | head -1); \
+        [ -n "${Z3_BIN}" ] && ln -sf "${Z3_BIN}" /usr/local/bin/z3; \
+    else \
+        printf '#!/bin/sh\necho "Verus: not available on %s (x86-linux only)" "$(uname -m)" >&2\nexit 127\n' \
+            > /usr/local/bin/verus && chmod +x /usr/local/bin/verus; \
+        printf '#!/bin/sh\necho "Z3: not available on %s" "$(uname -m)" >&2\nexit 127\n' \
+            > /usr/local/bin/z3 && chmod +x /usr/local/bin/z3; \
+    fi
 
-# Verus needs a specific Rust toolchain to drive its internal compiler.
+# Verus needs a specific Rust toolchain to drive its internal compiler (x86 only).
 ARG VERUS_RUST_TOOLCHAIN=1.93.1-x86_64-unknown-linux-gnu
-RUN rustup install "${VERUS_RUST_TOOLCHAIN}"
+RUN if [ "${TARGETARCH}" = "amd64" ]; then \
+        rustup install "${VERUS_RUST_TOOLCHAIN}"; \
+    fi
 
 # ── Copy Aeneas binary + Charon ──
 COPY --from=aeneas-builder /home/opam/aeneas/bin/aeneas /usr/local/bin/aeneas

@@ -3,9 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      platforms:
-        - linux/amd64
-    platform: linux/amd64
+      # No explicit platform \u2014 Docker BuildKit will build for the host architecture.
+      # Verus is x86-linux only; on arm64 the Dockerfile installs a graceful stub.
+    # No platform pin \u2014 the container runs natively on the host (amd64 or arm64).
     container_name: axiomlab
     volumes:
       # Mount source for live editing (overrides COPY in Dockerfile)
