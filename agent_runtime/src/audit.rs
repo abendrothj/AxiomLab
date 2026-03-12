@@ -1,9 +1,10 @@
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use sha2::{Digest, Sha256};
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Serialize)]
 pub struct AuditEvent {
@@ -13,6 +14,15 @@ pub struct AuditEvent {
     pub decision: String,
     pub reason: String,
     pub success: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteAuditConfig {
+    url: String,
+    bearer_token: Option<String>,
+    retries: u32,
+    backoff_ms: u64,
+    timeout_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,7 +50,7 @@ struct HashInput<'a> {
     prev_hash: Option<&'a str>,
 }
 
-pub fn emit_jsonl(path: &str, event: &AuditEvent) -> Result<(), std::io::Error> {
+pub fn emit_jsonl(path: &str, event: &AuditEvent) -> Result<String, std::io::Error> {
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -62,6 +72,54 @@ pub fn emit_jsonl(path: &str, event: &AuditEvent) -> Result<(), std::io::Error> 
     let line = serde_json::to_string(&persisted)
         .map_err(|e| std::io::Error::other(format!("serialize audit event: {e}")))?;
     writeln!(f, "{}", line)?;
+    Ok(line)
+}
+
+pub async fn emit_remote_with_retry(payload_line: &str) -> Result<(), String> {
+    let Some(cfg) = remote_config_from_env() else {
+        return Ok(());
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(cfg.timeout_ms))
+        .build()
+        .map_err(|e| format!("build audit HTTP client: {e}"))?;
+
+    for attempt in 0..=cfg.retries {
+        let mut req = client
+            .post(&cfg.url)
+            .header("content-type", "application/json")
+            .body(payload_line.to_owned());
+        if let Some(token) = &cfg.bearer_token {
+            req = req.bearer_auth(token);
+        }
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(resp) => {
+                if attempt == cfg.retries {
+                    return Err(format!(
+                        "remote audit sink returned HTTP {} after {} attempts",
+                        resp.status(),
+                        cfg.retries + 1
+                    ));
+                }
+            }
+            Err(e) => {
+                if attempt == cfg.retries {
+                    return Err(format!(
+                        "remote audit sink request failed after {} attempts: {}",
+                        cfg.retries + 1,
+                        e
+                    ));
+                }
+            }
+        }
+
+        let backoff = cfg.backoff_ms.saturating_mul((attempt + 1) as u64);
+        sleep(Duration::from_millis(backoff)).await;
+    }
+
     Ok(())
 }
 
@@ -185,6 +243,30 @@ pub fn trace_id(prefix: &str) -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{}-{}", prefix, nanos)
+}
+
+fn remote_config_from_env() -> Option<RemoteAuditConfig> {
+    let url = std::env::var("AXIOMLAB_AUDIT_REMOTE_URL").ok()?;
+    let retries = std::env::var("AXIOMLAB_AUDIT_REMOTE_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(3);
+    let backoff_ms = std::env::var("AXIOMLAB_AUDIT_REMOTE_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(200);
+    let timeout_ms = std::env::var("AXIOMLAB_AUDIT_REMOTE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2000);
+
+    Some(RemoteAuditConfig {
+        url,
+        bearer_token: std::env::var("AXIOMLAB_AUDIT_REMOTE_TOKEN").ok(),
+        retries,
+        backoff_ms,
+        timeout_ms,
+    })
 }
 
 #[cfg(test)]

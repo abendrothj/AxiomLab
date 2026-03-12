@@ -7,7 +7,7 @@
 //! 4. Validate actions against the sandbox.
 //! 5. Execute tool calls and advance the experiment lifecycle.
 
-use crate::audit::{AuditEvent, emit_jsonl, trace_id};
+use crate::audit::{AuditEvent, emit_jsonl, emit_remote_with_retry, trace_id};
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::sandbox::Sandbox;
@@ -193,29 +193,10 @@ impl<L: LlmBackend> Orchestrator<L> {
         let tool_name = parsed.get("tool")?.as_str()?;
         let params = parsed.get("params")?.clone();
 
-        let audit = |cfg: &OrchestratorConfig, action: &str, decision: &str, reason: &str, success: bool| {
-            if let Some(path) = &cfg.audit_log_path {
-                let _ = emit_jsonl(
-                    path,
-                    &AuditEvent {
-                        unix_secs: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        trace_id: trace_id(action),
-                        action: action.to_owned(),
-                        decision: decision.to_owned(),
-                        reason: reason.to_owned(),
-                        success,
-                    },
-                );
-            }
-        };
-
         // Sandbox check — the tool name must be on the allowlist.
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
-            audit(&self.config, tool_name, "deny", &e.to_string(), false);
+            self.audit_decision(tool_name, "deny", &e.to_string(), false).await;
             return Some(ToolResult {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(e.to_string()),
@@ -227,7 +208,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         let high_risk = matches!(tool_name, "move_arm" | "dispense");
         if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
             let msg = "high-risk action denied: runtime proof policy is not configured";
-            audit(&self.config, tool_name, "deny", msg, false);
+            self.audit_decision(tool_name, "deny", msg, false).await;
             return Some(ToolResult {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(msg.into()),
@@ -240,7 +221,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
-                audit(&self.config, tool_name, "deny", &report.reason, false);
+                self.audit_decision(tool_name, "deny", &report.reason, false).await;
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
                     output: serde_json::json!({
@@ -255,13 +236,40 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
         }
 
-        audit(&self.config, tool_name, "allow", "policy and sandbox checks passed", true);
+        self.audit_decision(tool_name, "allow", "policy and sandbox checks passed", true).await;
 
         let call = ToolCall {
             name: tool_name.to_owned(),
             params,
         };
         Some(self.tools.dispatch(&call).await)
+    }
+
+    async fn audit_decision(&self, action: &str, decision: &str, reason: &str, success: bool) {
+        let event = AuditEvent {
+            unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            trace_id: trace_id(action),
+            action: action.to_owned(),
+            decision: decision.to_owned(),
+            reason: reason.to_owned(),
+            success,
+        };
+
+        let mut payload_line = serde_json::to_string(&event).unwrap_or_default();
+
+        if let Some(path) = &self.config.audit_log_path {
+            match emit_jsonl(path, &event) {
+                Ok(line) => payload_line = line,
+                Err(e) => warn!(error = %e, "failed to write local audit event"),
+            }
+        }
+
+        if let Err(e) = emit_remote_with_retry(&payload_line).await {
+            warn!(error = %e, "failed to mirror audit event to remote sink");
+        }
     }
 
     fn advance_to_completion(
