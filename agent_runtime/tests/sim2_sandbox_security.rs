@@ -19,6 +19,7 @@ use agent_runtime::tools::{ToolRegistry, register_lab_tools};
 use agent_runtime::llm::{ChatMessage, LlmBackend, LlmError};
 use agent_runtime::experiment::Experiment;
 use agent_runtime::orchestrator::{Orchestrator, OrchestratorConfig};
+use agent_runtime::capabilities::CapabilityPolicy;
 use std::path::{Path, PathBuf};
 
 // ─────────────────────────────────────────────────────────────────
@@ -205,6 +206,7 @@ async fn sim2_orchestrator_blocks_rogue_tool_then_allows_legit() {
         code_gen_temperature: 0.0,
         reasoning_temperature: 0.0,
         audit_log_path: None,
+        capability_policy: None,
     };
 
     let orch = Orchestrator::new(llm, sandbox, tools, config);
@@ -219,4 +221,47 @@ async fn sim2_orchestrator_blocks_rogue_tool_then_allows_legit() {
         "Orchestrator should continue past blocked tool calls: {result:?}"
     );
     println!("✓ Orchestrator: blocked exec_shell, allowed read_sensor, completed experiment");
+}
+
+/// LLM that calls move_arm with an out-of-bounds coordinate.
+struct OutOfBoundsArmLlm;
+
+impl LlmBackend for OutOfBoundsArmLlm {
+    fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _temperature: f64,
+    ) -> impl std::future::Future<Output = Result<String, LlmError>> + Send {
+        let turn = messages.iter().filter(|m| m.role == "assistant").count();
+        let response = match turn {
+            0 => r#"{"tool":"move_arm","params":{"x":999.0,"y":10.0,"z":10.0}}"#.to_string(),
+            _ => r#"{"done": true, "summary": "finished"}"#.to_string(),
+        };
+        async move { Ok(response) }
+    }
+}
+
+#[tokio::test]
+async fn sim2_orchestrator_blocks_out_of_bounds_motion() {
+    let llm = OutOfBoundsArmLlm;
+    let sandbox = lab_sandbox();
+    let mut tools = ToolRegistry::new();
+    register_lab_tools(&mut tools);
+
+    let config = OrchestratorConfig {
+        max_iterations: 3,
+        code_gen_temperature: 0.0,
+        reasoning_temperature: 0.0,
+        audit_log_path: None,
+        capability_policy: Some(CapabilityPolicy::default_lab()),
+    };
+
+    let orch = Orchestrator::new(llm, sandbox, tools, config);
+    let mut exp = Experiment::new("sim2-capability", "capability bounds check");
+
+    let result = orch.run_experiment(&mut exp).await;
+    assert!(
+        result.is_ok(),
+        "Orchestrator should continue after capability-blocked motion: {result:?}"
+    );
 }

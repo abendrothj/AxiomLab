@@ -8,6 +8,7 @@
 //! 5. Execute tool calls and advance the experiment lifecycle.
 
 use crate::audit::{AuditEvent, emit_jsonl, emit_remote_with_retry, trace_id};
+use crate::capabilities::CapabilityPolicy;
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::sandbox::Sandbox;
@@ -38,6 +39,8 @@ pub struct OrchestratorConfig {
     pub reasoning_temperature: f64,
     /// Optional JSONL audit log path for action allow/deny events.
     pub audit_log_path: Option<String>,
+    /// Optional per-tool capability bounds (workspace geometry, max dispense volume, etc.).
+    pub capability_policy: Option<CapabilityPolicy>,
 }
 
 impl Default for OrchestratorConfig {
@@ -47,6 +50,7 @@ impl Default for OrchestratorConfig {
             code_gen_temperature: 0.2,
             reasoning_temperature: 0.7,
             audit_log_path: std::env::var("AXIOMLAB_AUDIT_LOG").ok(),
+            capability_policy: Some(CapabilityPolicy::default_lab()),
         }
     }
 }
@@ -202,6 +206,18 @@ impl<L: LlmBackend> Orchestrator<L> {
                 output: serde_json::Value::String(e.to_string()),
                 success: false,
             });
+        }
+
+        // Capability check — tool parameters must remain within lab hardware bounds.
+        if let Some(capability) = &self.config.capability_policy {
+            if let Err(e) = capability.validate(tool_name, &params) {
+                self.audit_decision(tool_name, "deny", &e, false).await;
+                return Some(ToolResult {
+                    name: tool_name.to_owned(),
+                    output: serde_json::Value::String(e),
+                    success: false,
+                });
+            }
         }
 
         // Fail-closed mode for high-risk actions when policy is missing.

@@ -13,3 +13,4 @@ pub mod experiment;
 pub mod orchestrator;
 pub mod reasoning;
 pub mod audit;
+pub mod capabilities;

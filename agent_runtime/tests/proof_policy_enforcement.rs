@@ -112,6 +112,7 @@ async fn proof_policy_blocks_action_when_artifact_failed() {
             code_gen_temperature: 0.0,
             reasoning_temperature: 0.0,
             audit_log_path: None,
+            capability_policy: None,
         },
     )
     .with_runtime_policy(engine, ctx);
@@ -146,6 +147,7 @@ async fn proof_policy_allows_action_when_artifact_passed() {
             code_gen_temperature: 0.0,
             reasoning_temperature: 0.0,
             audit_log_path: None,
+            capability_policy: None,
         },
     )
     .with_runtime_policy(engine, ctx);
