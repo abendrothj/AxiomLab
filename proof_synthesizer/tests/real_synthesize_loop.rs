@@ -44,10 +44,19 @@ fn main() {
 
 fn verus_available() -> bool {
     find_verus().ok().is_some_and(|p| {
-        if p.exists() {
-            return true;
+        match std::process::Command::new(&p).arg("--version").output() {
+            Ok(out) => {
+                let txt = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                out.status.success()
+                    && !txt.contains("x86-linux only")
+                    && !txt.contains("not available")
+            }
+            Err(_) => false,
         }
-        std::process::Command::new(&p).arg("--version").output().is_ok()
     })
 }
 

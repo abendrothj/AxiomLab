@@ -6,4 +6,5 @@
 # Lean build cache
 lean4/.lake/packages/
 lean4/.lake/build/
+lean4/.lake/config/
 

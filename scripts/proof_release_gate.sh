@@ -6,6 +6,8 @@ cd "$ROOT_DIR"
 
 OUT_DIR="${OUT_DIR:-.artifacts/proof}"
 mkdir -p "$OUT_DIR"
+REPLAY_DIR="$OUT_DIR/replay_bundle"
+mkdir -p "$REPLAY_DIR"
 
 MANIFEST_PATH="$OUT_DIR/manifest.json"
 SIGNED_MANIFEST_PATH="$OUT_DIR/manifest.signed.json"
@@ -15,6 +17,9 @@ POLICY_PATH="$OUT_DIR/policy.json"
 PRIVATE_KEY_PATH="$OUT_DIR/manifest_signing_key.private.b64"
 PUBLIC_KEY_PATH="$OUT_DIR/manifest_signing_key.public.b64"
 AUDIT_LOG_PATH="$OUT_DIR/runtime_audit.jsonl"
+APPROVAL_BUNDLE_INPUT="${AXIOMLAB_APPROVAL_BUNDLE_PATH:-}"
+APPROVAL_BUNDLE_PATH="$REPLAY_DIR/approval_bundle.json"
+APPROVAL_REPORT_PATH="$REPLAY_DIR/approval_verification.json"
 
 if command -v git >/dev/null 2>&1; then
   GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -146,12 +151,43 @@ cargo run -p proof_artifacts --bin proofctl -- gate \
 echo "[7/8] Running proof-artifact subsystem tests"
 cargo test -p proof_artifacts -- --nocapture
 
-echo "[8/9] Running runtime policy + sandbox integration tests"
+echo "[8/10] Running runtime policy + sandbox integration tests"
 AXIOMLAB_AUDIT_LOG="$AUDIT_LOG_PATH" cargo test -p agent_runtime proof_policy -- --nocapture
 AXIOMLAB_AUDIT_LOG="$AUDIT_LOG_PATH" cargo test -p agent_runtime sim2_orchestrator -- --nocapture
 
-echo "[9/9] Verifying tamper-evident runtime audit chain"
+echo "[9/10] Verifying tamper-evident runtime audit chain"
 cargo run -p agent_runtime --bin auditctl -- verify --path "$AUDIT_LOG_PATH"
+
+echo "[10/10] Exporting replayable approval artifacts"
+cp "$SIGNED_MANIFEST_PATH" "$REPLAY_DIR/manifest.signed.json"
+if [[ -f "$AUDIT_LOG_PATH" ]]; then
+  cp "$AUDIT_LOG_PATH" "$REPLAY_DIR/runtime_audit.jsonl"
+else
+  : > "$REPLAY_DIR/runtime_audit.jsonl"
+fi
+
+if [[ -n "$APPROVAL_BUNDLE_INPUT" ]]; then
+  cp "$APPROVAL_BUNDLE_INPUT" "$APPROVAL_BUNDLE_PATH"
+  cargo run -p agent_runtime --bin approvalctl -- verify \
+    --bundle "$APPROVAL_BUNDLE_PATH" \
+    --action "move_arm" \
+    --risk-class "Actuation" \
+    --git-commit "$GIT_COMMIT" \
+    --binary-hash "$BINARY_HASH" \
+    --out "$APPROVAL_REPORT_PATH"
+else
+  echo "[]" > "$APPROVAL_BUNDLE_PATH"
+  cat > "$APPROVAL_REPORT_PATH" <<EOF_JSON
+{
+  "action": "move_arm",
+  "risk_class": "Actuation",
+  "passed": false,
+  "approval_ids": [],
+  "error": "no approval bundle provided (set AXIOMLAB_APPROVAL_BUNDLE_PATH to verify signatures)"
+}
+EOF_JSON
+fi
 
 echo "Release gate passed. Signed manifest: $SIGNED_MANIFEST_PATH"
 echo "Audit log: $AUDIT_LOG_PATH"
+echo "Replay bundle: $REPLAY_DIR"

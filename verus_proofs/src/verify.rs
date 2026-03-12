@@ -22,10 +22,11 @@ pub struct VerificationResult {
 }
 
 /// Locate the Verus binary from `VERUS_PATH` env var or `$PATH`.
+/// Returns `None` if Verus is not found or is an arm64 stub (x86-only build).
 pub fn find_verus() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("VERUS_PATH") {
         let path = PathBuf::from(&p);
-        if path.exists() {
+        if path.exists() && verus_works(&path) {
             return Some(path);
         }
     }
@@ -36,6 +37,25 @@ pub fn find_verus() -> Option<PathBuf> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+        .filter(|p| verus_works(p))
+}
+
+/// Returns true only when `verus --version` succeeds and does not report
+/// an architecture mismatch (e.g. the arm64 stub that ships in Docker).
+fn verus_works(path: &Path) -> bool {
+    match Command::new(path).arg("--version").output() {
+        Ok(out) => {
+            let txt = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out.status.success()
+                && !txt.contains("x86-linux only")
+                && !txt.contains("not available")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Locate the `verus_verified/` directory relative to the workspace root.
