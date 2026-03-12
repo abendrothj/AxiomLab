@@ -1,7 +1,7 @@
 use proof_artifacts::cache::ProofCache;
 use proof_artifacts::ci::{CiGatePolicy, evaluate_ci_gate};
 use proof_artifacts::generator::{ArtifactInput, GenerateRequest, ManifestGenerator};
-use proof_artifacts::manifest::{ActionPolicy, ArtifactStatus, BuildIdentity};
+use proof_artifacts::manifest::{ActionPolicy, ArtifactStatus, BuildIdentity, RiskClass};
 use proof_artifacts::policy::{ExecutionContext, PolicyDecision, RuntimePolicyEngine};
 use std::collections::BTreeMap;
 use std::fs;
@@ -29,6 +29,9 @@ fn full_pipeline_manifest_gate_policy_explain_cache() {
             git_commit: "abc123".into(),
             binary_hash: "binhash".into(),
             workspace_hash: "wshash".into(),
+            container_image_digest: Some("img:sha256:abc".into()),
+            device_id: Some("rig-01".into()),
+            firmware_version: Some("v1.2.3".into()),
         },
         artifacts: vec![ArtifactInput {
             id: "arm_safety".into(),
@@ -40,6 +43,7 @@ fn full_pipeline_manifest_gate_policy_explain_cache() {
         }],
         actions: vec![ActionPolicy {
             action: "move_arm".into(),
+            risk_class: RiskClass::Actuation,
             required_artifacts: vec!["arm_safety".into()],
             rationale: "Arm movement requires verified bound proofs".into(),
         }],
@@ -62,14 +66,20 @@ fn full_pipeline_manifest_gate_policy_explain_cache() {
         require_zero_sorry: true,
         expected_git_commit: Some("abc123".into()),
         expected_binary_hash: Some("binhash".into()),
+        expected_workspace_hash: Some("wshash".into()),
+        expected_container_image_digest: Some("img:sha256:abc".into()),
+        max_manifest_age_secs: None,
     };
     let gate = evaluate_ci_gate(&manifest, &policy);
     assert!(gate.passed, "violations: {:?}", gate.violations);
 
-    let engine = RuntimePolicyEngine::new(manifest.clone());
+    let engine = RuntimePolicyEngine::new_trusted(manifest.clone());
     let ctx = ExecutionContext {
         git_commit: "abc123".into(),
         binary_hash: "binhash".into(),
+        container_image_digest: Some("img:sha256:abc".into()),
+        device_id: Some("rig-01".into()),
+        firmware_version: Some("v1.2.3".into()),
     };
     engine.authorize("move_arm", &ctx).unwrap();
 

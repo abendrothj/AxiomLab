@@ -4,7 +4,7 @@ use agent_runtime::orchestrator::{Orchestrator, OrchestratorConfig};
 use agent_runtime::sandbox::{ResourceLimits, Sandbox};
 use agent_runtime::tools::{ToolRegistry, register_lab_tools};
 use proof_artifacts::manifest::{
-    ActionPolicy, ArtifactStatus, BuildIdentity, ProofArtifact, ProofManifest,
+    ActionPolicy, ArtifactStatus, BuildIdentity, ProofArtifact, ProofManifest, RiskClass,
 };
 use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
 use std::collections::BTreeMap;
@@ -61,6 +61,9 @@ fn manifest_for(action_status: ArtifactStatus) -> ProofManifest {
             git_commit: "git123".into(),
             binary_hash: "bin123".into(),
             workspace_hash: "ws123".into(),
+            container_image_digest: Some("img:sha256:test".into()),
+            device_id: Some("rig-test".into()),
+            firmware_version: Some("fw-test".into()),
         },
         artifacts: vec![ProofArtifact {
             id: "arm_safety".into(),
@@ -77,6 +80,7 @@ fn manifest_for(action_status: ArtifactStatus) -> ProofManifest {
         }],
         actions: vec![ActionPolicy {
             action: "move_arm".into(),
+            risk_class: RiskClass::Actuation,
             required_artifacts: vec!["arm_safety".into()],
             rationale: "Arm actuation requires arm safety proof chain".into(),
         }],
@@ -90,10 +94,13 @@ async fn proof_policy_blocks_action_when_artifact_failed() {
     let mut tools = ToolRegistry::new();
     register_lab_tools(&mut tools);
 
-    let engine = RuntimePolicyEngine::new(manifest_for(ArtifactStatus::Failed));
+    let engine = RuntimePolicyEngine::new_trusted(manifest_for(ArtifactStatus::Failed));
     let ctx = ExecutionContext {
         git_commit: "git123".into(),
         binary_hash: "bin123".into(),
+        container_image_digest: Some("img:sha256:test".into()),
+        device_id: Some("rig-test".into()),
+        firmware_version: Some("fw-test".into()),
     };
 
     let orch = Orchestrator::new(
@@ -104,6 +111,7 @@ async fn proof_policy_blocks_action_when_artifact_failed() {
             max_iterations: 3,
             code_gen_temperature: 0.0,
             reasoning_temperature: 0.0,
+            audit_log_path: None,
         },
     )
     .with_runtime_policy(engine, ctx);
@@ -120,10 +128,13 @@ async fn proof_policy_allows_action_when_artifact_passed() {
     let mut tools = ToolRegistry::new();
     register_lab_tools(&mut tools);
 
-    let engine = RuntimePolicyEngine::new(manifest_for(ArtifactStatus::Passed));
+    let engine = RuntimePolicyEngine::new_trusted(manifest_for(ArtifactStatus::Passed));
     let ctx = ExecutionContext {
         git_commit: "git123".into(),
         binary_hash: "bin123".into(),
+        container_image_digest: Some("img:sha256:test".into()),
+        device_id: Some("rig-test".into()),
+        firmware_version: Some("fw-test".into()),
     };
 
     let orch = Orchestrator::new(
@@ -134,6 +145,7 @@ async fn proof_policy_allows_action_when_artifact_passed() {
             max_iterations: 3,
             code_gen_temperature: 0.0,
             reasoning_temperature: 0.0,
+            audit_log_path: None,
         },
     )
     .with_runtime_policy(engine, ctx);

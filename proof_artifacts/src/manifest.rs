@@ -18,6 +18,9 @@ pub struct BuildIdentity {
     pub git_commit: String,
     pub binary_hash: String,
     pub workspace_hash: String,
+    pub container_image_digest: Option<String>,
+    pub device_id: Option<String>,
+    pub firmware_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,8 +55,17 @@ pub struct ProofArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RiskClass {
+    ReadOnly,
+    LiquidHandling,
+    Actuation,
+    Destructive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionPolicy {
     pub action: String,
+    pub risk_class: RiskClass,
     pub required_artifacts: Vec<String>,
     pub rationale: String,
 }

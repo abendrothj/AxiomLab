@@ -1,1 +1,9 @@
 /target
+
+# Generated proof artifacts (runtime outputs, not source of truth)
+.artifacts/
+
+# Lean build cache
+lean4/.lake/packages/
+lean4/.lake/build/
+

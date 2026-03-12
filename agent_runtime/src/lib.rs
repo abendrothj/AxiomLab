@@ -12,3 +12,4 @@ pub mod tools;
 pub mod experiment;
 pub mod orchestrator;
 pub mod reasoning;
+pub mod audit;

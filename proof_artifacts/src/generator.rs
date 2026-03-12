@@ -286,6 +286,9 @@ mod tests {
                 git_commit: "g".into(),
                 binary_hash: "b".into(),
                 workspace_hash: "w".into(),
+                container_image_digest: None,
+                device_id: None,
+                firmware_version: None,
             },
             artifacts: vec![ArtifactInput {
                 id: "id".into(),

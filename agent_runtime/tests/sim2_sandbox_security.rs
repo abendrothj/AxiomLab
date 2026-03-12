@@ -204,6 +204,7 @@ async fn sim2_orchestrator_blocks_rogue_tool_then_allows_legit() {
         max_iterations: 5,
         code_gen_temperature: 0.0,
         reasoning_temperature: 0.0,
+        audit_log_path: None,
     };
 
     let orch = Orchestrator::new(llm, sandbox, tools, config);

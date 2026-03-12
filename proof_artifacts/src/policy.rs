@@ -1,10 +1,13 @@
-use crate::manifest::{ArtifactStatus, ProofArtifact, ProofManifest};
+use crate::manifest::{ArtifactStatus, ProofArtifact, ProofManifest, RiskClass};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
     pub git_commit: String,
     pub binary_hash: String,
+    pub container_image_digest: Option<String>,
+    pub device_id: Option<String>,
+    pub firmware_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +36,22 @@ pub enum RuntimePolicyError {
 #[derive(Debug, Clone)]
 pub struct RuntimePolicyEngine {
     manifest: ProofManifest,
+    signature_verified: bool,
 }
 
 impl RuntimePolicyEngine {
     pub fn new(manifest: ProofManifest) -> Self {
-        Self { manifest }
+        Self {
+            manifest,
+            signature_verified: false,
+        }
+    }
+
+    pub fn new_trusted(manifest: ProofManifest) -> Self {
+        Self {
+            manifest,
+            signature_verified: true,
+        }
     }
 
     pub fn manifest(&self) -> &ProofManifest {
@@ -49,6 +63,11 @@ impl RuntimePolicyEngine {
         action: &str,
         ctx: &ExecutionContext,
     ) -> Result<(), RuntimePolicyError> {
+        if !self.signature_verified {
+            return Err(RuntimePolicyError::ActionDenied(
+                "manifest signature has not been verified".into(),
+            ));
+        }
         self.validate_build_identity(ctx)?;
         let report = self.explain(action);
         if report.decision == PolicyDecision::Allow {
@@ -73,6 +92,7 @@ impl RuntimePolicyEngine {
         let mut missing = Vec::new();
         let mut bad = Vec::new();
         let mut checked = Vec::new();
+        let mut has_verus_artifact = false;
 
         for artifact_id in &policy.required_artifacts {
             match self.manifest.artifacts.iter().find(|a| &a.id == artifact_id) {
@@ -87,6 +107,9 @@ impl RuntimePolicyEngine {
                             a.sorry_count
                         ));
                     }
+                    if a.verus.is_some() {
+                        has_verus_artifact = true;
+                    }
                 }
                 None => missing.push(artifact_id.clone()),
             }
@@ -100,6 +123,12 @@ impl RuntimePolicyEngine {
                 matched_policy: Some(policy.rationale.clone()),
                 artifacts_checked: checked,
             };
+        }
+
+        if matches!(policy.risk_class, RiskClass::Actuation | RiskClass::Destructive)
+            && !has_verus_artifact
+        {
+            bad.push("high-risk action requires at least one Verus-backed artifact".into());
         }
 
         if !bad.is_empty() {
@@ -134,6 +163,34 @@ impl RuntimePolicyEngine {
                 self.manifest.build.binary_hash, ctx.binary_hash
             )));
         }
+
+        if let Some(expected) = &self.manifest.build.container_image_digest {
+            if ctx.container_image_digest.as_deref() != Some(expected.as_str()) {
+                return Err(RuntimePolicyError::BuildIdentityMismatch(format!(
+                    "container image digest mismatch: manifest={}, runtime={:?}",
+                    expected, ctx.container_image_digest
+                )));
+            }
+        }
+
+        if let Some(expected) = &self.manifest.build.device_id {
+            if ctx.device_id.as_deref() != Some(expected.as_str()) {
+                return Err(RuntimePolicyError::BuildIdentityMismatch(format!(
+                    "device id mismatch: manifest={}, runtime={:?}",
+                    expected, ctx.device_id
+                )));
+            }
+        }
+
+        if let Some(expected) = &self.manifest.build.firmware_version {
+            if ctx.firmware_version.as_deref() != Some(expected.as_str()) {
+                return Err(RuntimePolicyError::BuildIdentityMismatch(format!(
+                    "firmware mismatch: manifest={}, runtime={:?}",
+                    expected, ctx.firmware_version
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -146,7 +203,7 @@ impl RuntimePolicyEngine {
 mod tests {
     use super::*;
     use crate::manifest::{
-        ActionPolicy, BuildIdentity, ProofArtifact, ProofManifest,
+        ActionPolicy, BuildIdentity, ProofArtifact, ProofManifest, RiskClass,
     };
     use std::collections::BTreeMap;
 
@@ -158,6 +215,9 @@ mod tests {
                 git_commit: "g".into(),
                 binary_hash: "b".into(),
                 workspace_hash: "w".into(),
+                container_image_digest: Some("img".into()),
+                device_id: Some("dev".into()),
+                firmware_version: Some("fw".into()),
             },
             artifacts: vec![ProofArtifact {
                 id: "arm_safety".into(),
@@ -166,7 +226,11 @@ mod tests {
                 mir_path: None,
                 mir_hash: None,
                 lean: vec![],
-                verus: None,
+                verus: Some(crate::manifest::VerusArtifact {
+                    path: "verus_verified/arm_safety.rs".into(),
+                    hash: "vh".into(),
+                    status: ArtifactStatus::Passed,
+                }),
                 theorem_count: 1,
                 sorry_count: 0,
                 status: ArtifactStatus::Passed,
@@ -174,6 +238,7 @@ mod tests {
             }],
             actions: vec![ActionPolicy {
                 action: "move_arm".into(),
+                risk_class: RiskClass::Actuation,
                 required_artifacts: vec!["arm_safety".into()],
                 rationale: "hardware safety constraint".into(),
             }],
@@ -182,10 +247,13 @@ mod tests {
 
     #[test]
     fn authorizes_when_proof_chain_is_valid() {
-        let e = RuntimePolicyEngine::new(manifest());
+        let e = RuntimePolicyEngine::new_trusted(manifest());
         let ctx = ExecutionContext {
             git_commit: "g".into(),
             binary_hash: "b".into(),
+            container_image_digest: Some("img".into()),
+            device_id: Some("dev".into()),
+            firmware_version: Some("fw".into()),
         };
         assert!(e.authorize("move_arm", &ctx).is_ok());
     }

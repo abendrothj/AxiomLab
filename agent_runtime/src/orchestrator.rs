@@ -7,6 +7,7 @@
 //! 4. Validate actions against the sandbox.
 //! 5. Execute tool calls and advance the experiment lifecycle.
 
+use crate::audit::{AuditEvent, emit_jsonl, trace_id};
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::sandbox::Sandbox;
@@ -35,6 +36,8 @@ pub struct OrchestratorConfig {
     pub code_gen_temperature: f64,
     /// LLM temperature for planning / reasoning.
     pub reasoning_temperature: f64,
+    /// Optional JSONL audit log path for action allow/deny events.
+    pub audit_log_path: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -43,6 +46,7 @@ impl Default for OrchestratorConfig {
             max_iterations: 20,
             code_gen_temperature: 0.2,
             reasoning_temperature: 0.7,
+            audit_log_path: std::env::var("AXIOMLAB_AUDIT_LOG").ok(),
         }
     }
 }
@@ -189,12 +193,44 @@ impl<L: LlmBackend> Orchestrator<L> {
         let tool_name = parsed.get("tool")?.as_str()?;
         let params = parsed.get("params")?.clone();
 
+        let audit = |cfg: &OrchestratorConfig, action: &str, decision: &str, reason: &str, success: bool| {
+            if let Some(path) = &cfg.audit_log_path {
+                let _ = emit_jsonl(
+                    path,
+                    &AuditEvent {
+                        unix_secs: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        trace_id: trace_id(action),
+                        action: action.to_owned(),
+                        decision: decision.to_owned(),
+                        reason: reason.to_owned(),
+                        success,
+                    },
+                );
+            }
+        };
+
         // Sandbox check — the tool name must be on the allowlist.
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
+            audit(&self.config, tool_name, "deny", &e.to_string(), false);
             return Some(ToolResult {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(e.to_string()),
+                success: false,
+            });
+        }
+
+        // Fail-closed mode for high-risk actions when policy is missing.
+        let high_risk = matches!(tool_name, "move_arm" | "dispense");
+        if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
+            let msg = "high-risk action denied: runtime proof policy is not configured";
+            audit(&self.config, tool_name, "deny", msg, false);
+            return Some(ToolResult {
+                name: tool_name.to_owned(),
+                output: serde_json::Value::String(msg.into()),
                 success: false,
             });
         }
@@ -204,6 +240,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
+                audit(&self.config, tool_name, "deny", &report.reason, false);
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
                     output: serde_json::json!({
@@ -217,6 +254,8 @@ impl<L: LlmBackend> Orchestrator<L> {
                 });
             }
         }
+
+        audit(&self.config, tool_name, "allow", "policy and sandbox checks passed", true);
 
         let call = ToolCall {
             name: tool_name.to_owned(),

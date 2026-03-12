@@ -1,0 +1,27 @@
+name: Proof Release Gate
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  proof-release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run proof release gate
+        env:
+          AXIOMLAB_CONTAINER_IMAGE_DIGEST: "ci-image"
+          AXIOMLAB_DEVICE_ID: "ci-runner"
+          AXIOMLAB_FIRMWARE_VERSION: "ci"
+        run: |
+          chmod +x scripts/proof_release_gate.sh
+          ./scripts/proof_release_gate.sh
