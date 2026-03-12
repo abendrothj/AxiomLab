@@ -12,6 +12,10 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
+sha2 = "0.10"
 scientific_compute = { path = "../scientific_compute" }
 physical_types = { path = "../physical_types" }
 proof_artifacts = { path = "../proof_artifacts" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

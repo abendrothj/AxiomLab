@@ -146,9 +146,12 @@ cargo run -p proof_artifacts --bin proofctl -- gate \
 echo "[7/8] Running proof-artifact subsystem tests"
 cargo test -p proof_artifacts -- --nocapture
 
-echo "[8/8] Running runtime policy + sandbox integration tests"
+echo "[8/9] Running runtime policy + sandbox integration tests"
 AXIOMLAB_AUDIT_LOG="$AUDIT_LOG_PATH" cargo test -p agent_runtime proof_policy -- --nocapture
 AXIOMLAB_AUDIT_LOG="$AUDIT_LOG_PATH" cargo test -p agent_runtime sim2_orchestrator -- --nocapture
+
+echo "[9/9] Verifying tamper-evident runtime audit chain"
+cargo run -p agent_runtime --bin auditctl -- verify --path "$AUDIT_LOG_PATH"
 
 echo "Release gate passed. Signed manifest: $SIGNED_MANIFEST_PATH"
 echo "Audit log: $AUDIT_LOG_PATH"
