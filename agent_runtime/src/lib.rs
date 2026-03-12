@@ -14,3 +14,4 @@ pub mod orchestrator;
 pub mod reasoning;
 pub mod audit;
 pub mod capabilities;
+pub mod approvals;

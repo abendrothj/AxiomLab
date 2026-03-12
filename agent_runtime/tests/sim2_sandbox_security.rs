@@ -207,6 +207,7 @@ async fn sim2_orchestrator_blocks_rogue_tool_then_allows_legit() {
         reasoning_temperature: 0.0,
         audit_log_path: None,
         capability_policy: None,
+        approval_policy: None,
     };
 
     let orch = Orchestrator::new(llm, sandbox, tools, config);
@@ -254,6 +255,7 @@ async fn sim2_orchestrator_blocks_out_of_bounds_motion() {
         reasoning_temperature: 0.0,
         audit_log_path: None,
         capability_policy: Some(CapabilityPolicy::default_lab()),
+        approval_policy: None,
     };
 
     let orch = Orchestrator::new(llm, sandbox, tools, config);

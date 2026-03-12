@@ -8,12 +8,15 @@
 //! 5. Execute tool calls and advance the experiment lifecycle.
 
 use crate::audit::{AuditEvent, emit_jsonl, emit_remote_with_retry, trace_id};
+use crate::approvals::{ApprovalPolicy, risk_class_for_action};
 use crate::capabilities::CapabilityPolicy;
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
+use proof_artifacts::manifest::RiskClass;
 use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
+use std::collections::HashMap;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -41,6 +44,8 @@ pub struct OrchestratorConfig {
     pub audit_log_path: Option<String>,
     /// Optional per-tool capability bounds (workspace geometry, max dispense volume, etc.).
     pub capability_policy: Option<CapabilityPolicy>,
+    /// Optional two-person approval policy for high-risk actions.
+    pub approval_policy: Option<ApprovalPolicy>,
 }
 
 impl Default for OrchestratorConfig {
@@ -51,6 +56,7 @@ impl Default for OrchestratorConfig {
             reasoning_temperature: 0.7,
             audit_log_path: std::env::var("AXIOMLAB_AUDIT_LOG").ok(),
             capability_policy: Some(CapabilityPolicy::default_lab()),
+            approval_policy: Some(ApprovalPolicy::default_high_risk()),
         }
     }
 }
@@ -63,6 +69,7 @@ pub struct Orchestrator<L: LlmBackend> {
     config: OrchestratorConfig,
     policy_engine: Option<RuntimePolicyEngine>,
     policy_context: Option<ExecutionContext>,
+    action_risk_index: HashMap<String, RiskClass>,
 }
 
 impl<L: LlmBackend> Orchestrator<L> {
@@ -79,6 +86,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             config,
             policy_engine: None,
             policy_context: None,
+            action_risk_index: HashMap::new(),
         }
     }
 
@@ -88,6 +96,12 @@ impl<L: LlmBackend> Orchestrator<L> {
         engine: RuntimePolicyEngine,
         context: ExecutionContext,
     ) -> Self {
+        self.action_risk_index = engine
+            .manifest()
+            .actions
+            .iter()
+            .map(|a| (a.action.clone(), a.risk_class.clone()))
+            .collect();
         self.policy_engine = Some(engine);
         self.policy_context = Some(context);
         self
@@ -200,7 +214,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         // Sandbox check — the tool name must be on the allowlist.
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
-            self.audit_decision(tool_name, "deny", &e.to_string(), false).await;
+            self.audit_decision(tool_name, "deny", &e.to_string(), false, None).await;
             return Some(ToolResult {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(e.to_string()),
@@ -208,10 +222,41 @@ impl<L: LlmBackend> Orchestrator<L> {
             });
         }
 
+        let risk_class = risk_class_for_action(tool_name, &self.action_risk_index);
+
+        if let (Some(policy), Some(ctx)) = (&self.config.approval_policy, &self.policy_context) {
+            match policy.validate_action(tool_name, risk_class.clone(), ctx, &params) {
+                Ok(approval_ids) => {
+                    if !approval_ids.is_empty() {
+                        let reason = format!(
+                            "two-person approval satisfied for high-risk action (approval_ids={})",
+                            approval_ids.join(",")
+                        );
+                        self.audit_decision(
+                            tool_name,
+                            "allow",
+                            &reason,
+                            true,
+                            Some(approval_ids),
+                        )
+                        .await;
+                    }
+                }
+                Err(e) => {
+                    self.audit_decision(tool_name, "deny", &e, false, None).await;
+                    return Some(ToolResult {
+                        name: tool_name.to_owned(),
+                        output: serde_json::Value::String(e),
+                        success: false,
+                    });
+                }
+            }
+        }
+
         // Capability check — tool parameters must remain within lab hardware bounds.
         if let Some(capability) = &self.config.capability_policy {
             if let Err(e) = capability.validate(tool_name, &params) {
-                self.audit_decision(tool_name, "deny", &e, false).await;
+                self.audit_decision(tool_name, "deny", &e, false, None).await;
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
                     output: serde_json::Value::String(e),
@@ -221,10 +266,10 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
 
         // Fail-closed mode for high-risk actions when policy is missing.
-        let high_risk = matches!(tool_name, "move_arm" | "dispense");
+        let high_risk = matches!(risk_class, Some(RiskClass::Actuation | RiskClass::Destructive));
         if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
             let msg = "high-risk action denied: runtime proof policy is not configured";
-            self.audit_decision(tool_name, "deny", msg, false).await;
+            self.audit_decision(tool_name, "deny", msg, false, None).await;
             return Some(ToolResult {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(msg.into()),
@@ -237,7 +282,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
-                self.audit_decision(tool_name, "deny", &report.reason, false).await;
+                self.audit_decision(tool_name, "deny", &report.reason, false, None).await;
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
                     output: serde_json::json!({
@@ -252,7 +297,14 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
         }
 
-        self.audit_decision(tool_name, "allow", "policy and sandbox checks passed", true).await;
+        self.audit_decision(
+            tool_name,
+            "allow",
+            "policy and sandbox checks passed",
+            true,
+            None,
+        )
+        .await;
 
         let call = ToolCall {
             name: tool_name.to_owned(),
@@ -261,7 +313,14 @@ impl<L: LlmBackend> Orchestrator<L> {
         Some(self.tools.dispatch(&call).await)
     }
 
-    async fn audit_decision(&self, action: &str, decision: &str, reason: &str, success: bool) {
+    async fn audit_decision(
+        &self,
+        action: &str,
+        decision: &str,
+        reason: &str,
+        success: bool,
+        approval_ids: Option<Vec<String>>,
+    ) {
         let event = AuditEvent {
             unix_secs: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -272,6 +331,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             decision: decision.to_owned(),
             reason: reason.to_owned(),
             success,
+            approval_ids,
         };
 
         let mut payload_line = serde_json::to_string(&event).unwrap_or_default();

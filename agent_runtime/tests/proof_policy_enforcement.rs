@@ -1,5 +1,6 @@
 use agent_runtime::experiment::Experiment;
 use agent_runtime::llm::{ChatMessage, LlmBackend, LlmError};
+use agent_runtime::approvals::ApprovalPolicy;
 use agent_runtime::orchestrator::{Orchestrator, OrchestratorConfig};
 use agent_runtime::sandbox::{ResourceLimits, Sandbox};
 use agent_runtime::tools::{ToolRegistry, register_lab_tools};
@@ -113,6 +114,7 @@ async fn proof_policy_blocks_action_when_artifact_failed() {
             reasoning_temperature: 0.0,
             audit_log_path: None,
             capability_policy: None,
+            approval_policy: None,
         },
     )
     .with_runtime_policy(engine, ctx);
@@ -148,6 +150,7 @@ async fn proof_policy_allows_action_when_artifact_passed() {
             reasoning_temperature: 0.0,
             audit_log_path: None,
             capability_policy: None,
+            approval_policy: None,
         },
     )
     .with_runtime_policy(engine, ctx);
@@ -155,4 +158,46 @@ async fn proof_policy_allows_action_when_artifact_passed() {
     let mut exp = Experiment::new("proof-pol-allow", "policy allow check");
     let res = orch.run_experiment(&mut exp).await;
     assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn high_risk_action_requires_two_person_approval() {
+    let llm = ScriptedLlm::tool_then_done("move_arm");
+    let sandbox = lab_sandbox();
+    let mut tools = ToolRegistry::new();
+    register_lab_tools(&mut tools);
+
+    let engine = RuntimePolicyEngine::new_trusted(manifest_for(ArtifactStatus::Passed));
+    let ctx = ExecutionContext {
+        git_commit: "git123".into(),
+        binary_hash: "bin123".into(),
+        container_image_digest: Some("img:sha256:test".into()),
+        device_id: Some("rig-test".into()),
+        firmware_version: Some("fw-test".into()),
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_path = dir.path().join("audit.jsonl");
+
+    let orch = Orchestrator::new(
+        llm,
+        sandbox,
+        tools,
+        OrchestratorConfig {
+            max_iterations: 3,
+            code_gen_temperature: 0.0,
+            reasoning_temperature: 0.0,
+            audit_log_path: Some(audit_path.to_string_lossy().to_string()),
+            capability_policy: None,
+            approval_policy: Some(ApprovalPolicy::default_high_risk()),
+        },
+    )
+    .with_runtime_policy(engine, ctx);
+
+    let mut exp = Experiment::new("proof-pol-2person", "two person approval check");
+    let res = orch.run_experiment(&mut exp).await;
+    assert!(res.is_ok(), "orchestrator should continue despite approval denial");
+
+    let audit = std::fs::read_to_string(audit_path).expect("read audit log");
+    assert!(audit.contains("approval violation"));
 }

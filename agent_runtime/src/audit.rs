@@ -14,6 +14,8 @@ pub struct AuditEvent {
     pub decision: String,
     pub reason: String,
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +36,8 @@ struct PersistedAuditEvent<'a> {
     reason: &'a str,
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    approval_ids: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     prev_hash: Option<&'a str>,
     entry_hash: String,
 }
@@ -46,6 +50,8 @@ struct HashInput<'a> {
     decision: &'a str,
     reason: &'a str,
     success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval_ids: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prev_hash: Option<&'a str>,
 }
@@ -64,6 +70,7 @@ pub fn emit_jsonl(path: &str, event: &AuditEvent) -> Result<String, std::io::Err
         decision: &event.decision,
         reason: &event.reason,
         success: event.success,
+        approval_ids: event.approval_ids.as_deref(),
         prev_hash: prev_hash.as_deref(),
         entry_hash,
     };
@@ -184,6 +191,11 @@ pub fn verify_chain(path: &str) -> Result<(), String> {
                 .get("success")
                 .and_then(|v| v.as_bool())
                 .ok_or_else(|| format!("line {} missing success", idx + 1))?,
+            approval_ids: value.get("approval_ids").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            }),
         };
 
         let recomputed = compute_entry_hash(&event, prev_hash.as_deref())
@@ -229,6 +241,7 @@ fn compute_entry_hash(event: &AuditEvent, prev_hash: Option<&str>) -> Result<Str
         decision: &event.decision,
         reason: &event.reason,
         success: event.success,
+        approval_ids: event.approval_ids.as_deref(),
         prev_hash,
     };
     let canonical = serde_json::to_vec(&payload)
@@ -288,6 +301,7 @@ mod tests {
                 decision: "allow".into(),
                 reason: "ok".into(),
                 success: true,
+                approval_ids: None,
             },
         )
         .expect("emit first");
@@ -301,6 +315,7 @@ mod tests {
                 decision: "deny".into(),
                 reason: "policy".into(),
                 success: false,
+                approval_ids: None,
             },
         )
         .expect("emit second");
