@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Signatures provide cryptographic provenance.
+/// SECURITY: Implement HSM/KMS signing and key rotation. See OPERATOR_GUIDE.md.
+
 #[derive(Debug, Error)]
 pub enum SignatureError {
     #[error("json serialization error: {0}")]

@@ -47,11 +47,28 @@ impl RuntimePolicyEngine {
         }
     }
 
+    /// Create a policy engine with assumed-verified manifest.
+    ///
+    /// # SECURITY WARNING
+    /// This constructor bypasses signature verification and is intentionally
+    /// restricted to test builds.  Production code must use `new()` followed
+    /// by `mark_signature_verified()` after calling `verify_signed_manifest`.
+    /// See OPERATOR_GUIDE.md section 2.1 for trust boundary requirements.
+    #[cfg(any(test, feature = "unsafe-bypass"))]
     pub fn new_trusted(manifest: ProofManifest) -> Self {
         Self {
             manifest,
             signature_verified: true,
         }
+    }
+
+    /// Mark this engine's manifest as signature-verified.
+    ///
+    /// Call this after successfully running `proof_artifacts::signature::verify_signed_manifest`.
+    /// This is the only production-safe way to enable `authorize()`.
+    pub fn mark_signature_verified(mut self) -> Self {
+        self.signature_verified = true;
+        self
     }
 
     pub fn manifest(&self) -> &ProofManifest {

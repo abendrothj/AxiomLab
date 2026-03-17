@@ -29,3 +29,4 @@ pub mod hardware_bounds;
 pub mod concurrency;
 pub mod resource_allocator;
 pub mod verify;
+pub mod orchestrator_spec;

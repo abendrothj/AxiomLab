@@ -95,7 +95,7 @@ async fn proof_policy_blocks_action_when_artifact_failed() {
     let mut tools = ToolRegistry::new();
     register_lab_tools(&mut tools);
 
-    let engine = RuntimePolicyEngine::new_trusted(manifest_for(ArtifactStatus::Failed));
+    let engine = RuntimePolicyEngine::new(manifest_for(ArtifactStatus::Failed)).mark_signature_verified();
     let ctx = ExecutionContext {
         git_commit: "git123".into(),
         binary_hash: "bin123".into(),
@@ -115,6 +115,7 @@ async fn proof_policy_blocks_action_when_artifact_failed() {
             audit_log_path: None,
             capability_policy: None,
             approval_policy: None,
+            ..OrchestratorConfig::default()
         },
     )
     .with_runtime_policy(engine, ctx);
@@ -131,7 +132,7 @@ async fn proof_policy_allows_action_when_artifact_passed() {
     let mut tools = ToolRegistry::new();
     register_lab_tools(&mut tools);
 
-    let engine = RuntimePolicyEngine::new_trusted(manifest_for(ArtifactStatus::Passed));
+    let engine = RuntimePolicyEngine::new(manifest_for(ArtifactStatus::Passed)).mark_signature_verified();
     let ctx = ExecutionContext {
         git_commit: "git123".into(),
         binary_hash: "bin123".into(),
@@ -151,6 +152,7 @@ async fn proof_policy_allows_action_when_artifact_passed() {
             audit_log_path: None,
             capability_policy: None,
             approval_policy: None,
+            ..OrchestratorConfig::default()
         },
     )
     .with_runtime_policy(engine, ctx);
@@ -167,7 +169,7 @@ async fn high_risk_action_requires_two_person_approval() {
     let mut tools = ToolRegistry::new();
     register_lab_tools(&mut tools);
 
-    let engine = RuntimePolicyEngine::new_trusted(manifest_for(ArtifactStatus::Passed));
+    let engine = RuntimePolicyEngine::new(manifest_for(ArtifactStatus::Passed)).mark_signature_verified();
     let ctx = ExecutionContext {
         git_commit: "git123".into(),
         binary_hash: "bin123".into(),
@@ -190,6 +192,7 @@ async fn high_risk_action_requires_two_person_approval() {
             audit_log_path: Some(audit_path.to_string_lossy().to_string()),
             capability_policy: None,
             approval_policy: Some(ApprovalPolicy::default_high_risk()),
+            ..OrchestratorConfig::default()
         },
     )
     .with_runtime_policy(engine, ctx);

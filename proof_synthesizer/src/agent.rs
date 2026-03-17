@@ -111,7 +111,9 @@ pub async fn synthesize_proof(
         }
 
         // ── 2. Reason: parse diagnostics, ask LLM ──
-        let diags = diagnostics::parse(&result.output);
+        // Sanitize raw compiler output before parsing to prevent injection.
+        let sanitized_output = sanitize_compiler_output(&result.output);
+        let diags = diagnostics::parse(&sanitized_output);
         let summary = diagnostics::summarize(&diags);
         warn!(attempt, errors = diags.len(), "Verus rejected — refining");
 
@@ -196,6 +198,48 @@ async fn llm_chat(
         .first()
         .map(|c| c.message.content.clone())
         .ok_or_else(|| SynthError::Llm("empty LLM response".into()))
+}
+
+/// Sanitize raw compiler output before including it in an LLM prompt.
+///
+/// Removes ANSI escape codes and null bytes, caps total length, and strips
+/// lines that pattern-match prompt injection attempts.  This prevents a
+/// malicious `.rs` file from embedding instructions to the LLM inside
+/// identifier names, string literals, or doc-comments that end up in Verus
+/// error messages.
+fn sanitize_compiler_output(raw: &str) -> String {
+    use std::sync::LazyLock;
+    use regex::Regex;
+
+    static ANSI_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[mGKHF]").unwrap());
+    static INJECTION_RE: LazyLock<Regex> =
+        LazyLock::new(|| {
+            Regex::new(
+                r"(?i)^\s*(system\s*:|user\s*:|assistant\s*:|<\|im_start\|>|<\|im_end\|>|###\s)",
+            )
+            .unwrap()
+        });
+
+    const MAX_COMPILER_OUTPUT: usize = 8 * 1024; // 8 KiB is plenty for diagnostics
+
+    let stripped = ANSI_RE.replace_all(raw, "");
+    let no_nulls = stripped.replace('\0', "");
+    let filtered: String = no_nulls
+        .lines()
+        .filter(|l| !INJECTION_RE.is_match(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if filtered.len() <= MAX_COMPILER_OUTPUT {
+        filtered
+    } else {
+        let mut end = MAX_COMPILER_OUTPUT;
+        while !filtered.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…[truncated]", &filtered[..end])
+    }
 }
 
 fn extract_rust_block(text: &str) -> Option<String> {

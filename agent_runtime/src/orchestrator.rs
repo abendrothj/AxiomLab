@@ -3,15 +3,16 @@
 //! Each iteration:
 //! 1. Build a prompt from the current experiment state + tool specs.
 //! 2. Call the LLM.
-//! 3. Parse the response for tool calls or code generation.
-//! 4. Validate actions against the sandbox.
+//! 3. Sanitize and schema-validate the response.
+//! 4. Validate actions against sandbox → approval → capability → proof policy.
 //! 5. Execute tool calls and advance the experiment lifecycle.
 
-use crate::audit::{AuditEvent, emit_jsonl, emit_remote_with_retry, trace_id};
+use crate::audit::{AuditEvent, AuditSigner, emit_jsonl, emit_remote_with_retry, trace_id};
 use crate::approvals::{ApprovalPolicy, risk_class_for_action};
 use crate::capabilities::CapabilityPolicy;
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
+use crate::revocation::RevocationList;
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
 use proof_artifacts::manifest::RiskClass;
@@ -32,6 +33,12 @@ pub enum OrchestratorError {
     Halted(String),
 }
 
+/// Maximum byte length of any LLM response accepted for tool-call parsing.
+///
+/// Responses beyond this length are truncated before JSON parsing to prevent
+/// O(n) allocation amplification from pathological LLM output.
+const MAX_RESPONSE_BYTES: usize = 64 * 1024; // 64 KiB
+
 /// Configuration for the orchestrator.
 pub struct OrchestratorConfig {
     /// Maximum iterations per experiment before aborting.
@@ -46,6 +53,15 @@ pub struct OrchestratorConfig {
     pub capability_policy: Option<CapabilityPolicy>,
     /// Optional two-person approval policy for high-risk actions.
     pub approval_policy: Option<ApprovalPolicy>,
+    /// Session nonce for replay prevention.
+    ///
+    /// When `Some`, every high-risk approval bundle must carry this nonce.
+    /// Generate with `uuid::Uuid::new_v4().to_string()` at session start.
+    pub session_nonce: Option<String>,
+    /// Optional Ed25519 signer for per-event audit signatures.
+    pub audit_signer: Option<AuditSigner>,
+    /// Revocation list for keys and approval IDs.
+    pub revocation_list: RevocationList,
 }
 
 impl Default for OrchestratorConfig {
@@ -57,6 +73,9 @@ impl Default for OrchestratorConfig {
             audit_log_path: std::env::var("AXIOMLAB_AUDIT_LOG").ok(),
             capability_policy: Some(CapabilityPolicy::default_lab()),
             approval_policy: Some(ApprovalPolicy::default_high_risk()),
+            session_nonce: Some(uuid::Uuid::new_v4().to_string()),
+            audit_signer: AuditSigner::from_env(),
+            revocation_list: RevocationList::from_env(),
         }
     }
 }
@@ -162,8 +181,11 @@ impl<L: LlmBackend> Orchestrator<L> {
                 _ => self.config.code_gen_temperature,
             };
 
-            let response = self.llm.chat(&history, temperature).await?;
-            info!(len = response.len(), "LLM response received");
+            let raw_response = self.llm.chat(&history, temperature).await?;
+            info!(len = raw_response.len(), "LLM response received");
+
+            // Sanitize before any further processing.
+            let response = sanitize_llm_response(&raw_response);
 
             history.push(ChatMessage {
                 role: "assistant".into(),
@@ -205,13 +227,21 @@ impl<L: LlmBackend> Orchestrator<L> {
     }
 
     /// Attempt to parse a tool call from the LLM response, validate it
-    /// against the sandbox, and dispatch it.
+    /// against the sandbox, approval policy, capability bounds, and proof
+    /// artifacts, then dispatch it.
     async fn try_tool_call(&self, response: &str) -> Option<ToolResult> {
         let parsed: serde_json::Value = serde_json::from_str(response).ok()?;
+
+        // Schema validation: the JSON must have "tool" (string) and "params" (object).
+        if let Err(schema_err) = validate_tool_call_schema(&parsed) {
+            warn!(%schema_err, "LLM response failed tool-call schema validation");
+            return None;
+        }
+
         let tool_name = parsed.get("tool")?.as_str()?;
         let params = parsed.get("params")?.clone();
 
-        // Sandbox check — the tool name must be on the allowlist.
+        // ── Stage 0: Sandbox allowlist ────────────────────────────────────
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
             self.audit_decision(tool_name, "deny", &e.to_string(), false, None).await;
@@ -224,9 +254,28 @@ impl<L: LlmBackend> Orchestrator<L> {
 
         let risk_class = risk_class_for_action(tool_name, &self.action_risk_index);
 
+        // ── Stage 1: Two-person approval ──────────────────────────────────
         if let (Some(policy), Some(ctx)) = (&self.config.approval_policy, &self.policy_context) {
-            match policy.validate_action(tool_name, risk_class.clone(), ctx, &params) {
+            match policy.validate_action(
+                tool_name,
+                risk_class.clone(),
+                ctx,
+                &params,
+                self.config.session_nonce.as_deref(),
+            ) {
                 Ok(approval_ids) => {
+                    // Check revocation on all approval IDs.
+                    for aid in &approval_ids {
+                        if self.config.revocation_list.is_approval_revoked(aid) {
+                            let msg = format!("approval {aid} has been revoked");
+                            self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                            return Some(ToolResult {
+                                name: tool_name.to_owned(),
+                                output: serde_json::Value::String(msg),
+                                success: false,
+                            });
+                        }
+                    }
                     if !approval_ids.is_empty() {
                         let reason = format!(
                             "two-person approval satisfied for high-risk action (approval_ids={})",
@@ -253,7 +302,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
         }
 
-        // Capability check — tool parameters must remain within lab hardware bounds.
+        // ── Stage 2: Capability bounds ────────────────────────────────────
         if let Some(capability) = &self.config.capability_policy {
             if let Err(e) = capability.validate(tool_name, &params) {
                 self.audit_decision(tool_name, "deny", &e, false, None).await;
@@ -265,7 +314,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
         }
 
-        // Fail-closed mode for high-risk actions when policy is missing.
+        // ── Stage 3: Fail-closed for high-risk without policy ─────────────
         let high_risk = matches!(risk_class, Some(RiskClass::Actuation | RiskClass::Destructive));
         if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
             let msg = "high-risk action denied: runtime proof policy is not configured";
@@ -277,8 +326,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             });
         }
 
-        // Proof-policy check — action is allowed only when required proof
-        // artifacts are present, passed, and tied to this exact binary/commit.
+        // ── Stage 4: Proof-artifact policy ───────────────────────────────
         if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
@@ -297,6 +345,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
         }
 
+        // ── Stage 5: Audit allow + dispatch ──────────────────────────────
         self.audit_decision(
             tool_name,
             "allow",
@@ -337,7 +386,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         let mut payload_line = serde_json::to_string(&event).unwrap_or_default();
 
         if let Some(path) = &self.config.audit_log_path {
-            match emit_jsonl(path, &event) {
+            match emit_jsonl(path, &event, self.config.audit_signer.as_ref()) {
                 Ok(line) => payload_line = line,
                 Err(e) => warn!(error = %e, "failed to write local audit event"),
             }
@@ -368,6 +417,75 @@ impl<L: LlmBackend> Orchestrator<L> {
     }
 }
 
+// ── LLM response sanitization ─────────────────────────────────────────────────
+
+/// Sanitize a raw LLM response before any processing.
+///
+/// - Truncates to `MAX_RESPONSE_BYTES` to prevent allocation amplification.
+/// - Strips null bytes (prevent JSON parser confusion).
+/// - Does NOT strip JSON or code content — only structural anomalies.
+fn sanitize_llm_response(raw: &str) -> String {
+    // Truncate at a UTF-8 character boundary.
+    let truncated = if raw.len() > MAX_RESPONSE_BYTES {
+        warn!(
+            original_bytes = raw.len(),
+            limit = MAX_RESPONSE_BYTES,
+            "LLM response truncated before processing"
+        );
+        // Walk back to the last valid UTF-8 char boundary.
+        let mut end = MAX_RESPONSE_BYTES;
+        while !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        &raw[..end]
+    } else {
+        raw
+    };
+
+    // Strip null bytes that can confuse parsers.
+    truncated.replace('\0', "")
+}
+
+/// Validate that a JSON value matches the expected tool-call schema:
+/// `{ "tool": string, "params": object }`
+///
+/// Returns `Err` with a human-readable description of the first violation.
+fn validate_tool_call_schema(value: &serde_json::Value) -> Result<(), String> {
+    let obj = value.as_object().ok_or("tool call must be a JSON object")?;
+
+    let tool = obj
+        .get("tool")
+        .ok_or("tool call missing required field 'tool'")?;
+    if !tool.is_string() {
+        return Err(format!("'tool' must be a string, got {}", tool));
+    }
+
+    let tool_name = tool.as_str().unwrap();
+    // Tool names must be non-empty and alphanumeric + underscores only.
+    if tool_name.is_empty() {
+        return Err("'tool' must be a non-empty string".into());
+    }
+    if !tool_name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Err(format!(
+            "'tool' name '{tool_name}' contains invalid characters (allowed: [a-zA-Z0-9_])"
+        ));
+    }
+
+    let params = obj
+        .get("params")
+        .ok_or("tool call missing required field 'params'")?;
+    if !params.is_object() {
+        return Err(format!("'params' must be a JSON object, got {}", params));
+    }
+
+    Ok(())
+}
+
+// ── Code extraction ───────────────────────────────────────────────────────────
+
 /// Extract the first ```rust ... ``` block from a string.
 fn extract_rust_code(text: &str) -> Option<String> {
     let start = text.find("```rust")?;
@@ -395,5 +513,48 @@ mod tests {
     #[test]
     fn no_code_block() {
         assert!(extract_rust_code("no code here").is_none());
+    }
+
+    #[test]
+    fn sanitize_truncates_oversized_response() {
+        let big = "x".repeat(MAX_RESPONSE_BYTES + 1000);
+        let result = sanitize_llm_response(&big);
+        assert!(result.len() <= MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn sanitize_strips_null_bytes() {
+        let with_nulls = "hello\0world\0";
+        assert_eq!(sanitize_llm_response(with_nulls), "helloworld");
+    }
+
+    #[test]
+    fn schema_valid_tool_call() {
+        let v = serde_json::json!({"tool": "move_arm", "params": {"x": 10}});
+        assert!(validate_tool_call_schema(&v).is_ok());
+    }
+
+    #[test]
+    fn schema_rejects_missing_tool() {
+        let v = serde_json::json!({"params": {}});
+        assert!(validate_tool_call_schema(&v).is_err());
+    }
+
+    #[test]
+    fn schema_rejects_non_string_tool() {
+        let v = serde_json::json!({"tool": 42, "params": {}});
+        assert!(validate_tool_call_schema(&v).is_err());
+    }
+
+    #[test]
+    fn schema_rejects_invalid_tool_name_chars() {
+        let v = serde_json::json!({"tool": "rm -rf /", "params": {}});
+        assert!(validate_tool_call_schema(&v).is_err());
+    }
+
+    #[test]
+    fn schema_rejects_non_object_params() {
+        let v = serde_json::json!({"tool": "move_arm", "params": [1, 2, 3]});
+        assert!(validate_tool_call_schema(&v).is_err());
     }
 }

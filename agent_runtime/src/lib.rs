@@ -15,3 +15,5 @@ pub mod reasoning;
 pub mod audit;
 pub mod capabilities;
 pub mod approvals;
+pub mod revocation;
+pub mod attestation;

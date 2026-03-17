@@ -90,7 +90,9 @@ fn main() {
 
             let params = serde_json::json!({ "approval_bundle": bundle });
             let policy = ApprovalPolicy::default_high_risk();
-            let result = policy.validate_action(&action, Some(risk_class.clone()), &ctx, &params);
+            // Pass session_nonce=None: approvalctl verifies bundles out-of-band
+            // without a live session nonce.
+            let result = policy.validate_action(&action, Some(risk_class.clone()), &ctx, &params, None);
 
             let report = match result {
                 Ok(ids) => ApprovalVerificationReport {

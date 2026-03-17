@@ -319,7 +319,8 @@ fn main() {
                     eprintln!("signature verification FAILED: {e}");
                     std::process::exit(1);
                 }
-                RuntimePolicyEngine::new_trusted(signed.manifest)
+                // After signature verification, use new() for operational soundness.
+                RuntimePolicyEngine::new(signed.manifest)
             } else {
                 let Some(manifest_path) = parse_flag(rest, "--manifest") else {
                     eprintln!("missing --manifest\n{}", usage());

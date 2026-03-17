@@ -73,7 +73,7 @@ fn full_pipeline_manifest_gate_policy_explain_cache() {
     let gate = evaluate_ci_gate(&manifest, &policy);
     assert!(gate.passed, "violations: {:?}", gate.violations);
 
-    let engine = RuntimePolicyEngine::new_trusted(manifest.clone());
+    let engine = RuntimePolicyEngine::new(manifest.clone()).mark_signature_verified();
     let ctx = ExecutionContext {
         git_commit: "abc123".into(),
         binary_hash: "binhash".into(),
