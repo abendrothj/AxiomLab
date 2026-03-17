@@ -1,3 +1,4 @@
+mod db;
 mod simulator;
 mod ws_sink;
 
@@ -30,9 +31,19 @@ struct AppState {
     iteration: Arc<AtomicU32>,
     notebook:  Arc<Mutex<Vec<serde_json::Value>>>,
     log:       Arc<Mutex<ExplorationLog>>,
+    db:        db::EventDb,
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+
+/// Full history from the immutable event log — used by the visualizer on load.
+async fn history_handler(State(s): State<AppState>) -> impl IntoResponse {
+    axum::Json(serde_json::json!({
+        "notebook":    s.db.query_recent("notebook_entry",   500),
+        "transitions": s.db.query_recent("state_transition", 2000),
+        "tools":       s.db.query_recent("tool_execution",   500),
+    }))
+}
 
 async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
     let notebook = s.notebook.lock().unwrap().clone();
@@ -104,12 +115,18 @@ async fn main() {
 
     let (tx, _) = broadcast::channel::<String>(512);
 
+    // Open (or create) the immutable event log
+    let event_db = db::EventDb::open("axiomlab_events.db")
+        .expect("failed to open event database");
+    tracing::info!("Event database ready: axiomlab_events.db");
+
     let state = AppState {
         tx,
         running:   Arc::new(AtomicBool::new(false)),
         iteration: Arc::new(AtomicU32::new(0)),
         notebook:  Arc::new(Mutex::new(Vec::new())),
         log:       Arc::new(Mutex::new(ExplorationLog::default())),
+        db:        event_db.clone(),
     };
 
     // Auto-start the exploration loop immediately on server launch
@@ -118,6 +135,7 @@ async fn main() {
             tx:       state.tx.clone(),
             log:      Arc::clone(&state.log),
             notebook: Arc::clone(&state.notebook),
+            db:       event_db,
         });
         state.running.store(true, Ordering::SeqCst);
         let running   = Arc::clone(&state.running);
@@ -133,8 +151,9 @@ async fn main() {
         .append_index_html_on_directories(true);
 
     let app = Router::new()
-        .route("/ws",         get(ws_handler))
-        .route("/api/status", get(status_handler))
+        .route("/ws",           get(ws_handler))
+        .route("/api/status",   get(status_handler))
+        .route("/api/history",  get(history_handler))
         .fallback_service(static_files)
         .layer(CorsLayer::permissive())
         .with_state(state);

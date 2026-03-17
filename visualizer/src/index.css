@@ -8,59 +8,39 @@ html, body, #root {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #0a0b0d;
+  background: #070912;
   font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
-  color: #00ff9d;
+  color: #e2e8f0;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Thin scrollbars across the UI */
+/* Thin scrollbars */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #1a2035 transparent;
+  scrollbar-color: #1a2540 transparent;
 }
-*::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
-}
-*::-webkit-scrollbar-track {
-  background: transparent;
-}
-*::-webkit-scrollbar-thumb {
-  background: #1a2035;
-  border-radius: 2px;
-}
+*::-webkit-scrollbar { width: 3px; height: 3px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #1a2540; border-radius: 2px; }
 
-/* Blinking cursor for TerminalLog */
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0; }
-}
-
-/* Notebook entry slide-in */
-@keyframes slideInUp {
-  from { opacity: 0; transform: translateY(8px); }
+/* Animations */
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 
-/* React Flow overrides — match the dark theme */
-.react-flow__background {
-  background: #0f1117 !important;
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.2; transform: scale(0.8); }
+  50%       { opacity: 1;   transform: scale(1.1); }
 }
-.react-flow__controls {
-  background: #0f1117 !important;
-  border: 1px solid #1a2035 !important;
-  border-radius: 4px !important;
+
+@keyframes thinking-bar {
+  0%   { transform: scaleX(0.05); opacity: 0.4; }
+  50%  { transform: scaleX(1.0);  opacity: 1;   }
+  100% { transform: scaleX(0.05); opacity: 0.4; }
 }
-.react-flow__controls button {
-  background: #0f1117 !important;
-  border-bottom: 1px solid #1a2035 !important;
-  color: #00ff9d !important;
-  fill: #00ff9d !important;
-}
-.react-flow__controls button:hover {
-  background: #1a2035 !important;
-}
-.react-flow__edge-path {
-  stroke-width: 2;
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(0,212,255,0.3); }
+  50%       { box-shadow: 0 0 16px rgba(0,212,255,0.7); }
 }

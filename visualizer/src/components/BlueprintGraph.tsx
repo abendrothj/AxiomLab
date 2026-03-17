@@ -1,196 +1,211 @@
-import { useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import ReactFlow, {
-  Background,
-  Controls,
-  Node,
-  Edge,
-  BackgroundVariant,
-  useNodesState,
-  useEdgesState,
-  Handle,
-  Position,
-  NodeProps,
+  Node, Edge, Background, Controls,
+  Handle, Position, NodeProps,
+  MarkerType, useReactFlow, ReactFlowProvider,
 } from "reactflow";
+import "reactflow/dist/style.css";
 
 import { StateTransitionEvent, STAGE_COLORS } from "../types";
 
-// ── Custom Node ───────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-interface StateNodeData {
-  label: string;
-  stage: string;
-  experimentId: string;
-  timestamp: string;
+const NODE_H    = 72;   // px between node centres
+const INIT_SHOW = 5;
+const LOAD_STEP = 5;
+
+// ── Custom node ───────────────────────────────────────────────────────────────
+
+function StageNode({ data }: NodeProps) {
+  const color  = STAGE_COLORS[data.stage as string] ?? "#3a4a5a";
+  const isLast = data.isLast as boolean;
+
+  return (
+    <>
+      <Handle
+        type="target"
+        position={Position.Top}
+        style={{ background: "#1a3050", border: "none", width: 6, height: 6 }}
+      />
+      <div style={{
+        width: 176,
+        padding: "9px 12px 9px 14px",
+        background: isLast ? "#0e1520" : "#0b0e18",
+        border: `1px solid ${isLast ? color + "44" : "#131d2a"}`,
+        borderLeft: `3px solid ${color}`,
+        borderRadius: "0 6px 6px 0",
+        fontFamily: '"JetBrains Mono", monospace',
+        boxShadow: isLast ? `0 0 12px ${color}18` : "none",
+      }}>
+        <div style={{
+          fontSize: 11, fontWeight: 700,
+          color: isLast ? color : color + "cc",
+          letterSpacing: "0.06em",
+          lineHeight: 1,
+        }}>
+          {data.stage as string}
+        </div>
+        <div style={{
+          fontSize: 9, color: "#1e3a4a",
+          marginTop: 5, letterSpacing: "0.04em",
+          display: "flex", gap: 6,
+        }}>
+          <span>{data.expId as string}</span>
+          <span style={{ color: "#152535" }}>·</span>
+          <span>{data.time as string}</span>
+        </div>
+      </div>
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        style={{ background: "#1a3050", border: "none", width: 6, height: 6 }}
+      />
+    </>
+  );
 }
 
-function StateNode({ data }: NodeProps<StateNodeData>) {
-  const color = STAGE_COLORS[data.stage] ?? "#3a4a5a";
+// Defined outside component — required by ReactFlow for stable reference
+const nodeTypes = { stage: StageNode };
+
+// ── Inner graph (must be inside ReactFlowProvider) ────────────────────────────
+
+function BlueprintInner({ transitions }: { transitions: StateTransitionEvent[] }) {
+  const [showCount, setShowCount] = useState(INIT_SHOW);
+  const { fitView } = useReactFlow();
+
+  // Clamp to available
+  const count   = Math.min(showCount, transitions.length);
+  const hasMore = transitions.length > count;
+  const slice   = transitions.slice(-count);
+
+  // Build nodes
+  const nodes: Node[] = slice.map((t, i) => {
+    const isLast  = i === slice.length - 1;
+    const ageSecs = Math.floor((Date.now() - t.timestamp_ms) / 1000);
+    const timeStr = ageSecs < 60 ? `${ageSecs}s` : `${Math.floor(ageSecs / 60)}m`;
+    return {
+      id:       `n${transitions.length - count + i}`,
+      type:     "stage",
+      draggable: false,
+      selectable: false,
+      position: { x: 0, y: i * NODE_H },
+      data: {
+        stage:  t.to,
+        expId:  `#${t.experiment_id.replace(/[^0-9]/g, "").slice(0, 4) || (transitions.length - count + i + 1)}`,
+        time:   timeStr,
+        isLast,
+      },
+    };
+  });
+
+  // Build edges
+  const edges: Edge[] = nodes.slice(1).map((node, i) => ({
+    id:        `e${i}`,
+    source:    nodes[i].id,
+    target:    node.id,
+    type:      "smoothstep",
+    animated:  i === nodes.length - 2,
+    style:     { stroke: "#1e3048", strokeWidth: 1.5 },
+    markerEnd: { type: MarkerType.ArrowClosed, color: "#1e3048", width: 14, height: 14 },
+  }));
+
+  // Fit viewport to last 5 nodes whenever new transitions arrive
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    const last5 = nodes.slice(-5).map((n) => ({ id: n.id }));
+    const timer = setTimeout(() => {
+      fitView({ nodes: last5, duration: 450, padding: 0.35 });
+    }, 60);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transitions.length, fitView]);
+
+  const loadMore = useCallback(() => {
+    setShowCount((c) => c + LOAD_STEP);
+  }, []);
+
   return (
-    <div
-      style={{
-        background: "#0f1117",
-        border: `1px solid ${color}`,
-        borderRadius: 4,
-        padding: "8px 14px",
-        minWidth: 160,
-        boxShadow: `0 0 8px ${color}44`,
-        fontFamily: '"JetBrains Mono", monospace',
-        fontSize: 11,
-      }}
-    >
-      <Handle type="target" position={Position.Top} style={{ background: color, border: "none" }} />
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      {hasMore && (
+        <button
+          onClick={loadMore}
+          style={{
+            position: "absolute", top: 8, left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 10,
+            padding: "4px 14px",
+            background: "#0a1220",
+            border: "1px solid #1a2a3a",
+            borderRadius: 20,
+            color: "#2a5a7a",
+            fontSize: 9,
+            letterSpacing: "0.1em",
+            cursor: "pointer",
+            fontFamily: '"JetBrains Mono", monospace',
+            whiteSpace: "nowrap",
+          }}
+        >
+          ↑ {Math.min(LOAD_STEP, transitions.length - count)} EARLIER
+        </button>
+      )}
 
-      <div style={{ color, fontWeight: 700, letterSpacing: "0.06em", marginBottom: 3 }}>
-        {data.stage || "IDLE"}
-      </div>
-      <div style={{ color: "#3a5a6a", fontSize: 10 }}>
-        {data.experimentId ? `exp:${data.experimentId.slice(0, 8)}` : "—"}
-      </div>
-      <div style={{ color: "#3a4a5a", fontSize: 9, marginTop: 2 }}>{data.timestamp}</div>
-
-      <Handle type="source" position={Position.Bottom} style={{ background: color, border: "none" }} />
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        proOptions={{ hideAttribution: true }}
+        panOnDrag
+        zoomOnScroll
+        zoomOnPinch
+        minZoom={0.3}
+        maxZoom={2.5}
+        defaultEdgeOptions={{ type: "smoothstep" }}
+      >
+        <Background
+          color="#131d2a"
+          gap={20}
+          size={0.6}
+          style={{ background: "#070912" }}
+        />
+        <Controls
+          showInteractive={false}
+          style={{
+            background: "#0b0e18",
+            border: "1px solid #131d2a",
+            borderRadius: 4,
+          }}
+        />
+      </ReactFlow>
     </div>
   );
 }
 
-// Defined OUTSIDE the parent component — required by React Flow for stability
-const NODE_TYPES = { stateNode: StateNode };
+// ── Public component ──────────────────────────────────────────────────────────
 
-// ── Component ─────────────────────────────────────────────────────────────────
-
-interface BlueprintGraphProps {
-  transitions: StateTransitionEvent[];
-}
-
-export default function BlueprintGraph({ transitions }: BlueprintGraphProps) {
-  const [nodes, setNodes, onNodesChange] = useNodesState<StateNodeData>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-
-  // Track layout position — ref avoids double-render
-  const yOffsetRef = useRef(0);
-  const lastNodeIdRef = useRef<string | null>(null);
-  const seenRef = useRef(new Set<string>());
-
-  // Process new transitions that arrive
-  const prevLen = useRef(0);
-  if (transitions.length > prevLen.current) {
-    const newTransitions = transitions.slice(prevLen.current);
-    prevLen.current = transitions.length;
-
-    newTransitions.forEach((t) => {
-      // Deduplicate by (from→to + timestamp)
-      const key = `${t.from}->${t.to}-${t.timestamp_ms}`;
-      if (seenRef.current.has(key)) return;
-      seenRef.current.add(key);
-
-      const nodeId = `node-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      const ts = new Date(t.timestamp_ms).toLocaleTimeString("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
-
-      const newNode: Node<StateNodeData> = {
-        id: nodeId,
-        type: "stateNode",
-        position: { x: 60, y: yOffsetRef.current },
-        data: {
-          label: t.to,
-          stage: t.to,
-          experimentId: t.experiment_id,
-          timestamp: ts,
-        },
-      };
-
-      yOffsetRef.current += 120;
-
-      setNodes((prev) => [...prev, newNode]);
-
-      if (lastNodeIdRef.current) {
-        const prevNodeId = lastNodeIdRef.current;
-        const color = STAGE_COLORS[t.to] ?? "#3a4a5a";
-        const newEdge: Edge = {
-          id: `edge-${prevNodeId}-${nodeId}`,
-          source: prevNodeId,
-          target: nodeId,
-          animated: true,
-          style: { stroke: color, strokeWidth: 1.5, opacity: 0.7 },
-        };
-        setEdges((prev) => [...prev, newEdge]);
-      }
-
-      lastNodeIdRef.current = nodeId;
-    });
+export default function BlueprintGraph({ transitions }: { transitions: StateTransitionEvent[] }) {
+  if (transitions.length === 0) {
+    return (
+      <div style={{
+        width: "100%", height: "100%",
+        display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center",
+        gap: 10, color: "#1a3040",
+      }}>
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" opacity={0.35}>
+          <circle cx="14" cy="7"  r="4" stroke="#00d4ff" strokeWidth="1.2" />
+          <circle cx="14" cy="21" r="4" stroke="#00d4ff" strokeWidth="1.2" />
+          <line x1="14" y1="11" x2="14" y2="17" stroke="#00d4ff" strokeWidth="1.2" />
+        </svg>
+        <span style={{ fontSize: 10, letterSpacing: "0.08em" }}>
+          waiting for transitions...
+        </span>
+      </div>
+    );
   }
 
-  const onNodesChangeHandler = useCallback(onNodesChange, [onNodesChange]);
-  const onEdgesChangeHandler = useCallback(onEdgesChange, [onEdgesChange]);
-
-  const isEmpty = nodes.length === 0;
-
   return (
-    <div style={{ width: "100%", height: "100%", position: "relative" }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChangeHandler}
-        onEdgesChange={onEdgesChangeHandler}
-        nodeTypes={NODE_TYPES}
-        fitView
-        fitViewOptions={{ padding: 0.3 }}
-        minZoom={0.3}
-        maxZoom={2}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background
-          variant={BackgroundVariant.Dots}
-          color="#1a2035"
-          gap={18}
-          size={1}
-        />
-        <Controls
-          showInteractive={false}
-          style={{ background: "#0f1117", border: "1px solid #1a2035" }}
-        />
-      </ReactFlow>
-
-      {/* Empty state overlay */}
-      {isEmpty && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            pointerEvents: "none",
-            gap: 8,
-          }}
-        >
-          <div style={{ color: "#1a2a3a", fontSize: 11, letterSpacing: "0.12em" }}>
-            REASONING GRAPH
-          </div>
-          <div style={{ color: "#0d1a25", fontSize: 10 }}>
-            boot lab to begin
-          </div>
-        </div>
-      )}
-
-      {/* Panel label */}
-      <div
-        style={{
-          position: "absolute",
-          top: 8,
-          left: 10,
-          fontSize: 9,
-          color: "#1a3a4a",
-          letterSpacing: "0.14em",
-          pointerEvents: "none",
-        }}
-      >
-        BLUEPRINT
-      </div>
-    </div>
+    <ReactFlowProvider>
+      <BlueprintInner transitions={transitions} />
+    </ReactFlowProvider>
   );
 }

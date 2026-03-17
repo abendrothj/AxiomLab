@@ -8,5 +8,20 @@ lean4/.lake/packages/
 lean4/.lake/build/
 lean4/.lake/config/
 
+# Frontend
 visualizer/node_modules/
+visualizer/dist/
 
+# SQLite event log (runtime data, not source)
+*.db
+*.db-wal
+*.db-shm
+
+# Environment / secrets
+.env
+.env.local
+.env*.local
+
+# OS
+.DS_Store
+Thumbs.db

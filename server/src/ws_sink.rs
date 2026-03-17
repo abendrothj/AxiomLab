@@ -1,6 +1,7 @@
 use agent_runtime::events::{
     EventSink, LlmTokenEvent, NotebookEntryEvent, StateTransitionEvent, ToolExecutionEvent,
 };
+use crate::db::EventDb;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -15,12 +16,13 @@ pub struct ExplorationLog {
 
 // ── Server-side event sink ────────────────────────────────────────────────────
 
-/// Broadcasts all orchestrator events to every connected WebSocket client.
+/// Broadcasts all orchestrator events to every connected WebSocket client
+/// and records each event immutably in the SQLite event log.
 pub struct WebSocketSink {
-    pub tx:  broadcast::Sender<String>,
-    pub log: Arc<Mutex<ExplorationLog>>,
-    /// Running copy of all notebook entries — sent to new viewers on connect.
+    pub tx:       broadcast::Sender<String>,
+    pub log:      Arc<Mutex<ExplorationLog>>,
     pub notebook: Arc<Mutex<Vec<serde_json::Value>>>,
+    pub db:       EventDb,
 }
 
 impl WebSocketSink {
@@ -32,6 +34,7 @@ impl WebSocketSink {
 
 impl EventSink for WebSocketSink {
     fn on_state_transition(&self, event: StateTransitionEvent) {
+        self.db.record("state_transition", &event);
         self.broadcast("state_transition", &event);
     }
 
@@ -44,10 +47,12 @@ impl EventSink for WebSocketSink {
                 log.successes.push(event.tool.clone());
             }
         }
+        self.db.record("tool_execution", &event);
         self.broadcast("tool_execution", &event);
     }
 
     fn on_llm_token(&self, event: LlmTokenEvent) {
+        // LLM tokens are not persisted — too high volume, no analytical value.
         self.broadcast("llm_token", &event);
     }
 
@@ -60,6 +65,7 @@ impl EventSink for WebSocketSink {
             let mut nb = self.notebook.lock().unwrap();
             nb.push(serde_json::to_value(&event).unwrap_or_default());
         }
+        self.db.record("notebook_entry", &event);
         self.broadcast("notebook_entry", &event);
     }
 }
