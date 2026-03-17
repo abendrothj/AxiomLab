@@ -14,6 +14,7 @@ class LiquidHandlerImpl(LiquidHandlerBase):
 
     def __init__(self, parent_server: Server) -> None:
         super().__init__(parent_server=parent_server)
+        self._registry = parent_server.vessel_registry
 
     def Dispense(self, TargetVessel: str, VolumeUl: float, *, metadata: MetadataDict) -> Dispense_Responses:
         print(f"  [PUMP]  Dispense → {TargetVessel}  {VolumeUl:.1f} µL", flush=True)
@@ -21,16 +22,20 @@ class LiquidHandlerImpl(LiquidHandlerBase):
             raise ValueError(f"Volume {VolumeUl:.1f} µL exceeds hardware cap of {self.MAX_VOL} µL")
         if VolumeUl < self.MIN_VOL:
             raise ValueError(f"Volume {VolumeUl:.1f} µL below minimum {self.MIN_VOL} µL")
-        time.sleep(0.3 + (VolumeUl / self.MAX_VOL) * 0.5)
         actual = round(VolumeUl * random.uniform(0.99, 1.01), 2)
-        print(f"  [PUMP]  ✓ Dispensed {actual:.2f} µL into {TargetVessel}", flush=True)
+        self._registry.dispense(TargetVessel, actual)
+        time.sleep(0.3 + (VolumeUl / self.MAX_VOL) * 0.5)
+        new_vol = self._registry.get_volume(TargetVessel)
+        print(f"  [PUMP]  ✓ Dispensed {actual:.2f} µL into {TargetVessel} (now {new_vol:.1f} µL)", flush=True)
         return Dispense_Responses(DispensedVolumeUl=actual)
 
     def Aspirate(self, SourceVessel: str, VolumeUl: float, *, metadata: MetadataDict) -> Aspirate_Responses:
         print(f"  [PUMP]  Aspirate ← {SourceVessel}  {VolumeUl:.1f} µL", flush=True)
         if VolumeUl > self.MAX_VOL:
             raise ValueError(f"Volume {VolumeUl:.1f} µL exceeds hardware cap of {self.MAX_VOL} µL")
-        time.sleep(0.3 + (VolumeUl / self.MAX_VOL) * 0.4)
         actual = round(VolumeUl * random.uniform(0.99, 1.01), 2)
-        print(f"  [PUMP]  ✓ Aspirated {actual:.2f} µL from {SourceVessel}", flush=True)
+        self._registry.aspirate(SourceVessel, actual)
+        time.sleep(0.3 + (VolumeUl / self.MAX_VOL) * 0.4)
+        new_vol = self._registry.get_volume(SourceVessel)
+        print(f"  [PUMP]  ✓ Aspirated {actual:.2f} µL from {SourceVessel} (now {new_vol:.1f} µL)", flush=True)
         return Aspirate_Responses(AspiratedVolumeUl=actual)

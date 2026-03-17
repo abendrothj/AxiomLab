@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from sila2.server import SilaServer
 
+from .vessel_state import VesselRegistry
 from .feature_implementations.centrifuge_impl import CentrifugeImpl
 from .feature_implementations.incubator_impl import IncubatorImpl
 from .feature_implementations.liquidhandler_impl import LiquidHandlerImpl
@@ -20,6 +21,8 @@ from .generated.spectrophotometer import SpectrophotometerFeature
 
 
 class Server(SilaServer):
+    vessel_registry: VesselRegistry
+
     def __init__(
         self,
         server_uuid: Optional[UUID] = None,
@@ -38,6 +41,8 @@ class Server(SilaServer):
             server_vendor_url="https://axiomlab.local",
             server_uuid=server_uuid if server_uuid is not None else uuid4(),
         )
+
+        self.vessel_registry = VesselRegistry()
 
         self.centrifuge = CentrifugeImpl(self)
         self.set_feature_implementation(CentrifugeFeature, self.centrifuge)

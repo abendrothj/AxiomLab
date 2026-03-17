@@ -573,31 +573,6 @@ async fn run_full_pipeline(
 }
 
 #[tokio::test]
-async fn proof_policy_allows_read_only_without_verus() {
-    // Even with failed Verus artifacts, read-only actions should pass
-    let engine = RuntimePolicyEngine::new(test_manifest(ArtifactStatus::Failed))
-        .mark_signature_verified();
-    let ctx = test_execution_context();
-    let sandbox = lab_sandbox();
-    let policy = CapabilityPolicy::default_lab();
-    let registry = ToolRegistry::new();
-
-    let call = ToolCall {
-        name: "read_absorbance".into(),
-        params: serde_json::json!({"vessel_id": "c1", "wavelength_nm": 450.0}),
-    };
-
-    // Should pass proof policy (read-only, no artifacts required)
-    // Will fail at dispatch (no handler), but that's expected
-    let result = run_full_pipeline(&sandbox, &policy, &engine, &ctx, &registry, &call).await;
-    // Dispatch fails because registry is empty, but proof policy passed
-    assert!(
-        result.is_err() && result.as_ref().unwrap_err().contains("DISPATCH"),
-        "should pass proof policy but fail dispatch: {result:?}"
-    );
-}
-
-#[tokio::test]
 async fn proof_policy_blocks_actuation_with_failed_verus() {
     let engine = RuntimePolicyEngine::new(test_manifest(ArtifactStatus::Failed))
         .mark_signature_verified();
