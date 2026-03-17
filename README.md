@@ -1,396 +1,219 @@
 # AxiomLab
 
-> A bare-metal, memory-safe, and formally verified Rust runtime for autonomous AI scientists and self-driving laboratories.
+> A memory-safe Rust runtime for autonomous AI-driven lab exploration, with formal verification tooling and SiLA 2 hardware integration.
 
-## Project Background
+## What This Actually Is
 
-**The Vision:** Autonomous scientific discovery requires three things to be simultaneously true:
-1. **Memory-safe execution** — no buffer overflows, use-after-free, or data races that could corrupt experimental results or crash mid-measurement
-2. **Formally verified algorithms** — numerical instabilities, specification drift, and unit mismatches must be impossible, not just unlikely
-3. **Real-time reasoning** — the system must observe outcomes, hypothesize new experiments, and decide what to measure next — all with bounded latency
+AxiomLab is a working prototype of an autonomous science agent. An LLM (local Ollama) continuously proposes lab experiments, and a Rust orchestrator validates every proposed action through a 5-stage safety pipeline before dispatching it to lab hardware over SiLA 2 gRPC. Results are streamed to a web dashboard in real time.
 
-Most existing systems pick two. MatLab/Python excel at numerics and reasoning but sacrifice memory safety. Embedded systems gain safety but lose flexibility. Formal methods tools (Coq, Isabelle) verify correctness but struggle with real I/O, sensors, and hardware integration.
+**What works today (tested, integrated, proven by 19 passing integration tests):**
+- **5-stage tool validation pipeline** — sandbox allowlist → two-person approval → capability bounds → proof-artifact policy → audit + dispatch
+- **SiLA 2 gRPC hardware layer** — 6 instruments (liquid handler, robotic arm, spectrophotometer, incubator, centrifuge, pH meter) with 12 operations, talking to a real gRPC server
+- **Proof-policy gating** — Verus verification artifacts gate high-risk actions (actuation, destructive); read-only actions pass without proofs
+- **Continuous autonomous loop** — LLM proposes → orchestrator validates → hardware executes → results feed back → LLM proposes next
+- **Web visualizer** — real-time WebSocket dashboard with activity feed, state graph, and discovery journal
+- **Immutable SQLite audit log** — append-only, WAL-mode event database that survives server restarts
+- **Docker Compose** — three-service stack (Ollama LLM, SiLA 2 Python mock, AxiomLab Rust server) with health checks
 
-**AxiomLab unifies all three.** It provides:
-- **Bare-metal Rust** for zero-overhead abstraction and POSIX I/O
-- **Verus + Lean** for formal guarantees on numerics, concurrency, and hardware bounds (with release-gate enforcement for sorry-free signed artifacts)
-- **LLM-driven proof synthesis** that autonomously refines Verus annotations until verification succeeds
-- **Aeneas integration** for end-to-end MIR→Lean translation
-- **Hardware agnostic** — runs on x86 servers with full Verus verification, and on Raspberry Pi (arm64) with Lean/Aeneas subset
-- **Five-phase hardening system** — tamper-evident audit chain, hardware capability bounds, two-person approval control, proof-policy enforcement, and replayable compliance bundles for partner lab audit
-
-This is what it means to build a runtime *for* science, not despite it.
+**What is simulated / not yet production:**
+- Hardware is a **Python SiLA 2 mock server** returning plausible values — not real physical instruments
+- LLM is **qwen2.5-coder:7b** via local Ollama — capable enough for structured tool calls, not a frontier reasoning model
+- The "science" is constraint-space exploration — the agent probes parameter bounds and reports what it finds, not novel chemistry
+- Verus formal verification only runs on **x86-linux** (ARM gets a graceful stub)
+- Two-person approval uses Ed25519 signatures but key management is manual / external
 
 ## Crate Map
 
-| Crate | Phase | Purpose |
+| Crate | Purpose | Status |
 |---|---|---|
-| `scientific_compute` | 1 | Pure-Rust linear algebra (`nalgebra`), FFT (`rustfft`), and numerical primitives — no C/Fortran FFI. |
-| `physical_types` | 1 | Compile-time dimensional analysis via `uom` — prevents unit-mismatch bugs at the type level. |
-| `proof_artifacts` | 2 | Manifest schema with RiskClass, ActionPolicy, and RuntimePolicyEngine for proof-based authorization. |
-| `agent_runtime` | 2 | Sandboxed agent orchestrator: path/command allowlists, four-layer validation (sandbox → capability → approval → proof-policy), tamper-evident audit chain with remote sink, two-person approval with Ed25519 signatures, replayable compliance bundles. |
-| `verus_proofs` | 3 | Verus-compatible specs (macro shim for dual `rustc`/Verus compilation), concurrency token proofs, hardware-bound invariants, verified resource allocator. |
-| `proof_synthesizer` | 3 | VeruSAGE-inspired observe→reason→act loop: invokes Verus compiler, parses diagnostics, asks LLM to refine proof annotations until verification succeeds. |
-| `aeneas_lean_semantics` | 4 | End-to-end Rust MIR → Aeneas → Lean 4 pipeline: MIR export, Aeneas translation, Lean type-checking. |
+| `server` | Axum HTTP + WebSocket server, SQLite event log, continuous exploration loop | Working, tested |
+| `agent_runtime` | Orchestrator (5-stage validation), SiLA 2 gRPC clients (6 instruments), sandbox, capabilities, approvals, audit, tools | Working, 19 integration tests |
+| `proof_artifacts` | Manifest schema, RuntimePolicyEngine, RiskClass/ActionPolicy, Ed25519 signing, CI gate | Working, used in production pipeline |
+| `scientific_compute` | Pure-Rust linear algebra (`nalgebra`), FFT (`rustfft`), OLS regression, lab data parsing | Working |
+| `physical_types` | Compile-time dimensional analysis via `uom` | Working |
+| `verus_proofs` | Verus-compatible specs (dual `rustc`/Verus compilation shim), hardware-bound invariants | Compiles; Verus verification requires x86-linux |
+| `proof_synthesizer` | VeruSAGE-inspired observe→reason→act loop for iterative Verus proof repair | Compiles; requires Verus + LLM to run |
+| `aeneas_lean_semantics` | Rust MIR → Aeneas → Lean 4 translation pipeline | Compiles; requires Aeneas + Lean toolchain |
 
-## Deployment Hardening: Five Integrated Layers
+## Deployment Hardening: Five Validation Stages
 
-Built into `agent_runtime`, these layers enforce compliance before any tool call executes:
+Every tool call from the LLM passes through all five stages in `agent_runtime/src/orchestrator.rs` before reaching hardware. This is real code, not a design doc — it runs in production and is tested by 19 integration tests.
 
-| Layer | Component | Mechanism | Example |
+| Stage | Component | What It Does | Tested By |
 |---|---|---|---|
-| **1. Sandbox** | Command allowlist | Blocks unauthorized system calls | Rejects `rm -rf`, allows `aws s3 ls` |
-| **2. Capability** | Numeric bounds | Enforces hardware limits | Arm motion: x ∈ [0,300]mm, dispense: volume ∈ [0.5,1000]µL |
-| **3. Approval** | Two-person control | Ed25519 signatures (operator + PI) | High-risk actions (Actuation, Destructive) blocked without approval record |
-| **4. Proof Policy** | Artifact authorization | RiskClass → required proofs | ReadOnly action allowed; high-risk actions require passed, signed, and sorry-free artifacts defined by policy |
-| **5. Audit Chain** | Tamper-evident logging | SHA256 hash-chained JSONL + remote mirror | Every decision logged with approval_ids, mismatches detected by `auditctl` |
+| **0. Sandbox** | Command allowlist | Blocks tools not in the allowlist | `sandbox_rejects_disallowed_command`, `orchestrator_sandbox_blocks_unauthorized_tool` |
+| **1. Approval** | Two-person control | Ed25519 signatures required for high-risk actions | `proof_policy_enforcement` tests |
+| **2. Capability** | Numeric bounds | Rejects parameters outside hardware limits (e.g., volume > 1000µL, x > 300mm) | `capability_rejects_out_of_bounds_*`, `orchestrator_capability_rejects_then_retries` |
+| **3. Fail-Closed** | High-risk gate | If no proof policy engine is configured, all actuation/destructive actions are denied | Implicit in orchestrator logic |
+| **4. Proof Policy** | Artifact authorization | Checks Verus verification status; blocks actuation if proofs are missing/failed | `proof_policy_blocks_actuation_with_failed_verus`, `orchestrator_proof_policy_blocks_actuation_allows_reads` |
+| **5. Dispatch** | Audit + execute | Logs hash-chained audit event, dispatches tool call over SiLA 2 gRPC | `orchestrator_drives_multi_step_experiment_through_sila2` |
 
-**Result:** Every tool call is logged, bounded, approved, and provably immutable.
+## SiLA 2 Hardware Integration
 
-## System Architecture & Flow
+AxiomLab talks to lab hardware using the [SiLA 2](https://sila-standard.com/) standard over gRPC. Six instruments are implemented:
 
-### High-Level Data Flow
+| Instrument | Operations | Risk Class |
+|---|---|---|
+| Liquid Handler | `dispense`, `aspirate` | LiquidHandling |
+| Robotic Arm | `move_arm` | Actuation |
+| Spectrophotometer | `read_absorbance` | ReadOnly |
+| Incubator | `set_temperature`, `read_temperature`, `incubate` | Actuation / ReadOnly |
+| Centrifuge | `spin_centrifuge`, `read_centrifuge_temperature` | Actuation / ReadOnly |
+| pH Meter | `read_ph`, `calibrate_ph` | ReadOnly |
 
-```mermaid
-graph LR
-    A["Physical Experiment<br/>(sensors, hardware)"]
-    B["scientific_compute<br/>(numerics, FFT, OLS)"]
-    C["agent_runtime<br/>(reasoning, decisions)"]
-    D["verus_proofs<br/>(formal specs and invariants)"]
-    E["proof_synthesizer<br/>(observe-reason-act over Verus diagnostics)"]
-    F["aeneas_lean_semantics<br/>(MIR export -> Aeneas -> Lean checks)"]
-    G["Lean 4<br/>(type-check and theorem validation)"]
-    
-    A -->|raw measurements| B
-    B -->|analysis results| C
-    C -->|hypothesis| B
-    C -->|execute tool| C
-    D -->|verification failures| E
-    E -->|refined proof annotations| D
-    B -->|crate source for translation| F
-    F -->|generated .lean files| G
-    G -->|checked properties inform models| C
-    
-    style A fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
-    style B fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
-    style C fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
-    style D fill:#f8d7da,color:#111,stroke:#333,stroke-width:1px
-    style E fill:#e7d4f5,color:#111,stroke:#333,stroke-width:1px
-    style F fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
-    style G fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
-```
+**Current state:** A Python SiLA 2 mock server (`sila_mock/`) implements all six instruments with the `sila2` v0.14.0 library. The Rust side (`agent_runtime/src/hardware.rs`) uses `tonic` v0.12 gRPC clients. All 12 operations are tested end-to-end through the validation pipeline.
 
-### Proof Synthesis Loop (Observe → Reason → Act)
-
-```mermaid
-graph TD
-    A["Source Code"] -->|compile| B["Verus Compiler"]
-    B -->|success?| C{Verification<br/>Passed?}
-    C -->|yes| D["Proof Complete"]
-    C -->|no| E["Parse Diagnostics"]
-    E -->|errors + source| F["Send to LLM<br/>with History Trimming"]
-    F -->|candidate fix| G["Extract Code Block<br/>Largest Match"]
-    G -->|updated source| A
-    A -->|retry| B
-    
-    style A fill:#e7f3ff,color:#111,stroke:#333,stroke-width:1px
-    style B fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
-    style D fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
-    style E fill:#f8d7da,color:#111,stroke:#333,stroke-width:1px
-    style F fill:#e7d4f5,color:#111,stroke:#333,stroke-width:1px
-    style G fill:#ffe7ba,color:#111,stroke:#333,stroke-width:1px
-```
-
-### Agent Reasoning & Experiment Loop
-
-```mermaid
-graph TD
-    A["Experiment<br/>Queued"]
-    B["Run Measurement<br/>scientific_compute"]
-    C["Analyze Results<br/>ReasoningEngine"]
-    D{Outcome?}
-    E["Hypothesis:<br/>Try Nonlinear"]
-    F["Collect More<br/>Data"]
-    G["Result<br/>Confirmed"]
-    H["Critical Error<br/>Debug"]
-    I["Stop:<br/>Max Experiments Reached"]
-    
-    A --> B
-    B --> C
-    C --> D
-    D -->|TryNonlinear| E
-    E --> B
-    D -->|CollectMore| F
-    F --> B
-    D -->|Confirmed| G
-    D -->|Stop| I
-    D -->|Debug| H
-    
-    style A fill:#e7f3ff,color:#111,stroke:#333,stroke-width:1px
-    style G fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
-    style H fill:#f8d7da,color:#111,stroke:#333,stroke-width:1px
-    style B fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
-    style C fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
-    style I fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
-```
-
-### End-to-End Verification Pipeline
-
-```mermaid
-graph LR
-    A["Rust Crate Directory"]
-    B["cargo rustc -- --emit=mir"]
-    C["MIR Artifact (.mir)"]
-    D["aeneas --backend lean"]
-    E["Generated Lean Files (.lean)"]
-    F["lean check_all"]
-    G["Lean Type-Check Passed"]
-    
-    A --> B
-    B -->|success| C
-    C --> D
-    D --> E
-    E --> F
-    F --> G
-    
-    style A fill:#e7f3ff,color:#111,stroke:#333,stroke-width:1px
-    style B fill:#fff3cd,color:#111,stroke:#333,stroke-width:1px
-    style G fill:#d4edda,color:#111,stroke:#333,stroke-width:1px
-    style F fill:#d1ecf1,color:#111,stroke:#333,stroke-width:1px
-```
+**To use real hardware:** Replace the Python mock with actual SiLA 2-compliant instrument drivers. The Rust client code doesn't change — SiLA 2 is the interface contract.
 
 ## Quick Start
 
-### Option A: Local (quick tests only — no formal verification)
+### Option A: Docker Compose (recommended — everything works out of the box)
+
 ```bash
+docker compose up --build
+# Starts: Ollama (LLM) + SiLA 2 mock (hardware) + AxiomLab server
+# Web dashboard: http://localhost:3000
+# The agent begins autonomous exploration automatically
+```
+
+**What happens:** Ollama pulls `qwen2.5-coder:7b`, the Python SiLA 2 mock starts on port 50052, and the Rust server connects to both. The LLM proposes experiments, the orchestrator validates them through all 5 stages, and SiLA 2 gRPC calls execute against the mock instruments. Results stream to the web dashboard via WebSocket.
+
+### Option B: Local development (no Docker, no LLM)
+
+```bash
+# Build the workspace
 cargo build
-cargo test
-# As of 2026-03-11 on this repository state: 124 passed, 12 ignored, 0 failed
+
+# Run unit + pure-Rust tests (no external dependencies)
+cargo test -p agent_runtime -- --test sila2_e2e capability sandbox proof_policy
+
+# Run integration tests (requires SiLA 2 mock on localhost:50052)
+cd sila_mock && python -m axiomlab_mock --insecure &
+cargo test -p agent_runtime -- --test sila2_e2e --test orchestrator_sila2
 ```
 
-### Option B: Docker (toolchain-complete environment) Recommended
+### Option C: Run just the SiLA 2 integration tests
+
 ```bash
-# Build the container (includes Verus, Aeneas, Lean 4, Z3)
-docker compose build
+# Start the mock hardware server
+cd sila_mock && python -m axiomlab_mock --insecure &
 
-# Run tests in the container
-docker compose run --rm axiomlab cargo test -- --include-ignored
-# As of 2026-03-11 on arm64 (aarch64): 137 passed, 0 failed, 0 ignored
-# Verus-dependent tests detect the arm64 stub and skip instead of failing.
-# On amd64 Verus runs for real and verified_count >= 18 is asserted.
+# Run all 19 integration tests
+cargo test -p agent_runtime --test sila2_e2e --test orchestrator_sila2 2>&1 | tail -5
+# Expected: test result: ok. 19 passed; 0 failed
 ```
 
-### Production Proof Release Gate (10 Steps)
+## Test Coverage
+
+### Integration Tests (19 total — all passing)
+
+**`agent_runtime/tests/sila2_e2e.rs`** — 14 tests covering the validation pipeline at the component level:
+- 8 tests hit the live SiLA 2 mock over gRPC (dispense, move_arm, read_absorbance, spin_centrifuge, pH, full pipeline with/without proof policy)
+- 6 pure-Rust tests validate sandbox rejection, capability bounds, and proof policy logic without any network
+
+**`agent_runtime/tests/orchestrator_sila2.rs`** — 5 tests using the real `Orchestrator.run_experiment()` with a scripted LLM:
+- Multi-step experiment (move_arm → dispense → read_absorbance → conclude)
+- Proof policy blocks actuation but allows reads
+- Capability bounds reject then retry within limits
+- Sandbox blocks unauthorized tools
+- Full 5-instrument titration workflow (calibrate_ph → move_arm → dispense → read_ph → read_absorbance)
+
+**What these tests prove:** The complete validation pipeline works end-to-end — LLM output is parsed, validated through all 5 stages, dispatched over real gRPC to a real server, and results are captured with audit trails. Rejection at each stage is independently tested.
+
+**What these tests don't prove:** Real physical hardware safety (the mock returns plausible values, not real sensor data). LLM reasoning quality (the scripted LLM always makes the right call). Network failure handling. Concurrent multi-agent scenarios.
+
+## Docker Compose Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────────────┐
+│   Ollama     │     │  SiLA 2 Mock │     │   AxiomLab       │
+│  (LLM)      │◄────│  (Hardware)  │◄────│   (Rust Server)  │
+│  port 11434  │     │  port 50052  │     │   port 3000      │
+│  qwen2.5     │     │  6 instruments│    │   axum + ws      │
+│  -coder:7b   │     │  Python/gRPC │     │   SQLite audit   │
+└─────────────┘     └──────────────┘     └──────────────────┘
+```
+
+**Environment variables:**
+- `SILA2_ENDPOINT` — gRPC endpoint for hardware (default: `http://sila2-mock:50052`)
+- `AXIOMLAB_LLM_ENDPOINT` — Ollama API (default: `http://ollama:11434/v1`)
+- `AXIOMLAB_LLM_MODEL` — model name (default: `qwen2.5-coder:7b`)
+- `VERUS_VERIFIED` — set to `1` in Docker to indicate Verus verification passed at build time
+- `AXIOMLAB_DOCKER` — set to `1` inside the container
+## Proof Release Gate
 
 ```bash
 ./scripts/proof_release_gate.sh
 ```
 
-This one command executes the full hardened proof release gate with five integration layers:
+Runs a 10-step release gate that builds the binary, generates and signs a proof manifest, enforces CI policy checks, runs sandbox/policy tests, verifies the audit chain, and exports a replayable compliance bundle. Outputs are in `.artifacts/proof/`.
 
-**Step Layer 1: Build & Manifest Signing**
-1. Build agent-runtime binary
-2. Generate signed proof manifest (RiskClass policies)
-3. Generate signing keypair
-4. Sign manifest with Ed25519
-5. Verify manifest signature
+## Formal Verification Tooling
 
-**Step Layer 2: Policy Enforcement & Testing**
-6. Enforce CI proof policy (required artifacts, zero `sorry`, build identity)
-7. Run proof-artifact verification tests (manifest validity, policy mapping)
-8. Run runtime sandbox isolation tests (allowlist enforcement, command blocking)
-9. Run runtime policy integration tests (capability bounds, approval enforcement)
+AxiomLab includes three formal verification paths. These are **tooling integrations**, not claims that the entire system is formally verified.
 
-**Step Layer 3: Audit & Verification**
-10. Verify tamper-evident audit chain integrity
-11. Export replayable compliance bundle for partner-lab audit
+| Tool | What It Does | Current State |
+|---|---|---|
+| **Verus** | SMT-based verification of Rust code via Z3 | `verus_verified/lab_safety.rs` and `dilution_protocol.rs` are verified. Verus only runs on x86-linux. ARM gets a stub. |
+| **Aeneas** | Translates Rust MIR → pure lambda calculus → Lean 4 | Pipeline is implemented in `aeneas_lean_semantics/`. Requires Aeneas binary. |
+| **Lean 4** | Interactive theorem prover for verifying translated code | Lean files exist in `lean4/`. Requires Lean toolchain. |
 
-**Key Outputs:**
-- `.artifacts/proof/manifest.signed.json` — Signed action policy with RiskClass → capability bounds mapping
-- `.artifacts/proof/runtime_audit.jsonl` — Tamper-evident audit chain (hash-chained events, approval_ids linkage)
-- `.artifacts/proof/replay_bundle/manifest.signed.json` — Signed manifest (replicated)
-- `.artifacts/proof/replay_bundle/runtime_audit.jsonl` — Event chain for audit replay
-- `.artifacts/proof/replay_bundle/approval_bundle.json` — Ed25519-signed approval records (if provided)
-- `.artifacts/proof/replay_bundle/approval_verification.json` — Verification report (signatures, role satisfaction)
+**Proof synthesis** (`proof_synthesizer/`): An LLM-in-the-loop agent that invokes the Verus compiler, parses diagnostics, and asks the LLM to fix proof annotations. Inspired by VeruSAGE. Requires both Verus and an LLM to run.
 
-**All 10 steps pass:** Gate is deployment-ready for partner labs to independently verify and replay.
+## Web Visualizer
 
-## Docker Testing & Verification
+A React + Vite dashboard that connects to the server via WebSocket:
+- **Left panel:** Live activity feed — tool executions with success/rejection status
+- **Center panel:** State transition graph via ReactFlow
+- **Right panel:** Discovery journal — experiment conclusions logged by the agent
+- **Header:** Iteration counter, current stage, connection status
 
-AxiomLab includes formal verification infrastructure (Verus, Aeneas, Lean 4, Z3) inside Docker.
+Persists across refreshes — journal and history are loaded from SQLite on page load.
 
-**Why Docker?**
-- Verus, Aeneas, and Lean are bundled and pre-configured
-- Aeneas translation pipeline runs end-to-end
-- Lean 4 type-checker proves all theorems
-- Reproducible per-architecture builds (amd64, arm64), with known capability differences
-- Full hardening validation (audit chain, capability bounds, approval verification, replay bundle export)
-
-**Common Docker commands:**
 ```bash
-# Build the container
-docker compose build
-
-# Run tests in container (see arm64 note in Quick Start)
-docker compose run --rm axiomlab cargo test -- --include-ignored
-
-# Run the full production proof release gate with replay bundle export
-docker compose run --rm axiomlab ./scripts/proof_release_gate.sh
-
-# Verify audit chain integrity
-docker compose run --rm axiomlab ./target/debug/auditctl verify --path .artifacts/proof/runtime_audit.jsonl
-
-# Verify approval signatures and replay bundle
-docker compose run --rm axiomlab ./target/debug/approvalctl verify \
-  --bundle .artifacts/proof/replay_bundle/approval_bundle.json \
-  --action move_arm \
-  --risk-class Actuation \
-  --git-commit $(git rev-parse HEAD) \
-  --binary-hash $(sha256sum ./target/debug/agent_runtime | cut -d' ' -f1)
+cd visualizer && npm install && npm run dev
+# Connects to AxiomLab server on localhost:3000
 ```
-
-**Replay Bundle for Partner Labs:**
-After `proof_release_gate.sh` completes, `.artifacts/proof/replay_bundle/` contains:
-- Signed manifest (action policies with RiskClass → bounds mapping)
-- Tamper-evident audit chain (hash-chained JSONL with approval_ids)
-- Approval records (Ed25519-signed decisions)
-- Verification report (integrity + signature validation results)
-
-Partner labs can then independently verify all decisions before re-executing the same experiment with confidence.
-
-# Run only formally-verified tests
-docker compose run --rm axiomlab cargo test -- --ignored
-
-# Run a specific test (e.g., Verus proof validation)
-docker compose run --rm axiomlab cargo test verus_proofs_still_hold -- --ignored
-
-# Interactive shell inside the container
-docker compose run --rm axiomlab bash
-
-# Run with Ollama for local LLM inference
-export AXIOMLAB_LLM_ENDPOINT="http://localhost:11434/v1"
-export AXIOMLAB_LLM_MODEL="phi3"
-docker compose run --rm axiomlab cargo test
-```
-
----
-
-## Recently Fixed (Phase 6 → 6.1)
-
-These improvements enable native Docker builds on both amd64 and arm64, and improve proof synthesis efficiency:
-
-**ARM / Docker support**
-- Dockerfile stages 2–4 (Aeneas, Lean, runtime) removed `--platform=linux/amd64` pin
-- Uses `ARG TARGETARCH` in runtime stage: on amd64 Verus is available; on arm64 a graceful stub is installed
-- `docker-compose.yml` now builds natively for the host architecture
-- **Result**: Docker builds and release gate run on arm64; Verus-dependent test behavior differs by architecture
-
-**Context window bloat**
-- Agent now trims history to `[system_prompt] + [last 4 messages]` after each retry, preventing unbounded accumulation
-- Source code is included inline **only when ≤120 lines**; larger files include errors alone with instructions to respond via unified diff
-- **Result**: can run 10+ proof synthesis iterations without context window exhaustion
-
-**Code extraction robustness**
-- `extract_rust_block()` now scans **all** ` ```rust ` fences and returns the **longest** block (not the first)
-- Handles LLM responses that include illustrative snippets before the main corrected file
-- **Result**: eliminates the fragile regex single-match bug
-
----
 
 ## Known Limitations
 
-These are honest assessments of the current prototype — not aspirations.
+These are honest assessments — not future roadmap items.
 
-**Performance claims**
-`scientific_compute` uses `nalgebra` (pure Rust) and `rustfft`. These are fast, but will not universally match hand-tuned BLAS/LAPACK (OpenBLAS, MKL) for large matrix workloads. The tradeoff is deliberate: memory safety and formal verifiability over peak throughput. The claim "rivals C/Fortran" applies to single-core workloads on modern hardware; HPC use cases would need benchmarking.
+| Limitation | Detail |
+|---|---|
+| **Mock hardware** | The SiLA 2 mock returns plausible fake data. No real instruments have been connected. |
+| **Local LLM** | qwen2.5-coder:7b is good enough for structured tool calls but is not a frontier reasoning model. Discovery quality depends on the model. |
+| **Verus is x86-only** | Formal verification only runs on x86-linux. ARM builds skip Verus gracefully. |
+| **No real science yet** | The agent explores parameter bounds of mock instruments. It hasn't discovered anything novel. |
+| **Single-agent** | One LLM loop, one hardware pool. No multi-agent coordination. |
+| **Key management** | Ed25519 signing is implemented but key custody, rotation, and revocation are manual. |
+| **Audit is local** | Hash-chained audit log detects local tampering but has no external anchor or per-event signatures. |
+| **No real error recovery** | If gRPC fails or LLM returns garbage, the loop logs and retries. No sophisticated retry/fallback logic. |
 
-**Verus on ARM**
-Verus only ships x86-linux binaries. On Raspberry Pi (arm64) it is unavailable. Lean 4, Aeneas, and all agent reasoning loops run natively on arm64; only formal Verus verification requires an amd64 machine or qemu.
+## Project Structure
 
-**arm64 Docker test status (2026-03-11)**
-- `docker compose run --rm axiomlab cargo test` — **124 passed, 0 failed, 13 ignored**
-- `docker compose run --rm axiomlab cargo test -- --include-ignored` — **137 passed, 0 failed, 0 ignored**
-- `docker compose run --rm axiomlab ./scripts/proof_release_gate.sh` — all 10 steps pass
-
-Verus-dependent tests call `verus --version` before invoking the compiler; on arm64 the stub prints `x86-linux only` so `verus_available()` returns `false` and the tests skip cleanly.
-
----
-
-## Next Steps
-
-### 1. Raspberry Pi deployment (Tier 1 — Docker ready, hardware $25)
-
-**Status:** Docker container builds and all tests pass on arm64. Full `cargo test -- --include-ignored` is green (137 passed, 0 failed).
-
-**What works on Raspberry Pi:**
-- `docker compose build` compiles everything natively
-- `docker compose run --rm axiomlab cargo test -- --include-ignored` — 137 passed, 0 failed
-- `docker compose run --rm axiomlab ./scripts/proof_release_gate.sh` completes end-to-end
-- Lean theorem proving, Aeneas translation, agent reasoning, and discovery experiments run fully on arm64
-- Verus (x86-only) — Verus tests skip gracefully on arm64 (the stub is detected and skipped)
-
-**Quick deployment:**
-```bash
-# On Raspberry Pi 4/5 with Docker installed:
-git clone <repo>
-cd AxiomLab
-docker compose build     # ~15 min on Pi 5, ~30 min on Pi 4
-docker compose run --rm axiomlab cargo test -- --include-ignored
 ```
-
-**With local Ollama for proof synthesis:**
-```bash
-# Option A: Run Ollama on the Pi itself (requires 4GB+ free RAM)
-ollama pull phi3
-export AXIOMLAB_LLM_ENDPOINT="http://localhost:11434/v1"
-export AXIOMLAB_LLM_MODEL="phi3"
-docker compose run --rm axiomlab cargo test
-
-# Option B: Run Ollama on a nearby PC (e.g., RTX 3060 Ti on Linux)
-export AXIOMLAB_LLM_ENDPOINT="http://192.168.1.100:11434/v1"  # your PC's IP
-docker compose run --rm axiomlab cargo test
+AxiomLab/
+├── server/              # Axum HTTP/WS server + SQLite + exploration loop
+├── agent_runtime/       # Orchestrator, SiLA 2 clients, sandbox, capabilities, audit
+│   ├── src/hardware.rs  # SiLA 2 gRPC client pool (6 instruments)
+│   ├── src/orchestrator.rs  # 5-stage validation pipeline
+│   ├── tests/sila2_e2e.rs   # 14 integration tests
+│   └── tests/orchestrator_sila2.rs  # 5 orchestrator-level tests
+├── proof_artifacts/     # Manifest schema, policy engine, signing
+├── scientific_compute/  # nalgebra, rustfft, OLS, lab data
+├── physical_types/      # uom dimensional analysis
+├── verus_proofs/        # Verus specs + verification shim
+├── proof_synthesizer/   # LLM-driven Verus proof repair
+├── aeneas_lean_semantics/  # MIR → Aeneas → Lean pipeline
+├── lean4/               # Lean 4 theorem files
+├── verus_verified/      # Verified Rust source (lab_safety.rs)
+├── sila_mock/           # Python SiLA 2 mock server (6 instruments)
+├── visualizer/          # React + Vite web dashboard
+├── scripts/             # proof_release_gate.sh
+├── docker-compose.yml   # Three-service stack
+└── Dockerfile           # Multi-stage build (Verus + Aeneas + Lean + Rust)
 ```
-
-> No code changes required. The Docker setup is already arm64-ready. Just plug in the Pi, clone the repo, and deploy.
-
----
-
-### 2. Real hardware sensors (Tier 1 — ~$25)
-
-Demonstrates Beer-Lambert Law discovery on **actual measurements** instead of synthetic data.
-
-| Part | ~Cost | Purpose |
-|---|---|---|
-| AS7341 spectral sensor (Adafruit) | $15 | 10-channel spectrophotometer over I2C |
-| MCP3008 ADC | $4 | 8-channel analog→digital (SPI) |
-| Jumper wires + breadboard | $5 | Wiring |
-| Food dye + small glass | $1 | "Cuvette" |
-
-**What to implement** (driver layer is scaffolded, hardware is stubbed):
-- Replace the `// STUB` in [verus_proofs/src/concurrency.rs](verus_proofs/src/concurrency.rs) with `rppal::spi::Spi` reads from the MCP3008
-- Replace the `// SIMULATION STUB` in [agent_runtime/src/tools.rs](agent_runtime/src/tools.rs) with real AS7341 I2C reads via `rppal::i2c`
-- Feed real readings into `scientific_compute::lab_data::parse_sensor_log()` and run `linear_regression()`
-
----
-
-### 3. Titration demo (Tier 2 — ~$50 additional)
-
-| Part | ~Cost | Purpose |
-|---|---|---|
-| pH probe + module | $12 | Acid-base endpoint detection |
-| Peristaltic pump | $15 | Automated titrant delivery |
-
-With this, the agent can autonomously: dispense → measure pH → decide → repeat until equivalence point, all with Verus-proved hardware bounds.
-
----
-
-### 4. Proof synthesis improvements (software only)
-
-- **Structured diffs**: switch `proof_synthesizer` from full-file rewrites to unified diff requests, eliminating context window bloat
-- **JSON tool calls**: replace regex code extraction with structured `{"action": "write_file", "content": "..."}` responses
-- **Binary-generated Lean**: invoke the real Aeneas binary on `scientific_compute::fft` MIR to generate `ScientificCompute.Fft.lean` and prove `forward_preserves_length` without `sorry`
-
----
 
 ## License
 

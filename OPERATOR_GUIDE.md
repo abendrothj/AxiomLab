@@ -1,169 +1,147 @@
 # AxiomLab Operator Guide
 
-This document is the consolidated operator reference for architecture, security controls, and day-2 run procedures.
+Operational reference for running, testing, and understanding the safety architecture. This document describes what the system **actually does** — not aspirations.
 
 ## 1) System Architecture
 
-AxiomLab is a multi-crate Rust workspace that combines:
-- Scientific compute primitives
-- Runtime policy and control-plane hardening
-- Formal verification tooling (Verus, Aeneas, Lean)
-- Proof artifact generation and policy gating
+AxiomLab is a Rust workspace (8 crates) + a Python SiLA 2 mock server + a React web dashboard. The core loop: an LLM proposes lab experiments → a 5-stage validation pipeline checks every proposed action → validated actions execute over SiLA 2 gRPC → results feed back to the LLM.
 
 ### 1.1 Crate Roles
 
-- scientific_compute: Pure Rust numerics and data processing.
-  - Source: [scientific_compute/src/lib.rs](scientific_compute/src/lib.rs)
-  - Key modules:
-    - [scientific_compute/src/linalg.rs](scientific_compute/src/linalg.rs)
-    - [scientific_compute/src/fft.rs](scientific_compute/src/fft.rs)
-    - [scientific_compute/src/discovery.rs](scientific_compute/src/discovery.rs)
-    - [scientific_compute/src/lab_data.rs](scientific_compute/src/lab_data.rs)
-- physical_types: Compile-time dimensional correctness via uom.
-  - Source: [physical_types/src/quantities.rs](physical_types/src/quantities.rs)
-- proof_artifacts: Manifest schema, signing, CI gate checks, runtime explain/authorize policy.
-  - Sources:
-    - [proof_artifacts/src/manifest.rs](proof_artifacts/src/manifest.rs)
-    - [proof_artifacts/src/policy.rs](proof_artifacts/src/policy.rs)
-    - [proof_artifacts/src/ci.rs](proof_artifacts/src/ci.rs)
-    - [proof_artifacts/src/generator.rs](proof_artifacts/src/generator.rs)
-    - [proof_artifacts/src/signature.rs](proof_artifacts/src/signature.rs)
-- agent_runtime: Agent orchestration and hardening path for runtime tool calls.
-  - Sources:
-    - [agent_runtime/src/orchestrator.rs](agent_runtime/src/orchestrator.rs)
-    - [agent_runtime/src/sandbox.rs](agent_runtime/src/sandbox.rs)
-    - [agent_runtime/src/capabilities.rs](agent_runtime/src/capabilities.rs)
-    - [agent_runtime/src/approvals.rs](agent_runtime/src/approvals.rs)
-    - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs)
-    - [agent_runtime/src/tools.rs](agent_runtime/src/tools.rs)
-- verus_proofs: Runtime mirrors of verified bounds and Verus invocation helpers.
-  - Sources:
-    - [verus_proofs/src/hardware_bounds.rs](verus_proofs/src/hardware_bounds.rs)
-    - [verus_proofs/src/concurrency.rs](verus_proofs/src/concurrency.rs)
-    - [verus_proofs/src/resource_allocator.rs](verus_proofs/src/resource_allocator.rs)
-    - [verus_proofs/src/verify.rs](verus_proofs/src/verify.rs)
-  - Verified source of truth:
-    - [verus_verified/lab_safety.rs](verus_verified/lab_safety.rs)
-    - [verus_verified/dilution_protocol.rs](verus_verified/dilution_protocol.rs)
-- proof_synthesizer: Observe-reason-act loop for iterative Verus proof repair.
-  - Sources:
-    - [proof_synthesizer/src/agent.rs](proof_synthesizer/src/agent.rs)
-    - [proof_synthesizer/src/compiler.rs](proof_synthesizer/src/compiler.rs)
-    - [proof_synthesizer/src/diagnostics.rs](proof_synthesizer/src/diagnostics.rs)
-- aeneas_lean_semantics: MIR export, Aeneas translation, Lean checks.
-  - Sources:
-    - [aeneas_lean_semantics/src/mir_export.rs](aeneas_lean_semantics/src/mir_export.rs)
-    - [aeneas_lean_semantics/src/aeneas.rs](aeneas_lean_semantics/src/aeneas.rs)
-    - [aeneas_lean_semantics/src/lean.rs](aeneas_lean_semantics/src/lean.rs)
+**Production path (server + agent_runtime + proof_artifacts):**
 
-### 1.2 Runtime Authorization Path
+- **server** — Axum HTTP server with WebSocket event streaming, SQLite event log, and the continuous exploration loop that drives the agent.
+  - [server/src/main.rs](server/src/main.rs) — HTTP endpoints (`/ws`, `/api/status`, `/api/history`), auto-starts exploration loop on launch
+  - [server/src/simulator.rs](server/src/simulator.rs) — Connects SiLA 2 clients, builds proof manifest, creates orchestrator, runs LLM loop
+  - [server/src/db.rs](server/src/db.rs) — Append-only SQLite with WAL mode
+  - [server/src/ws_sink.rs](server/src/ws_sink.rs) — WebSocket broadcast sink
 
-High-level flow for any tool action:
-1. Sandbox command allowlist check.
-2. Capability bounds check on numeric parameters.
-3. Two-person approval check for high-risk risk classes.
-4. Proof-policy authorization against manifest artifacts and build identity.
-5. Audit write (hash-chained JSONL) and optional remote mirror.
+- **agent_runtime** — The orchestrator and all safety layers.
+  - [agent_runtime/src/orchestrator.rs](agent_runtime/src/orchestrator.rs) — 5-stage validation pipeline (`try_tool_call`), LLM chat loop (`run_experiment`)
+  - [agent_runtime/src/hardware.rs](agent_runtime/src/hardware.rs) — SiLA 2 gRPC client pool: 6 instruments, 12 methods
+  - [agent_runtime/src/sandbox.rs](agent_runtime/src/sandbox.rs) — Path/command allowlist enforcement
+  - [agent_runtime/src/capabilities.rs](agent_runtime/src/capabilities.rs) — Numeric parameter bounds (volume, position, temperature, etc.)
+  - [agent_runtime/src/approvals.rs](agent_runtime/src/approvals.rs) — Two-person Ed25519 approval records
+  - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — Hash-chained JSONL audit log
+  - [agent_runtime/src/tools.rs](agent_runtime/src/tools.rs) — ToolCall/ToolResult types, ToolRegistry for dispatch
+  - [agent_runtime/src/llm.rs](agent_runtime/src/llm.rs) — LLM client (OpenAI-compatible API)
+  - [agent_runtime/src/events.rs](agent_runtime/src/events.rs) — Event types and EventSink trait
 
-Primary enforcement entry point:
-- [agent_runtime/src/orchestrator.rs](agent_runtime/src/orchestrator.rs)
+- **proof_artifacts** — Proof manifest schema and runtime policy engine.
+  - [proof_artifacts/src/manifest.rs](proof_artifacts/src/manifest.rs) — ProofManifest, ProofArtifact, VerusArtifact, RiskClass
+  - [proof_artifacts/src/policy.rs](proof_artifacts/src/policy.rs) — RuntimePolicyEngine: maps tool actions → risk classes → required artifacts
+  - [proof_artifacts/src/signature.rs](proof_artifacts/src/signature.rs) — Ed25519 manifest signing/verification
+  - [proof_artifacts/src/ci.rs](proof_artifacts/src/ci.rs) — CI gate enforcement (sorry-free, build identity)
 
-Audit implementation:
-- [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs)
+**Scientific compute (standalone, no I/O):**
+
+- **scientific_compute** — Pure-Rust numerics: `nalgebra` linear algebra, `rustfft` FFT, OLS regression, lab data parsing
+- **physical_types** — Compile-time dimensional analysis via `uom`
+
+**Formal verification tooling (requires external toolchains):**
+
+- **verus_proofs** — Verus-compatible specs with a macro shim for dual `rustc`/Verus compilation. Verified source in `verus_verified/lab_safety.rs`.
+- **proof_synthesizer** — LLM-driven iterative Verus proof repair (observe → reason → act). Requires Verus binary + LLM.
+- **aeneas_lean_semantics** — MIR export → Aeneas translation → Lean 4 type-checking. Requires Aeneas + Lean.
+
+### 1.2 Runtime Authorization Path (what actually runs)
+
+When the LLM returns a tool call, `Orchestrator::try_tool_call()` executes these stages in order:
+
+1. **Sandbox** — Is the tool name in the allowlist? If not, reject immediately.
+2. **Approval** — Does this action's risk class require two-person approval? If so, check for valid Ed25519 approval records. Check revocation list.
+3. **Capability** — Are all numeric parameters within hardware bounds? (e.g., dispense volume ∈ [0.5, 1000] µL, arm x ∈ [0, 300] mm)
+4. **Fail-closed** — Is this a high-risk action (Actuation, Destructive) without a proof policy engine configured? If so, deny.
+5. **Proof policy** — Does the RuntimePolicyEngine authorize this action based on Verus artifact status? ReadOnly actions pass without artifacts. Actuation requires passed, signed, sorry-free proofs.
+6. **Dispatch** — Log audit event, call `tools.dispatch()` which sends the gRPC request to SiLA 2 hardware.
+
+Every stage emits audit events. A rejection at any stage stops the pipeline — later stages never run.
 
 ## 2) Security Findings and Risk Priorities
 
-Ordered by severity.
+Honest assessment of security posture. Ordered by severity.
 
-### 2.1 High: Trusted policy construction can bypass signature-verification intent
+### 2.1 High: Policy construction trust boundary
 
-- Relevant code: [proof_artifacts/src/policy.rs](proof_artifacts/src/policy.rs)
-- Issue: The trusted constructor path allows policy use without prior signature verification if used incorrectly.
-- Operational risk: Policy checks can look valid while provenance is not cryptographically established.
-- Recommended action:
-  - Restrict trusted constructor to tests, or
-  - Add explicit provenance state and enforce it at constructor boundary.
+- Code: [proof_artifacts/src/policy.rs](proof_artifacts/src/policy.rs)
+- Issue: The `RuntimePolicyEngine` can be constructed with `trusted` flag without prior signature verification. In production, `simulator.rs` calls `mark_signature_verified()` only when the manifest hash matches a known constant — but this is a compile-time constant, not a runtime cryptographic check.
+- Impact: A modified binary could bypass signature verification intent.
+- Mitigation: Use `proofctl verify` with actual Ed25519 keys before deployment. Restrict trusted constructors to test paths.
 
-### 2.2 High: Audit log is tamper-evident but not independently signed per event
+### 2.2 High: Audit log is tamper-evident but not independently anchored
 
-- Relevant code: [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs)
-- Issue: Hash chaining detects local mutation but does not provide event-level signatures.
-- Operational risk: A complete rewritten chain could pass local hash checks if attacker controls storage.
-- Recommended action:
-  - Add periodic signed checkpoints and
-  - Anchor checkpoint hashes in external immutable storage.
+- Code: [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs)
+- Issue: SHA256 hash chaining detects insertion/deletion after the fact, but a complete chain rewrite would pass local checks. No per-event signatures. No external anchor (blockchain, remote witness, etc.).
+- Impact: An attacker with disk access could rewrite the entire chain.
+- Mitigation: Add periodic signed checkpoints. Mirror audit events to external immutable storage.
 
-### 2.3 Medium: Hardware integration still contains simulation stubs
+### 2.3 Medium: Hardware is entirely simulated
 
-- Relevant code:
-  - [agent_runtime/src/tools.rs](agent_runtime/src/tools.rs)
-  - [verus_proofs/src/concurrency.rs](verus_proofs/src/concurrency.rs)
-- Issue: Some sensor/driver paths return fixed values in simulation mode.
-- Operational risk: False confidence from passing tests without real hardware behavior.
-- Recommended action:
-  - Replace stubs with trait-driven driver adapters and
-  - Add hardware-in-the-loop tests behind explicit feature flags.
+- Code: [sila_mock/](sila_mock/) and [agent_runtime/src/hardware.rs](agent_runtime/src/hardware.rs)
+- Issue: The SiLA 2 mock returns plausible fake data (e.g., dispense returns requested_volume ± noise). The validation pipeline is tested against this mock, not real instruments.
+- Impact: We know the software pipeline works correctly. We don't know if real hardware would behave within the expected response formats.
+- Mitigation: When connecting to real SiLA 2 instruments, add hardware-in-the-loop tests behind a feature flag.
 
-### 2.4 Medium: Lean sorry placeholders exist in non-runtime Lean files
+### 2.4 Medium: Lean `sorry` placeholders in non-critical files
 
-- Relevant file: [lean4/AxiomLabVerified.lean](lean4/AxiomLabVerified.lean)
-- Issue: Placeholder proofs reduce assurance for artifacts that include sorry.
-- Operational risk: If such files are accidentally admitted into release policy, proof confidence is overstated.
-- Recommended action:
-  - Keep CI gate strict for required artifacts with zero-sorry policy,
-  - Scope required artifacts precisely in release specs.
+- File: [lean4/AxiomLabVerified.lean](lean4/AxiomLabVerified.lean)
+- Issue: Some Lean theorem files use `sorry` (unproven placeholder). These are not in the release-critical path.
+- Impact: If these files were accidentally included in proof policy requirements, confidence would be overstated.
+- Mitigation: CI gate enforces zero-sorry policy on required artifacts. Keep scope precise.
 
-### 2.5 Low: Cryptographic key lifecycle is external to code
+### 2.5 Low: Key lifecycle is external
 
-- Relevant code:
-  - [agent_runtime/src/approvals.rs](agent_runtime/src/approvals.rs)
-  - [proof_artifacts/src/signature.rs](proof_artifacts/src/signature.rs)
-- Issue: Signing and verification are implemented, but key custody/rotation is operationally defined.
-- Operational risk: Key compromise undermines approval and manifest trust.
-- Recommended action:
-  - Use HSM/KMS for production signing,
-  - Define rotation, revocation, and break-glass procedures.
+- Code: [agent_runtime/src/approvals.rs](agent_runtime/src/approvals.rs), [proof_artifacts/src/signature.rs](proof_artifacts/src/signature.rs)
+- Issue: Ed25519 signing and verification are implemented. Key generation, rotation, revocation, and storage are left to the operator.
+- Impact: Key compromise undermines the entire approval and signing chain.
+- Mitigation: Use HSM/KMS for production. Define rotation and break-glass procedures.
 
 ## 3) Runbook
 
-## 3.1 Quick Local Validation
+### 3.1 Docker Compose (recommended)
 
 ```bash
+# Start everything (Ollama + SiLA 2 mock + AxiomLab server)
+docker compose up --build
+
+# Web dashboard
+open http://localhost:3000
+
+# View logs
+docker compose logs -f axiomlab
+```
+
+### 3.2 Local Development
+
+```bash
+# Build all crates
 cargo build
-cargo test
+
+# Run pure-Rust tests (no external dependencies)
+cargo test -p agent_runtime -- capability sandbox proof_policy
+
+# Start SiLA 2 mock for integration tests
+cd sila_mock && python -m axiomlab_mock --insecure &
+
+# Run all integration tests (19 tests)
+cargo test -p agent_runtime --test sila2_e2e --test orchestrator_sila2
 ```
 
-## 3.2 Docker Toolchain Build
-
-```bash
-docker compose build
-```
-
-## 3.3 Full Docker Test Sweep
-
-```bash
-docker compose run --rm axiomlab cargo test -- --include-ignored
-```
-
-## 3.4 Release Gate
+### 3.3 Release Gate
 
 ```bash
 ./scripts/proof_release_gate.sh
 ```
 
-Release-gate implementation:
-- [scripts/proof_release_gate.sh](scripts/proof_release_gate.sh)
+Runs 10 steps: build, manifest generation, signing, policy enforcement, sandbox/capability tests, audit chain verification, compliance bundle export.
 
-## 3.5 Verify Audit Chain
+### 3.4 Verify Audit Chain
 
 ```bash
 cargo run -p agent_runtime --bin auditctl -- verify --path .artifacts/proof/runtime_audit.jsonl
 ```
 
-CLI source:
-- [agent_runtime/src/bin/auditctl.rs](agent_runtime/src/bin/auditctl.rs)
-
-## 3.6 Verify Signed Manifest
+### 3.5 Verify Signed Manifest
 
 ```bash
 cargo run -p proof_artifacts --bin proofctl -- verify \
@@ -171,32 +149,23 @@ cargo run -p proof_artifacts --bin proofctl -- verify \
   --public-key .artifacts/proof/manifest_signing_key.public.b64
 ```
 
-CLI source:
-- [proof_artifacts/src/bin/proofctl.rs](proof_artifacts/src/bin/proofctl.rs)
+### 3.6 Environment Variables
 
-## 3.7 Verify Approval Bundle
+| Variable | Default | Purpose |
+|---|---|---|
+| `SILA2_ENDPOINT` | `http://localhost:50052` | SiLA 2 gRPC server address |
+| `AXIOMLAB_LLM_ENDPOINT` | — | Ollama or OpenAI-compatible API endpoint |
+| `AXIOMLAB_LLM_MODEL` | `qwen2.5-coder:7b` | LLM model name |
+| `PORT` | `3000` | HTTP server port |
+| `VERUS_VERIFIED` | — | Set to `1` if Verus verification passed at build time |
+| `AXIOMLAB_DOCKER` | — | Set to `1` inside Docker containers |
+| `AXIOMLAB_AUDIT_LOG` | — | Path for audit log output |
 
-```bash
-cargo run -p agent_runtime --bin approvalctl -- verify \
-  --bundle .artifacts/proof/replay_bundle/approval_bundle.json \
-  --action move_arm \
-  --risk-class Actuation \
-  --git-commit "$(git rev-parse HEAD)" \
-  --binary-hash "$(shasum -a 256 Cargo.lock | awk '{print $1}')" \
-  --out .artifacts/proof/replay_bundle/approval_verification.json
-```
+### 3.7 Architecture Notes
 
-CLI source:
-- [agent_runtime/src/bin/approvalctl.rs](agent_runtime/src/bin/approvalctl.rs)
-
-## 3.8 Architecture-Specific Notes
-
-- amd64: full formal path is expected to run, including Verus.
-- arm64: Verus can be unavailable by design in some setups; repository degrades gracefully for non-Verus paths.
-
-Reference:
-- [Dockerfile](Dockerfile)
-- [verus_proofs/src/verify.rs](verus_proofs/src/verify.rs)
+- **x86-linux (amd64):** Full Verus verification available. All features work.
+- **ARM (aarch64):** Verus is unavailable. A graceful stub is installed. Lean, Aeneas, agent reasoning, and all SiLA 2 integration work normally. Verus-dependent tests detect the stub and skip.
+- **macOS:** Local development works. SiLA 2 mock and integration tests work. Docker Compose works. Verus requires x86-linux (or Docker on an amd64 host).
 
 ## 4) Operator Checklist
 

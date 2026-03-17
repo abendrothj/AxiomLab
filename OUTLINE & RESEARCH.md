@@ -97,3 +97,86 @@ For the most critical scientific optimizations (e.g., the underlying chemical eq
 ├── /proof\_synthesizer/ \# VeruSAGE-inspired agent for automated proof generation  
 └── /aeneas\_lean\_semantics/ \# Rust MIR translations to Lean 4 for algorithmic verification  
 By adhering to this implementation plan, the resulting open-source repository will bridge the gap between AI autonomy and absolute physical safety, delivering a blistering fast, production-ready operating system for the next generation of self-driving laboratories.
+
+---
+
+## Appendix: Implementation Status (Honest Assessment)
+
+This section maps the research plan above to what has actually been built and tested. Each item is rated: **Done**, **Partial**, or **Not Yet**.
+
+### Phase 1: Pure Rust Scientific Primitives
+
+| Planned | Status | Detail |
+|---|---|---|
+| Pure-Rust linear algebra (SciRS2/nalgebra) | **Done** | `scientific_compute` uses `nalgebra` for OLS regression and matrix operations. No C/Fortran FFI. |
+| Pure-Rust FFT (rustfft) | **Done** | `scientific_compute/src/fft.rs` implements forward/inverse FFT via `rustfft`. |
+| Compile-time dimensional analysis (uom) | **Done** | `physical_types` crate enforces SI unit correctness at the type level. |
+| Performance rivaling C/Fortran | **Not validated** | No benchmarks have been run. `nalgebra` is fast for small matrices; large-scale HPC claims would need empirical verification. |
+
+### Phase 2: Agent Orchestration and Sandboxing
+
+| Planned | Status | Detail |
+|---|---|---|
+| Sandboxed agent orchestrator | **Done** | `agent_runtime/src/sandbox.rs` — path and command allowlist enforcement. |
+| Capability bounds | **Done** | `agent_runtime/src/capabilities.rs` — numeric parameter validation (volume, position, temperature, speed). |
+| Two-person approval | **Done** | `agent_runtime/src/approvals.rs` — Ed25519 signed approval records with role-based checks. |
+| Proof-policy gating | **Done** | `proof_artifacts/src/policy.rs` — RuntimePolicyEngine maps actions to risk classes, checks artifact status. |
+| Hash-chained audit log | **Done** | `agent_runtime/src/audit.rs` — SHA256 hash-chained JSONL with tamper detection. |
+| LLM-driven reasoning loop | **Done** | `agent_runtime/src/orchestrator.rs` — `run_experiment()` drives LLM → parse → validate → dispatch → feedback loop. |
+| 5-stage validation pipeline | **Done** | Sandbox → Approval → Capability → Fail-closed → Proof policy → Dispatch. **19 integration tests passing.** |
+| SiLA 2 hardware integration | **Done** | 6 instruments, 12 operations over real gRPC via `tonic` v0.12. Python mock server implements full SiLA 2 protocol. |
+| Real physical hardware drivers | **Not yet** | Hardware is a Python SiLA 2 mock returning plausible fake values. No real instruments connected. |
+
+### Phase 3: Verus Verification
+
+| Planned | Status | Detail |
+|---|---|---|
+| Verus specs for hardware bounds | **Done** | `verus_verified/lab_safety.rs` — verified specs for arm bounds, dispense limits, temperature ranges. |
+| Verus specs for dilution protocols | **Done** | `verus_verified/dilution_protocol.rs` — verified serial dilution correctness. |
+| Dual rustc/Verus compilation shim | **Done** | `verus_proofs/` compiles under both rustc (macro stubs) and Verus (real verification). |
+| Proof synthesis agent (VeruSAGE-inspired) | **Partial** | `proof_synthesizer/` implements the observe→reason→act loop. Requires Verus (x86-linux) + LLM to actually run. Code compiles and the pipeline structure is tested. |
+| Concurrency proofs | **Partial** | Token-based concurrency specs exist in `verus_proofs/src/concurrency.rs`. Not tested against real concurrent hardware polling. |
+| Verus on ARM | **Not possible** | Verus only ships x86-linux binaries. ARM gets a graceful stub. This is a Verus project limitation, not an AxiomLab limitation. |
+
+### Phase 4: Aeneas + Lean 4
+
+| Planned | Status | Detail |
+|---|---|---|
+| MIR export tooling | **Done** | `aeneas_lean_semantics/src/mir_export.rs` — invokes `cargo rustc --emit=mir`. |
+| Aeneas translation pipeline | **Done** | `aeneas_lean_semantics/src/aeneas.rs` — invokes Aeneas binary on MIR output. |
+| Lean type-checking | **Done** | `aeneas_lean_semantics/src/lean.rs` — invokes `lean` on generated files. |
+| Lean theorem files | **Partial** | `lean4/` contains theorem files. Some use `sorry` placeholders. These are not in the release-critical path. |
+| End-to-end MIR→Lean verification | **Partial** | Pipeline code is implemented. Requires Aeneas + Lean toolchains installed. Tested in Docker on amd64. |
+
+### Additional (not in original plan)
+
+| Component | Status | Detail |
+|---|---|---|
+| Web visualizer | **Done** | React + Vite dashboard with WebSocket live events, activity feed, state graph, discovery journal. |
+| SQLite event persistence | **Done** | Append-only WAL-mode database. Survives server restarts. |
+| Docker Compose (3 services) | **Done** | Ollama (LLM) + SiLA 2 mock (hardware) + AxiomLab server. Health checks, auto-start. |
+| SiLA 2 standard compliance | **Done** | FDL XML service definitions for all 6 instruments. Proto files generated from standard. |
+| Continuous autonomous exploration | **Done** | Server auto-starts the LLM loop on launch. Runs until stopped. |
+| Proof release gate script | **Done** | 10-step bash script: build, sign, verify, test, audit, bundle. |
+
+### What This Project Actually Demonstrates
+
+1. **A working 5-stage safety pipeline** that validates every AI-proposed action before execution. This is tested by 19 integration tests using real gRPC against a real (mock) server, with a real orchestrator, real policy engine, and real audit logging.
+
+2. **SiLA 2 as the hardware abstraction layer.** The same Rust client code that talks to the Python mock will talk to real SiLA 2-compliant instruments. The interface contract is the SiLA 2 standard, not our code.
+
+3. **Formal verification as a gating mechanism.** Verus proof status determines whether high-risk actions (actuation, destructive) are allowed. This is enforced at runtime, not just at build time.
+
+4. **The complete stack is real code, not a design doc.** Every diagram in this document corresponds to running, tested Rust code. The orchestrator, the policy engine, the SiLA 2 clients, the audit chain — they all exist and work.
+
+### What This Project Does NOT Demonstrate (Yet)
+
+1. **Actual scientific discovery.** The agent explores constraint bounds of mock instruments. It hasn't produced a novel scientific result.
+
+2. **Real hardware safety.** Mock instruments can't hurt anyone. The safety guarantees are only as good as the SiLA 2 driver on the other end.
+
+3. **Frontier-model reasoning.** qwen2.5-coder:7b is a capable local model but not GPT-4 or Claude. Discovery quality scales with model quality.
+
+4. **Production key management.** Ed25519 signatures work, but key custody is manual.
+
+5. **Complete formal verification.** Verus verifies specific Rust functions (lab_safety, dilution_protocol). The whole system is not formally verified end-to-end.
