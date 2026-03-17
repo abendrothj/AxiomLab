@@ -1,4 +1,7 @@
 use crate::discovery::{journal_path, DiscoveryJournal, HypothesisStatus};
+use scientific_compute::discovery::{
+    hill_equation_fit, linear_regression, michaelis_menten_fit, model_select_aic, PreferredModel,
+};
 use crate::ws_sink::{ExplorationLog, WebSocketSink};
 use agent_runtime::{
     audit::{audit_log_path, emit_journal_finding, emit_journal_hypothesis},
@@ -56,13 +59,28 @@ propose_protocol accepts JSON of the form:\n\
    ]}\n\
 Rules: 1–20 steps, tool names must be from the available tool list, params must be objects.\n\
 \n\
+## Quantitative analysis\n\
+After collecting a series of raw measurements, call `analyze_series` to fit statistical \
+models and extract parameters. Do not just report raw numbers — fit the data. For example, \
+after measuring absorbance at several concentrations, call:\n\
+  {\"tool\": \"analyze_series\", \"params\": {\n\
+     \"data\": [{\"x\": 0.1, \"y\": 0.42}, {\"x\": 0.5, \"y\": 1.8}, ...],\n\
+     \"x_label\": \"concentration_mM\", \"y_label\": \"absorbance_au\",\n\
+     \"model\": \"auto\"}}\n\
+You will receive slope, R², EC50, Vmax/Km, and an AIC-based model recommendation. \
+Use these fitted parameters — not raw readings — as evidence when recording findings.\n\
+\n\
+## Hypothesis lifecycle\n\
+Every hypothesis has a status: proposed → testing → confirmed / rejected. \
+When you start an experiment to test a hypothesis, call update_journal with \
+set_hypothesis_status to mark it 'testing'. After analysis, mark it 'confirmed' or \
+'rejected'. When ALL active hypotheses have been settled and you have a coherent model, \
+conclude with {\"done\": true, \"summary\": \"<your constraint map>\"}.\n\
+\n\
 Instrument your exploration: after each significant result, call `update_journal` to \
 record what you now believe (add_finding) or a new hypothesis to test (add_hypothesis). \
-When you confirm or disprove a hypothesis, update its status. The journal persists \
-across runs — your accumulated knowledge is always at the top of each session. \
-Build a coherent model from the inside out. When you have enough evidence to describe \
-the shape of this universe's limits, conclude with: \
-{\"done\": true, \"summary\": \"<your constraint map>\"}";
+The journal persists across runs — your accumulated knowledge is always at the top of \
+each session. Build a coherent model from the inside out.";
 
 fn build_mandate(
     iteration: u32,
@@ -135,7 +153,7 @@ fn make_sandbox() -> Sandbox {
             "aspirate".into(), "read_absorbance".into(), "read_ph".into(),
             "read_temperature".into(), "set_temperature".into(),
             "spin_centrifuge".into(), "calibrate_ph".into(), "incubate".into(),
-            "propose_protocol".into(), "update_journal".into(),
+            "propose_protocol".into(), "update_journal".into(), "analyze_series".into(),
         ],
         ResourceLimits::default(),
     )
@@ -322,9 +340,121 @@ fn make_sila2_tools(clients: Arc<SiLA2Clients>, journal: Arc<Mutex<DiscoveryJour
         })),
     );
 
+    register_analyze_series_tool(&mut r);
     register_journal_tool(&mut r, journal);
 
     r
+}
+
+/// Register the `analyze_series` tool into any tool registry.
+///
+/// The LLM collects raw (x, y) measurements then calls this tool to get
+/// back a structured fit summary: OLS linear, Hill sigmoidal, and/or
+/// Michaelis-Menten, with R², AIC, and a model recommendation.
+fn register_analyze_series_tool(registry: &mut ToolRegistry) {
+    registry.register(
+        ToolSpec {
+            name: "analyze_series".into(),
+            description: "Fit statistical models to a series of (x, y) measurements. \
+                Returns OLS linear fit (slope, R²), Hill equation fit (EC50, E_max, Hill n), \
+                Michaelis-Menten fit (Vmax, Km), and an AIC-based model recommendation. \
+                Call this after collecting a set of readings — e.g. absorbance at different \
+                concentrations — to extract quantitative parameters rather than raw values.".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "array",
+                        "description": "Array of {x, y} measurement pairs",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number"},
+                                "y": {"type": "number"}
+                            },
+                            "required": ["x", "y"]
+                        }
+                    },
+                    "x_label": {
+                        "type": "string",
+                        "description": "Independent variable name (e.g. 'concentration_mM')"
+                    },
+                    "y_label": {
+                        "type": "string",
+                        "description": "Dependent variable name (e.g. 'absorbance_au')"
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": ["auto", "linear", "hill", "michaelis_menten"],
+                        "description": "Which model(s) to fit. 'auto' tries linear + hill + michaelis_menten and recommends the best by AIC."
+                    }
+                },
+                "required": ["data"]
+            }),
+        },
+        Box::new(|p| Box::pin(async move {
+            let data = p["data"].as_array().ok_or("missing data array")?;
+            if data.is_empty() {
+                return Err("data array is empty".into());
+            }
+
+            let xs: Vec<f64> = data.iter().map(|d| d["x"].as_f64().unwrap_or(0.0)).collect();
+            let ys: Vec<f64> = data.iter().map(|d| d["y"].as_f64().unwrap_or(0.0)).collect();
+
+            let model     = p["model"].as_str().unwrap_or("auto");
+            let x_label   = p["x_label"].as_str().unwrap_or("x");
+            let y_label   = p["y_label"].as_str().unwrap_or("y");
+
+            let mut result = serde_json::json!({
+                "n_points": xs.len(),
+                "x_label": x_label,
+                "y_label": y_label,
+            });
+
+            // Always compute linear — needed for AIC comparison.
+            let linear_fit = linear_regression(&xs, &ys);
+            if let Some(ref lf) = linear_fit {
+                result["linear"] = serde_json::json!({
+                    "slope":           lf.slope,
+                    "intercept":       lf.intercept,
+                    "r_squared":       lf.r_squared,
+                    "slope_std_error": lf.slope_std_error,
+                    "aic":             lf.aic(),
+                });
+            }
+
+            if model == "auto" || model == "hill" {
+                if let Some(hf) = hill_equation_fit(&xs, &ys) {
+                    result["hill"] = serde_json::json!({
+                        "e_max":  hf.e_max,
+                        "ec50":   hf.ec50,
+                        "hill_n": hf.hill_n,
+                        "aic":    hf.aic(),
+                    });
+                    if let Some(ref lf) = linear_fit {
+                        let pref = model_select_aic(lf.aic(), hf.aic());
+                        result["recommended_model"] = serde_json::json!(match pref {
+                            PreferredModel::Linear           => "linear",
+                            PreferredModel::Nonlinear        => "hill",
+                            PreferredModel::Indistinguishable => "indistinguishable",
+                        });
+                    }
+                }
+            }
+
+            if model == "auto" || model == "michaelis_menten" {
+                if let Some(mmf) = michaelis_menten_fit(&xs, &ys) {
+                    result["michaelis_menten"] = serde_json::json!({
+                        "v_max": mmf.v_max,
+                        "km":    mmf.km,
+                        "aic":   mmf.aic(),
+                    });
+                }
+            }
+
+            Ok(result)
+        })),
+    );
 }
 
 /// Register the `update_journal` tool into any tool registry.
@@ -494,6 +624,7 @@ fn register_mock_extras(registry: &mut ToolRegistry, journal: Arc<Mutex<Discover
         })),
     );
 
+    register_analyze_series_tool(registry);
     register_journal_tool(registry, journal);
 }
 
@@ -750,7 +881,33 @@ pub async fn run_loop(
             tracing::error!("experiment {iteration} error: {e}");
         }
 
-        sleep(Duration::from_secs(4)).await;
+        // Convergence check: if every hypothesis has been settled (confirmed or
+        // rejected) and we have at least one finding, slow the loop substantially.
+        // This prevents endless re-experimentation once the LLM has a complete model.
+        let converged = {
+            let j = sink.journal.lock().unwrap();
+            !j.findings.is_empty()
+                && !j.hypotheses.is_empty()
+                && j.hypotheses.iter().all(|h| {
+                    h.status == HypothesisStatus::Confirmed
+                        || h.status == HypothesisStatus::Rejected
+                })
+        };
+
+        if converged {
+            let (n_findings, n_hyp) = {
+                let j = sink.journal.lock().unwrap();
+                (j.findings.len(), j.hypotheses.len())
+            };
+            tracing::info!(
+                findings  = n_findings,
+                hypotheses = n_hyp,
+                "All hypotheses settled — exploration converged. Pausing 60 s."
+            );
+            sleep(Duration::from_secs(60)).await;
+        } else {
+            sleep(Duration::from_secs(4)).await;
+        }
     }
 
     tracing::info!("loop stopped after {iteration} iterations");

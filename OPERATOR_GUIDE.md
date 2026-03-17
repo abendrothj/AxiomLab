@@ -11,7 +11,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 **Production path (server + agent_runtime + proof_artifacts + vessel_physics):**
 
 - **server** — Axum HTTP server with WebSocket event streaming, in-memory event buffer, and the continuous exploration loop that drives the agent.
-  - [server/src/main.rs](server/src/main.rs) — HTTP endpoints (`/ws`, `/api/status`, `/api/history`), auto-starts exploration loop on launch
+  - [server/src/main.rs](server/src/main.rs) — HTTP endpoints (`/ws`, `/api/status`, `/api/history`, `/api/journal`), audit log rotation on startup, session_start entry, Rekor checkpoint task
   - [server/src/simulator.rs](server/src/simulator.rs) — Connects SiLA 2 clients, loads proof manifest, creates orchestrator, runs LLM loop
   - [server/src/ws_sink.rs](server/src/ws_sink.rs) — WebSocket broadcast sink + in-memory EventBuffer (up to 2000 events per type, reset on restart)
 
@@ -23,8 +23,8 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
   - [agent_runtime/src/sandbox.rs](agent_runtime/src/sandbox.rs) — Path/command allowlist enforcement
   - [agent_runtime/src/capabilities.rs](agent_runtime/src/capabilities.rs) — Numeric parameter bounds (volume, position, temperature, etc.)
   - [agent_runtime/src/approvals.rs](agent_runtime/src/approvals.rs) — Two-person Ed25519 approval records
-  - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — Hash-chained JSONL audit log with per-event Ed25519 signatures
-  - [agent_runtime/src/rekor.rs](agent_runtime/src/rekor.rs) — Sigstore Rekor transparency-log anchoring for protocol conclusions
+  - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — Hash-chained JSONL audit log, per-event Ed25519 signatures, log rotation (100 MB / daily), `session_start` cross-restart continuity chain, `emit_journal_finding` / `emit_journal_hypothesis` semantic events
+  - [agent_runtime/src/rekor.rs](agent_runtime/src/rekor.rs) — Sigstore Rekor transparency-log anchoring: protocol conclusions + 15-minute chain-tip checkpoints
   - [agent_runtime/src/tools.rs](agent_runtime/src/tools.rs) — ToolCall/ToolResult types, ToolRegistry for dispatch
   - [agent_runtime/src/llm.rs](agent_runtime/src/llm.rs) — LLM client (OpenAI-compatible API)
   - [agent_runtime/src/events.rs](agent_runtime/src/events.rs) — Event types and EventSink trait
@@ -42,9 +42,9 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
   - Manifest: [proof_artifacts/vessel_physics_manifest.json](proof_artifacts/vessel_physics_manifest.json) — real Verus compiler output, committed
   - Build: `maturin develop --manifest-path vessel_physics/Cargo.toml`
 
-**Scientific compute (standalone, no I/O):**
+**Scientific compute (wired into agent loop):**
 
-- **scientific_compute** — Pure-Rust numerics: `nalgebra` linear algebra, `rustfft` FFT, OLS regression, Hill equation fitting, lab data parsing
+- **scientific_compute** — Pure-Rust numerics: `nalgebra` linear algebra, `rustfft` FFT, OLS regression, Hill equation fitting (gradient descent), Michaelis-Menten enzyme kinetics, Welch t-test, AIC model selection. Exposed to the LLM via the `analyze_series` tool — the LLM collects raw readings then calls `analyze_series` to get `{"linear": {"slope": ..., "r_squared": ...}, "hill": {"ec50": ..., "aic": ...}, "recommended_model": "..."}` back.
 - **physical_types** — Compile-time dimensional analysis via `uom`
 
 **Formal verification tooling (requires external toolchains):**
@@ -119,12 +119,12 @@ Honest assessment of security posture. Ordered by severity.
 - Impact: We know the software pipeline works correctly. We don't know if real hardware would behave within the expected response formats.
 - Mitigation: When connecting to real SiLA 2 instruments, add hardware-in-the-loop tests behind a feature flag.
 
-### 2.4 Medium: Lean `sorry` placeholders in non-critical files
+### 2.4 Low: proof_synthesizer requires external toolchain
 
-- File: [lean4/AxiomLabVerified.lean](lean4/AxiomLabVerified.lean)
-- Issue: Some Lean theorem files use `sorry` (unproven placeholder). These are not in the release-critical path.
-- Impact: If these files were accidentally included in proof policy requirements, confidence would be overstated.
-- Mitigation: CI gate enforces zero-sorry policy on required artifacts. Keep scope precise.
+- Code: [proof_synthesizer/](proof_synthesizer/)
+- Issue: The LLM-driven Verus proof repair loop requires both a Verus binary and a running LLM. It is not wired into the CI gate.
+- Impact: Proof repair is unavailable in environments without the full toolchain. All production proofs are pre-generated and committed.
+- Mitigation: Pre-generate proof manifests with `python3 vessel_physics/generate_manifest.py` before deployment.
 
 ### 2.5 Low: Key lifecycle is external
 
@@ -194,10 +194,22 @@ python3 vessel_physics/generate_manifest.py --status-only
 
 Runs 10 steps: build, manifest generation, signing, policy enforcement, sandbox/capability tests, audit chain verification, compliance bundle export.
 
-### 3.4 Verify Audit Chain
+### 3.4 Audit Log Details
+
+The audit log is at `$AXIOMLAB_DATA_DIR/audit/runtime_audit.jsonl` (default: `.artifacts/audit/runtime_audit.jsonl`).
+
+**Rotation**: On startup, `rotate_if_needed()` rotates the file if it exceeds 100 MB or if its last-modified date is before today. Rotated files are archived as `runtime_audit_YYYY-MM-DD[_N].jsonl` in the same directory.
+
+**Session continuity**: On every startup, a `session_start` entry is written containing the session UUID, the Ed25519 public key used for this session, and the git commit hash. It chains to the previous file's last `entry_hash` via `prev_hash`, so cross-restart chain continuity is verifiable.
+
+**Rekor checkpoints**: Every 15 minutes (when `AXIOMLAB_AUDIT_SIGNING_KEY` is set), the current chain tip hash is signed and submitted to Sigstore Rekor. The returned UUID and integrated timestamp are written back into the chain as a `rekor_checkpoint` entry, providing an external cryptographic witness.
+
+**Semantic journal events**: When the LLM calls `update_journal`, dedicated `journal_finding` and `journal_hypothesis` audit entries are written alongside the journal JSON file — the scientific record is typed in the audit chain, not just buried in generic tool-call params.
+
+**Verify chain integrity:**
 
 ```bash
-cargo run -p agent_runtime --bin auditctl -- verify --path .artifacts/proof/runtime_audit.jsonl
+cargo run -p agent_runtime --bin auditctl -- verify --path .artifacts/audit/runtime_audit.jsonl
 ```
 
 ### 3.5 Verify Signed Manifest
@@ -224,12 +236,14 @@ curl https://rekor.sigstore.dev/api/v1/log/entries/<uuid>
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SILA2_ENDPOINT` | `http://localhost:50052` | SiLA 2 gRPC server address |
+| `SILA2_ENDPOINT` | `http://127.0.0.1:50052` | SiLA 2 gRPC server address |
 | `AXIOMLAB_LLM_ENDPOINT` | — | Ollama or OpenAI-compatible API endpoint |
 | `AXIOMLAB_LLM_MODEL` | `qwen2.5-coder:7b` | LLM model name |
 | `PORT` | `3000` | HTTP server port |
-| `AXIOMLAB_AUDIT_LOG` | — | Path for audit log output |
-| `AXIOMLAB_GIT_COMMIT` | `dev` | Git commit SHA embedded in proof manifest build identity |
+| `AXIOMLAB_DATA_DIR` | `.artifacts` | Root directory for all runtime data (audit log, discovery journal). Override to redirect to a durable mount. |
+| `AXIOMLAB_AUDIT_LOG` | `$AXIOMLAB_DATA_DIR/audit/runtime_audit.jsonl` | Full path override for audit log. Overrides `AXIOMLAB_DATA_DIR` for the log file only. |
+| `AXIOMLAB_AUDIT_SIGNING_KEY` | — | Base64-encoded Ed25519 private key for per-event audit signatures and Rekor anchoring. If unset, events are unsigned and Rekor checkpointing is disabled. |
+| `AXIOMLAB_GIT_COMMIT` | `dev` | Git commit SHA embedded in session_start audit entry and proof manifest build identity. |
 
 ### 3.8 Platform Notes
 
@@ -247,11 +261,14 @@ Before running high-risk actions:
 4. Verify approval bundle for Actuation or Destructive actions.
 5. Verify audit chain integrity after execution.
 6. Confirm Rekor anchor UUID was logged for any protocol conclusion.
+7. Set `AXIOMLAB_AUDIT_SIGNING_KEY` to a persistent key — without it, events are unsigned and Rekor checkpointing is disabled.
+8. Point `AXIOMLAB_DATA_DIR` at a durable mount (e.g., network volume or object-storage FUSE mount) for audit log durability across restarts.
 
 ## 5) Suggested Next Hardening Tasks
 
-1. Persist the Ed25519 audit signing key across restarts (HSM or sealed storage) so chain continuity can be cryptographically proved.
+1. Persist the Ed25519 audit signing key across restarts (HSM or sealed storage) so chain continuity can be cryptographically proved end-to-end.
 2. Restrict trusted policy-engine constructor usage to test-only contexts.
 3. Replace hardware simulation with injected production driver traits.
 4. Extend integration tests to enforce signed-manifest-only authorization path.
 5. Add multi-agent coordination layer for parallel instrument utilization.
+6. Add an external audit mirror: periodically commit the JSONL audit log to an orphan git branch or push chain-tip hashes to a Gist to survive local disk failure (Rekor proves hashes existed; this preserves readable content).

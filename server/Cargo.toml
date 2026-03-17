@@ -8,8 +8,9 @@ name = "axiomlab-server"
 path = "src/main.rs"
 
 [dependencies]
-agent_runtime  = { path = "../agent_runtime" }
-proof_artifacts = { path = "../proof_artifacts" }
+agent_runtime      = { path = "../agent_runtime" }
+proof_artifacts    = { path = "../proof_artifacts" }
+scientific_compute = { path = "../scientific_compute" }
 axum           = { version = "0.7", features = ["ws"] }
 tower-http     = { version = "0.5", features = ["fs", "cors"] }
 tokio          = { version = "1", features = ["full"] }

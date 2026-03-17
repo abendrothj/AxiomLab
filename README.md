@@ -17,7 +17,9 @@ AxiomLab is a working prototype of an autonomous science agent. An LLM (local Ol
 - **Structured experiment protocols** — LLM proposes `ProtocolPlan` (name, hypothesis, ordered steps); a `ProtocolExecutor` iterates steps through the full 5-stage pipeline, feeds observations back to the LLM for adaptation, then requests a signed conclusion
 - **Per-event Ed25519 audit signatures** — every audit record (including protocol step records and conclusion records) is individually signed and hash-chained into an append-only JSONL log
 - **Sigstore Rekor anchoring** — protocol conclusions are submitted to the public Rekor transparency log; the UUID and integrated timestamp provide an external, independently verifiable timestamp
-- **Continuous autonomous loop** — LLM proposes → orchestrator validates → hardware executes → results feed back → LLM proposes next
+- **Scientific compute in the loop** — `analyze_series` tool lets the LLM submit raw (x, y) data points and receive structured fit results: OLS slope/R², Hill EC50/E_max, Michaelis-Menten Vmax/Km, AIC-based model recommendation
+- **Hypothesis lifecycle** — discovery journal tracks proposed → testing → confirmed / rejected; outer loop detects convergence (all hypotheses settled) and slows down, avoiding repeated experiments
+- **Continuous autonomous loop** — LLM proposes → orchestrator validates → hardware executes → results feed back → LLM analyzes → journal records → LLM proposes next
 - **Web visualizer** — real-time WebSocket dashboard with activity feed, state graph, and discovery journal
 
 **What is simulated / not yet production:**
@@ -71,7 +73,7 @@ The Verus proofs live in `verus_verified/`. Run them with:
 | `agent_runtime` | Orchestrator (5-stage validation), protocol executor, SiLA 2 gRPC clients (6 instruments), sandbox, capabilities, approvals, audit, Rekor anchoring | Working, integration-tested |
 | `proof_artifacts` | Manifest schema, RuntimePolicyEngine, RiskClass/ActionPolicy, Ed25519 signing, CI gate | Working, used in production pipeline |
 | `vessel_physics` | Formally verified vessel physics — u64 nanoliter VesselRegistry with PyO3 Python bindings | Working; build with `maturin develop` |
-| `scientific_compute` | Pure-Rust linear algebra (`nalgebra`), FFT (`rustfft`), OLS regression, Hill equation fitting, lab data parsing | Working |
+| `scientific_compute` | Pure-Rust linear algebra (`nalgebra`), FFT (`rustfft`), OLS regression, Hill equation fitting, Michaelis-Menten, Welch t-test, AIC model selection — exposed to the LLM via `analyze_series` tool | Working |
 | `physical_types` | Compile-time dimensional analysis via `uom` | Working |
 | `verus_proofs` | Verus-compatible specs (dual `rustc`/Verus compilation shim), hardware-bound invariants | Working |
 | `proof_synthesizer` | VeruSAGE-inspired observe→reason→act loop for iterative Verus proof repair | Compiles; requires Verus + LLM |
@@ -189,7 +191,7 @@ Protocol-level invariants: step count bounded, total volume bounded, dilution se
 | **Simulated hardware** | The SiLA 2 server returns simulated values. No real instruments have been connected. |
 | **Local LLM** | qwen2.5-coder:7b is sufficient for structured tool calls but not for novel scientific reasoning. Discovery quality is model-dependent. |
 | **Single-agent** | One LLM loop, one hardware pool. No multi-agent coordination. |
-| **Audit is local + Rekor-anchored** | Each event is Ed25519-signed and hash-chained. Protocol conclusions are submitted to Sigstore Rekor for external timestamp witnessing. A complete chain rewrite with a fresh signing key could still pass local checks — HSM-backed keys are needed for production. |
+| **Audit is local + Rekor-anchored** | Each event is Ed25519-signed and hash-chained. Protocol conclusions and 15-minute chain-tip checkpoints are submitted to Sigstore Rekor. Log rotation (100 MB / daily) and cross-restart `session_start` chaining are implemented. A complete chain rewrite with a fresh key still passes local checks — HSM-backed keys and an external content mirror are needed for production. |
 | **Key management** | Ed25519 signing is implemented but key custody, rotation, and revocation are manual. |
 
 ## Project Structure
