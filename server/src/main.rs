@@ -192,7 +192,7 @@ async fn main() {
         running:   Arc::new(AtomicBool::new(false)),
         iteration: Arc::new(AtomicU32::new(0)),
         notebook:  Arc::new(Mutex::new(Vec::new())),
-        log:       Arc::new(Mutex::new(ExplorationLog::default())),
+        log:       Arc::new(Mutex::new(ExplorationLog::from_journal(&journal.lock().unwrap()))),
         events:    events.clone(),
         journal:   Arc::clone(&journal),
     };

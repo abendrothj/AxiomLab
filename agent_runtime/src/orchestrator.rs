@@ -50,6 +50,13 @@ pub enum OrchestratorError {
 /// O(n) allocation amplification from pathological LLM output.
 const MAX_RESPONSE_BYTES: usize = 64 * 1024; // 64 KiB
 
+/// How many consecutive unparseable LLM responses trigger an experiment failure.
+///
+/// Each failure injects a format-correction re-prompt into history. If the model
+/// cannot produce valid JSON after this many attempts in a row the experiment is
+/// aborted rather than silently burning all remaining iterations.
+const MAX_CONSECUTIVE_PARSE_FAILURES: u32 = 3;
+
 /// Configuration for the orchestrator.
 pub struct OrchestratorConfig {
     /// Maximum iterations per experiment before aborting.
@@ -247,6 +254,8 @@ impl<L: LlmBackend> Orchestrator<L> {
             },
         ];
 
+        let mut consecutive_parse_failures: u32 = 0;
+
         for iteration in 0..self.config.max_iterations {
             info!(iteration, stage = ?experiment.stage, "orchestrator step");
 
@@ -276,6 +285,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             if let Some(protocol_result) =
                 self.try_propose_protocol(&response).await
             {
+                consecutive_parse_failures = 0;
                 let result_json =
                     serde_json::to_string(&protocol_result).unwrap_or_default();
                 history.push(ChatMessage {
@@ -287,6 +297,7 @@ impl<L: LlmBackend> Orchestrator<L> {
 
             // Try to parse as a tool call.
             if let Some(tool_result) = self.try_tool_call(&response).await {
+                consecutive_parse_failures = 0;
                 // Advance to Executing on the first real tool call.
                 if experiment.stage == Stage::Proposed {
                     let prev = experiment.stage;
@@ -328,6 +339,31 @@ impl<L: LlmBackend> Orchestrator<L> {
                 info!(id = %experiment.id, "experiment completed");
                 return Ok(());
             }
+
+            // Nothing matched — re-prompt with a format correction.
+            consecutive_parse_failures += 1;
+            warn!(
+                iteration,
+                consecutive_parse_failures,
+                snippet = %response.chars().take(200).collect::<String>(),
+                "LLM response did not match any expected format — re-prompting"
+            );
+            if consecutive_parse_failures >= MAX_CONSECUTIVE_PARSE_FAILURES {
+                experiment.fail(format!(
+                    "{MAX_CONSECUTIVE_PARSE_FAILURES} consecutive unparseable responses"
+                ));
+                return Err(OrchestratorError::Halted(
+                    "too many consecutive parse failures".into(),
+                ));
+            }
+            history.push(ChatMessage {
+                role: "user".into(),
+                content: "Your last response was not valid JSON. Respond with exactly one of:\n\
+                          1. Tool call:    {\"tool\": \"<name>\", \"params\": {...}}\n\
+                          2. Protocol:     {\"tool\": \"propose_protocol\", \"params\": {...}}\n\
+                          3. Completion:   {\"done\": true, \"summary\": \"...\"}\n\
+                          Output only the JSON — no prose, no markdown fences.".into(),
+            });
         }
 
         warn!(id = %experiment.id, "max iterations reached");
@@ -910,6 +946,99 @@ fn validate_tool_call_schema(value: &serde_json::Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::LlmError;
+    use crate::sandbox::{ResourceLimits, Sandbox};
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// A scripted mock LLM that pops responses from a queue in order.
+    /// Panics if the queue is exhausted (test bug, not prod bug).
+    struct ScriptedLlm {
+        responses: Mutex<VecDeque<String>>,
+    }
+
+    impl ScriptedLlm {
+        fn new(responses: impl IntoIterator<Item = impl Into<String>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().map(|s| s.into()).collect()),
+            }
+        }
+    }
+
+    impl crate::llm::LlmBackend for ScriptedLlm {
+        async fn chat(
+            &self,
+            _messages: &[crate::llm::ChatMessage],
+            _temperature: f64,
+        ) -> Result<String, LlmError> {
+            let mut q = self.responses.lock().unwrap();
+            Ok(q.pop_front().expect("ScriptedLlm: response queue exhausted"))
+        }
+    }
+
+    fn minimal_sandbox() -> Sandbox {
+        Sandbox::new(
+            vec![PathBuf::from("/lab/workspace")],
+            vec!["move_arm".into(), "read_sensor".into()],
+            ResourceLimits::default(),
+        )
+    }
+
+    fn minimal_config() -> OrchestratorConfig {
+        OrchestratorConfig {
+            max_iterations: 20,
+            audit_log_path: None,
+            capability_policy: None,
+            approval_policy: None,
+            session_nonce: None,
+            audit_signer: None,
+            revocation_list: crate::revocation::RevocationList::default(),
+            event_sink: None,
+            ..OrchestratorConfig::default()
+        }
+    }
+
+    /// LLM returns garbage twice (below threshold), then a valid done signal.
+    /// Experiment must complete successfully.
+    #[tokio::test]
+    async fn recovers_after_parse_failures_below_threshold() {
+        let llm = ScriptedLlm::new([
+            "this is not JSON at all",
+            "also not JSON",
+            r#"{"done": true, "summary": "all good"}"#,
+        ]);
+        let orchestrator = Orchestrator::new(
+            llm,
+            minimal_sandbox(),
+            ToolRegistry::new(),
+            minimal_config(),
+        );
+        let mut exp = crate::experiment::Experiment::new("test-1", "recovery test");
+        let result = orchestrator.run_experiment(&mut exp).await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(exp.stage, crate::experiment::Stage::Completed);
+    }
+
+    /// LLM returns garbage >= MAX_CONSECUTIVE_PARSE_FAILURES times.
+    /// Experiment must fail with Halted error.
+    #[tokio::test]
+    async fn fails_after_too_many_consecutive_parse_failures() {
+        let garbage: Vec<String> = (0..MAX_CONSECUTIVE_PARSE_FAILURES as usize)
+            .map(|i| format!("garbage response #{i}"))
+            .collect();
+        let llm = ScriptedLlm::new(garbage);
+        let orchestrator = Orchestrator::new(
+            llm,
+            minimal_sandbox(),
+            ToolRegistry::new(),
+            minimal_config(),
+        );
+        let mut exp = crate::experiment::Experiment::new("test-2", "failure test");
+        let result = orchestrator.run_experiment(&mut exp).await;
+        assert!(matches!(result, Err(OrchestratorError::Halted(_))));
+        assert_eq!(exp.stage, crate::experiment::Stage::Failed);
+    }
 
     #[test]
     fn sanitize_truncates_oversized_response() {

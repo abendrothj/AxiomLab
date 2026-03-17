@@ -39,7 +39,7 @@ pub async fn run_loop(
             Some(Arc::new(c))
         }
         Err(e) => {
-            tracing::warn!("SiLA 2 unavailable ({e}) — running with mock tool handlers");
+            tracing::warn!("SiLA 2 unavailable ({e}) — running with in-process physics simulator");
             None
         }
     };
@@ -97,7 +97,7 @@ pub async fn run_loop(
 
         let tools = match &sila_clients {
             Some(clients) => tools::make_sila2_tools(Arc::clone(clients), Arc::clone(&sink.journal)),
-            None          => tools::make_mock_tools(Arc::clone(&sink.journal)),
+            None          => tools::make_sim_tools(Arc::clone(&sink.journal)),
         };
 
         let mut experiment = Experiment::new(

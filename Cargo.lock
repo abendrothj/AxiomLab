@@ -103,6 +103,7 @@ dependencies = [
  "axum",
  "hex",
  "proof_artifacts",
+ "rand",
  "scientific_compute",
  "serde",
  "serde_json",

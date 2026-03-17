@@ -1,4 +1,5 @@
 use crate::discovery::{journal_path, DiscoveryJournal, HypothesisStatus};
+use rand::Rng;
 use scientific_compute::fitting::{
     hill_equation_fit, linear_regression, michaelis_menten_fit, model_select_aic, PreferredModel,
 };
@@ -202,39 +203,194 @@ pub(crate) fn make_sila2_tools(
     r
 }
 
+// ── Mock vessel physics ───────────────────────────────────────────────────────
+
+/// Per-vessel parameters for the Beer-Lambert mock.
+#[derive(Clone)]
+struct VesselParams {
+    volume_ul:     f64,
+    max_volume_ul: f64,
+    /// ε in Beer-Lambert: absorbance per unit fill-fraction per cm path length.
+    epsilon:       f64,
+    path_length_cm: f64,
+}
+
+/// In-memory vessel state for the mock fallback.
+///
+/// Mirrors the vessel registry used by the Python SiLA 2 mock server so that
+/// agent behaviour developed without hardware transfers faithfully to real runs.
+struct SimVesselState {
+    vessels: std::collections::HashMap<String, VesselParams>,
+}
+
+impl SimVesselState {
+    fn new() -> Self {
+        let mut v = std::collections::HashMap::new();
+        // Parameters match axiomlab_mock/_vessel_state_python.py exactly.
+        for (id, max, eps, path, init) in [
+            ("beaker_A",      50_000.0, 1.2, 1.0,       0.0),
+            ("beaker_B",      50_000.0, 0.8, 1.0,       0.0),
+            ("tube_1",         2_000.0, 1.5, 1.0,       0.0),
+            ("tube_2",         2_000.0, 1.5, 1.0,       0.0),
+            ("tube_3",         2_000.0, 1.5, 1.0,       0.0),
+            ("plate_well_A1",    300.0, 2.0, 0.5,       0.0),
+            ("plate_well_B1",    300.0, 2.0, 0.5,       0.0),
+            ("reservoir",    200_000.0, 0.3, 1.0, 100_000.0),
+        ] {
+            v.insert(id.into(), VesselParams {
+                volume_ul: init, max_volume_ul: max, epsilon: eps, path_length_cm: path,
+            });
+        }
+        Self { vessels: v }
+    }
+
+    /// Compute Beer-Lambert absorbance for the vessel at the given wavelength.
+    ///
+    /// A = ε × (fill_fraction) × l × wl_factor + 2 % noise
+    /// wl_factor = Gaussian centred at 500 nm, σ = 150 nm (matches Python mock)
+    fn read_absorbance(&self, vessel_id: &str, wavelength_nm: f64) -> f64 {
+        let p = self.vessels.get(vessel_id).cloned().unwrap_or(VesselParams {
+            volume_ul: 0.0, max_volume_ul: 1_000.0, epsilon: 1.0, path_length_cm: 1.0,
+        });
+        let fill = if p.max_volume_ul > 0.0 { p.volume_ul / p.max_volume_ul } else { 0.0 };
+        let a_base = p.epsilon * fill * p.path_length_cm;
+        let wl_factor = (-0.5 * ((wavelength_nm - 500.0) / 150.0).powi(2)).exp();
+        let a_det = a_base * wl_factor;
+        let noise = rand::thread_rng().gen_range(0.98..=1.02_f64);
+        f64::max(0.001, (a_det * noise * 10_000.0).round() / 10_000.0)
+    }
+
+    fn dispense(&mut self, vessel_id: &str, volume_ul: f64) -> Result<f64, String> {
+        let p = self.vessels.entry(vessel_id.to_owned()).or_insert(VesselParams {
+            volume_ul: 0.0, max_volume_ul: 50_000.0, epsilon: 1.0, path_length_cm: 1.0,
+        });
+        let new_vol = p.volume_ul + volume_ul;
+        if new_vol > p.max_volume_ul {
+            return Err(format!("overflow: {new_vol:.1} µL > {:.1} µL capacity", p.max_volume_ul));
+        }
+        p.volume_ul = new_vol;
+        Ok(new_vol)
+    }
+
+    fn aspirate(&mut self, vessel_id: &str, volume_ul: f64) -> Result<f64, String> {
+        let p = self.vessels.entry(vessel_id.to_owned()).or_insert(VesselParams {
+            volume_ul: 0.0, max_volume_ul: 50_000.0, epsilon: 1.0, path_length_cm: 1.0,
+        });
+        if volume_ul > p.volume_ul {
+            return Err(format!(
+                "underflow: requested {volume_ul:.1} µL, only {:.1} µL available",
+                p.volume_ul
+            ));
+        }
+        p.volume_ul -= volume_ul;
+        Ok(p.volume_ul)
+    }
+}
+
 /// Fallback tool registry when no SiLA 2 server is available.
-pub(crate) fn make_mock_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegistry {
+///
+/// Uses the same Beer-Lambert physics model as the Python SiLA 2 mock so that
+/// agent behaviour developed offline transfers faithfully to real hardware runs.
+pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     agent_runtime::tools::register_lab_tools(&mut r);
 
-    let mock_extras: &[(&str, &str, serde_json::Value, serde_json::Value)] = &[
-        ("aspirate", "Aspirate liquid from a vessel.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
-            serde_json::json!({"status":"aspirated"})),
-        ("read_absorbance", "UV/Vis absorbance measurement.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
-            serde_json::json!({"absorbance":0.847,"wavelength_nm":595,"unit":"AU"})),
+    // Shared vessel state — dispense/aspirate/read_absorbance all operate on it.
+    let vessel_state = Arc::new(Mutex::new(SimVesselState::new()));
+
+    // ── dispense ──────────────────────────────────────────────────────────────
+    {
+        let vs = Arc::clone(&vessel_state);
+        r.register(
+            ToolSpec {
+                name: "dispense".into(),
+                description: "Dispense liquid into a vessel (vessel_id, volume_ul).".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+            },
+            Box::new(move |p| {
+                let vs = Arc::clone(&vs);
+                Box::pin(async move {
+                    let id  = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
+                    let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
+                    let new_vol = vs.lock().unwrap().dispense(id, vol).map_err(|e| e)?;
+                    Ok(serde_json::json!({"status": "dispensed", "vessel_id": id,
+                                          "volume_ul": vol, "current_volume_ul": new_vol}))
+                })
+            }),
+        );
+    }
+
+    // ── aspirate ─────────────────────────────────────────────────────────────
+    {
+        let vs = Arc::clone(&vessel_state);
+        r.register(
+            ToolSpec {
+                name: "aspirate".into(),
+                description: "Aspirate liquid from a vessel (vessel_id, volume_ul).".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+            },
+            Box::new(move |p| {
+                let vs = Arc::clone(&vs);
+                Box::pin(async move {
+                    let id  = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
+                    let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
+                    let remaining = vs.lock().unwrap().aspirate(id, vol).map_err(|e| e)?;
+                    Ok(serde_json::json!({"status": "aspirated", "vessel_id": id,
+                                          "volume_ul": vol, "current_volume_ul": remaining}))
+                })
+            }),
+        );
+    }
+
+    // ── read_absorbance (Beer-Lambert physics) ────────────────────────────────
+    {
+        let vs = Arc::clone(&vessel_state);
+        r.register(
+            ToolSpec {
+                name: "read_absorbance".into(),
+                description: "Read UV/Vis absorbance (vessel_id, wavelength_nm). \
+                    Uses Beer-Lambert physics: A = ε × fill_fraction × path_length × \
+                    Gaussian(λ, peak=500 nm, σ=150 nm) + 2% noise.".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
+            },
+            Box::new(move |p| {
+                let vs = Arc::clone(&vs);
+                Box::pin(async move {
+                    let id = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
+                    let wl = p["wavelength_nm"].as_f64().ok_or("missing wavelength_nm")?;
+                    if !(200.0..=1000.0).contains(&wl) {
+                        return Err(format!("wavelength {wl:.0} nm out of range [200, 1000]"));
+                    }
+                    let absorbance = vs.lock().unwrap().read_absorbance(id, wl);
+                    Ok(serde_json::json!({"absorbance": absorbance, "wavelength_nm": wl, "unit": "AU", "source": "mock-physics"}))
+                })
+            }),
+        );
+    }
+
+    // ── static mocks for instruments that don't affect vessel volume ──────────
+    let static_extras: &[(&str, &str, serde_json::Value, serde_json::Value)] = &[
         ("read_ph", "Read vessel pH.",
             serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"}},"required":["vessel_id"]}),
-            serde_json::json!({"ph":7.2,"unit":"pH"})),
-        ("read_temperature", "Read vessel temperature.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"}},"required":["vessel_id"]}),
-            serde_json::json!({"temperature_mk":298150,"unit":"mK"})),
-        ("set_temperature", "Set target temperature.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"target_mk":{"type":"number"}},"required":["vessel_id","target_mk"]}),
-            serde_json::json!({"status":"temperature_set"})),
-        ("spin_centrifuge", "Spin centrifuge.",
+            serde_json::json!({"ph":7.2,"unit":"pH","source":"mock"})),
+        ("read_temperature", "Read current incubator temperature.",
+            serde_json::json!({"type":"object","properties":{}}),
+            serde_json::json!({"temperature_mk":298150,"unit":"mK","source":"mock"})),
+        ("set_temperature", "Set target temperature (temperature_celsius).",
+            serde_json::json!({"type":"object","properties":{"temperature_celsius":{"type":"number"}},"required":["temperature_celsius"]}),
+            serde_json::json!({"status":"temperature_set","source":"mock"})),
+        ("spin_centrifuge", "Spin centrifuge (rcf, duration_seconds, temperature_celsius).",
             serde_json::json!({"type":"object","properties":{"rcf":{"type":"number"},"duration_seconds":{"type":"number"},"temperature_celsius":{"type":"number"}},"required":["rcf","duration_seconds","temperature_celsius"]}),
-            serde_json::json!({"status":"centrifuged"})),
-        ("calibrate_ph", "Calibrate pH meter.",
+            serde_json::json!({"status":"centrifuged","source":"mock"})),
+        ("calibrate_ph", "Calibrate pH meter (buffer_ph1, buffer_ph2).",
             serde_json::json!({"type":"object","properties":{"buffer_ph1":{"type":"number"},"buffer_ph2":{"type":"number"}},"required":["buffer_ph1","buffer_ph2"]}),
-            serde_json::json!({"status":"calibrated"})),
-        ("incubate", "Incubate for duration.",
+            serde_json::json!({"status":"calibrated","source":"mock"})),
+        ("incubate", "Incubate for duration (duration_minutes).",
             serde_json::json!({"type":"object","properties":{"duration_minutes":{"type":"number"}},"required":["duration_minutes"]}),
-            serde_json::json!({"status":"incubated"})),
+            serde_json::json!({"status":"incubated","source":"mock"})),
     ];
 
-    for (name, desc, schema, result) in mock_extras {
+    for (name, desc, schema, result) in static_extras {
         let result = result.clone();
         r.register(
             ToolSpec { name: (*name).into(), description: (*desc).into(), parameters_schema: schema.clone() },

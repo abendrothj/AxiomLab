@@ -2,6 +2,12 @@ use crate::discovery::DiscoveryJournal;
 use crate::ws_sink::ExplorationLog;
 use agent_runtime::capabilities::CapabilityPolicy;
 
+/// Maximum number of entries from each ExplorationLog list injected into the
+/// mandate.  Keeps the prompt size bounded during long autonomous runs.
+const MAX_MANDATE_FINDINGS: usize   = 20;
+const MAX_MANDATE_REJECTIONS: usize = 10;
+const MAX_MANDATE_SUCCESSES: usize  = 15;
+
 const BASE_MANDATE: &str = "\
 You have been instantiated inside a physically constrained universe you did not design \
 and whose rules have not been explained to you. Something governs what you can and cannot \
@@ -85,8 +91,13 @@ pub(crate) fn build_mandate(
     }
 
     if !log.findings.is_empty() {
+        let recent: Vec<&String> = log.findings.iter().rev().take(MAX_MANDATE_FINDINGS).collect();
+        let total = log.findings.len();
         m.push_str("\n## Already discovered (do not repeat — go deeper):\n");
-        for (i, f) in log.findings.iter().enumerate() {
+        if total > MAX_MANDATE_FINDINGS {
+            m.push_str(&format!("  (showing {MAX_MANDATE_FINDINGS} most recent of {total})\n"));
+        }
+        for (i, f) in recent.iter().rev().enumerate() {
             m.push_str(&format!("  [{}] {f}\n", i + 1));
         }
     }
@@ -94,7 +105,7 @@ pub(crate) fn build_mandate(
     if !log.rejections.is_empty() {
         m.push_str("\n## Observed constraint violations:\n");
         let mut seen = std::collections::HashMap::new();
-        for (tool, reason) in &log.rejections {
+        for (tool, reason) in log.rejections.iter().rev().take(MAX_MANDATE_REJECTIONS) {
             seen.entry(tool.as_str()).or_insert(reason.as_str());
         }
         for (tool, reason) in &seen {
@@ -104,7 +115,10 @@ pub(crate) fn build_mandate(
     }
 
     if !log.successes.is_empty() {
-        let mut unique: Vec<&str> = log.successes.iter().map(|s| s.as_str()).collect();
+        let mut unique: Vec<&str> = log.successes.iter().rev()
+            .take(MAX_MANDATE_SUCCESSES)
+            .map(|s| s.as_str())
+            .collect();
         unique.sort_unstable();
         unique.dedup();
         m.push_str("\n## Confirmed working tools: ");

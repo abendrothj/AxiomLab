@@ -17,6 +17,17 @@ pub struct ExplorationLog {
     pub successes:  Vec<String>,
 }
 
+impl ExplorationLog {
+    /// Seed findings from a persisted `DiscoveryJournal` so the mandate
+    /// correctly shows "already discovered" after a server restart.
+    pub fn from_journal(journal: &DiscoveryJournal) -> Self {
+        Self {
+            findings: journal.findings.iter().map(|f| f.statement.clone()).collect(),
+            ..Default::default()
+        }
+    }
+}
+
 // ── In-memory event buffer (replaces SQLite) ──────────────────────────────────
 
 const MAX_EVENTS: usize = 2000;
