@@ -8,6 +8,97 @@ use std::path::Path;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
+// ── Protocol audit helpers ────────────────────────────────────────────────────
+
+/// Emit a protocol step record into the audit chain.
+///
+/// Protocol step records use `action = "protocol_step"` and encode structured
+/// details as JSON in the `reason` field.  This keeps them in the same hash
+/// chain as tool-call audit events without changing the chain verification code.
+pub fn emit_protocol_step(
+    path: &str,
+    protocol_id: Uuid,
+    run_id: Uuid,
+    step_index: usize,
+    tool: &str,
+    description: &str,
+    allowed: bool,
+    rejection_reason: Option<&str>,
+    proof_artifact_hash: &str,
+    signer: Option<&AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "protocol_id": protocol_id,
+        "run_id": run_id,
+        "step_index": step_index,
+        "tool": tool,
+        "description": description,
+        "proof_artifact_hash": proof_artifact_hash,
+        "rejection_reason": rejection_reason,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("protocol_step-{run_id}-{step_index}"),
+        action: "protocol_step".into(),
+        decision: if allowed { "allow" } else { "deny" }.into(),
+        reason: details.to_string(),
+        success: allowed,
+        approval_ids: None,
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Emit a signed protocol conclusion record into the audit chain.
+///
+/// The conclusion text is signed separately (over `run_id + conclusion`) in
+/// addition to the standard per-entry Ed25519 signature, giving an independent
+/// attestation that this specific scientific conclusion was produced for this run.
+///
+/// Returns the conclusion signature as a base64 string (empty if no signer).
+pub fn emit_protocol_conclusion(
+    path: &str,
+    protocol_id: Uuid,
+    run_id: Uuid,
+    protocol_name: &str,
+    conclusion: &str,
+    steps_total: usize,
+    steps_succeeded: usize,
+    signer: Option<&AuditSigner>,
+) -> Result<String, std::io::Error> {
+    // Conclusion-specific signature: sign (run_id || "\n" || conclusion).
+    let conclusion_sig = signer.map(|s| {
+        let msg = format!("{run_id}\n{conclusion}");
+        s.sign(msg.as_bytes())
+    }).unwrap_or_default();
+
+    let details = serde_json::json!({
+        "protocol_id": protocol_id,
+        "run_id": run_id,
+        "protocol_name": protocol_name,
+        "steps_total": steps_total,
+        "steps_succeeded": steps_succeeded,
+        "conclusion_sig_b64": conclusion_sig,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("protocol_conclusion-{run_id}"),
+        action: "protocol_conclusion".into(),
+        decision: "allow".into(),
+        reason: details.to_string(),
+        success: true,
+        approval_ids: None,
+    };
+    let line = emit_jsonl(path, &event, signer)?;
+    Ok(line)
+}
+
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Signed checkpoint for audit integrity.
 /// See OPERATOR_GUIDE.md section 2.2 for deployment guidance.
 #[derive(Debug, Serialize)]
@@ -85,6 +176,11 @@ impl AuditSigner {
 
     fn sign(&self, bytes: &[u8]) -> String {
         STANDARD.encode(self.signing_key.sign(bytes).to_bytes())
+    }
+
+    /// Raw 32-byte Ed25519 verifying (public) key — used to build a PEM for Rekor.
+    pub fn verifying_key_bytes(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
     }
 }
 

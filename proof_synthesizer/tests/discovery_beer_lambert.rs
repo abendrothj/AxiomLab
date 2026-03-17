@@ -34,7 +34,7 @@
 //!   Literature ε = 2455 L·mol⁻¹·cm⁻¹ (Skoog, West & Holler)
 //!   Path length = 1.0 cm (standard cuvette)
 //!
-//! Run inside Docker:
+//! Run with:
 //!   cargo test --package proof_synthesizer --test discovery_beer_lambert -- --nocapture
 
 use proof_synthesizer::compiler::{find_verus, invoke_verus};
@@ -123,7 +123,7 @@ async fn discovery_beer_lambert_law() {
         println!("  ✓ ALL dilution volumes, arm positions, and arithmetic");
         println!("    formally proven safe by Z3 SMT solver\n");
     } else {
-        println!("  SKIP: Verus not available — run inside Docker container\n");
+        println!("  SKIP: Verus not available — run natively (requires Verus on PATH)\n");
     }
 
     // ── STAGE 3: Design dilution series ──────────────────────────
@@ -330,7 +330,7 @@ fn main() {
 "#;
 
 #[tokio::test]
-#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH)"]
 async fn discovery_rejects_unsafe_dilution_series() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available");

@@ -133,12 +133,33 @@ pub fn hill_equation_fit(x: &[f64], y: &[f64]) -> Option<HillFit> {
     let y_max = y.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1e-9);
     let x_mid = x[x.len() / 2].max(1e-9);
 
+    // Estimate EC50 from data: linearly interpolate to find x where y ≈ 0.5 * y_max.
+    // Using linear interpolation (not just the midpoint of the enclosing window)
+    // gives a much tighter EC50 starting guess, especially for sparse x grids.
+    let y_half = y_max * 0.5;
+    let ec50_est = x
+        .windows(2)
+        .zip(y.windows(2))
+        .find(|(_, yw)| {
+            (yw[0] <= y_half && yw[1] > y_half) || (yw[0] >= y_half && yw[1] < y_half)
+        })
+        .map(|(xw, yw)| {
+            let t = if (yw[1] - yw[0]).abs() > 1e-15 {
+                (y_half - yw[0]) / (yw[1] - yw[0])
+            } else {
+                0.5
+            };
+            xw[0] + t * (xw[1] - xw[0])
+        })
+        .unwrap_or(x_mid);
+
     // Try several starting points and return the best fit.
     let candidates: &[(f64, f64, f64)] = &[
-        (y_max, x_mid, 1.0),
-        (y_max * 1.2, x_mid * 0.5, 2.0),
-        (y_max * 0.8, x_mid * 2.0, 0.5),
-        (y_max, x_mid, 4.0),
+        (y_max * 1.1, ec50_est,        1.5),
+        (y_max * 1.2, ec50_est * 0.7,  2.0),
+        (y_max * 1.3, ec50_est * 1.3,  1.0),
+        (y_max * 1.5, ec50_est,        1.0),
+        (y_max,       x_mid,           4.0),
     ];
 
     candidates
@@ -155,10 +176,16 @@ fn hill_gd_fit(
     mut hill_n: f64,
 ) -> Option<HillFit> {
     let n_pts = x.len();
-    let lr = 1e-4;
     let eps = 1e-8;
 
-    for _ in 0..10_000 {
+    // Per-parameter learning rates.  The gradient for ec50 is O(ec50 · hill_n)
+    // times larger than the gradient for e_max (chain rule through ec50^hill_n),
+    // so ec50 needs a proportionally smaller step to stay balanced.
+    let lr_e  = 2e-4;
+    let lr_ec = 2e-5;
+    let lr_n  = 2e-4;
+
+    for _ in 0..50_000 {
         let mut d_e = 0.0_f64;
         let mut d_ec = 0.0_f64;
         let mut d_n = 0.0_f64;
@@ -172,19 +199,19 @@ fn hill_gd_fit(
 
             // ∂pred/∂e_max
             d_e += 2.0 * residual * xn / denom;
-            // ∂pred/∂ec50  (chain rule)
+            // ∂pred/∂ec50  (chain rule through ec50^hill_n)
             let d_ec50n = -e_max * xn / denom.powi(2);
             d_ec += 2.0 * residual * d_ec50n * hill_n * ec50.powf(hill_n - 1.0).max(eps);
             // ∂pred/∂hill_n  (chain rule)
-            let d_xn_dn = xn * xi.ln().max(-100.0);
+            let d_xn_dn    = xn   * xi.ln().max(-100.0);
             let d_ec50n_dn = ec50n * ec50.ln().max(-100.0);
             let dpred_dn = e_max * (d_xn_dn * denom - xn * (d_xn_dn + d_ec50n_dn)) / denom.powi(2);
             d_n += 2.0 * residual * dpred_dn;
         }
 
-        e_max -= lr * d_e / n_pts as f64;
-        ec50 = (ec50 - lr * d_ec / n_pts as f64).max(eps);
-        hill_n = (hill_n - lr * d_n / n_pts as f64).max(eps);
+        e_max  -= lr_e  * d_e  / n_pts as f64;
+        ec50    = (ec50  - lr_ec * d_ec / n_pts as f64).max(eps);
+        hill_n  = (hill_n - lr_n  * d_n  / n_pts as f64).max(eps);
     }
 
     if !e_max.is_finite() || !ec50.is_finite() || !hill_n.is_finite() {
@@ -380,18 +407,23 @@ fn two_tailed_t_pvalue(t: f64, df: f64) -> f64 {
 }
 
 fn regularised_inc_beta(x: f64, a: f64, b: f64) -> f64 {
-    // Numerical Recipes betacf (continued fraction) + log-beta normalisation.
-    if x <= 0.0 {
-        return 0.0;
-    }
-    if x >= 1.0 {
-        return 1.0;
+    if x <= 0.0 { return 0.0; }
+    if x >= 1.0 { return 1.0; }
+
+    // Use the symmetry I_x(a,b) = 1 - I_{1-x}(b,a) when x > the mode of the
+    // Beta distribution.  This keeps the continued fraction in its fast-
+    // converging region (small x relative to a).
+    if x > (a + 1.0) / (a + b + 2.0) {
+        return 1.0 - regularised_inc_beta(1.0 - x, b, a);
     }
 
+    // Front factor: x^a * (1-x)^b / B(a,b), computed in log-space to avoid
+    // catastrophic underflow for large |t| (small x).
     let log_beta = lgamma(a) + lgamma(b) - lgamma(a + b);
-    let front = (x.powf(a) * (1.0 - x).powf(b) / x).exp() / log_beta.exp().max(1e-300);
+    let log_front = a * x.ln() + b * (1.0 - x).ln() - log_beta;
+    let front = log_front.exp();
 
-    // Continued fraction via Lentz.
+    // Continued fraction via Lentz's method (Numerical Recipes betacf).
     let max_iter = 200;
     let eps = 3e-7;
 
@@ -420,16 +452,19 @@ fn regularised_inc_beta(x: f64, a: f64, b: f64) -> f64 {
         d = 1.0 / d;
         let delta = d * c;
         h *= delta;
-        if (delta - 1.0).abs() < eps {
-            break;
-        }
+        if (delta - 1.0).abs() < eps { break; }
     }
 
-    front * h / a
+    (front * h / a).clamp(0.0, 1.0)
 }
 
 /// Log-gamma function via Lanczos approximation (g=7, n=9 coefficients).
+///
+/// Returns ln(Γ(z)).  Computed entirely in log-space to avoid overflow for
+/// large z and underflow for arguments that yield tiny Γ values.
 fn lgamma(z: f64) -> f64 {
+    // 0.5 * ln(2π) — the correct Lanczos leading constant.
+    const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_7;
     const G: f64 = 7.0;
     const C: [f64; 9] = [
         0.999_999_999_999_809_3,
@@ -448,10 +483,8 @@ fn lgamma(z: f64) -> f64 {
         x += c / (z + i as f64 + 1.0);
     }
     let t = z + G + 0.5;
-    std::f64::consts::FRAC_2_SQRT_PI.sqrt()
-        * (t.powf(z + 0.5))
-        * (-t).exp()
-        * x
+    // Log-space: ln(√(2π)) + (z+0.5)·ln(t) − t + ln(series)
+    LN_SQRT_2PI + (z + 0.5) * t.ln() - t + x.ln()
 }
 
 // ── Spectrophotometer (Beer-Lambert simulation) ───────────────────────────────
@@ -532,7 +565,10 @@ mod tests {
     #[test]
     fn hill_fit_recovers_parameters() {
         // Generate synthetic Hill data with known E_max=1, EC50=10, n=2.
-        let x: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        // Data must extend well past EC50 so the plateau is visible and
+        // E_max is identifiable (at x=20 the curve only reaches y=0.80;
+        // at x=100 it reaches y=0.99, clearly constraining E_max=1).
+        let x: Vec<f64> = vec![1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 50.0, 75.0, 100.0];
         let y: Vec<f64> = x
             .iter()
             .map(|&xi| {
@@ -601,8 +637,9 @@ mod tests {
 
     #[test]
     fn aic_favors_better_fitting_model() {
-        let x: Vec<f64> = (1..=10).map(|i| i as f64).collect();
-        // Quadratic data — a linear model fits poorly, Hill fits well.
+        // Sigmoidal data (E_max=1, EC50=5, n=2).  Extend past the plateau so
+        // Hill fit converges reliably: at x=50 the curve reaches y=0.99.
+        let x: Vec<f64> = vec![1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0, 50.0];
         let y: Vec<f64> = x.iter().map(|&xi| {
             let xn = xi.powi(2);
             xn / (25.0 + xn)

@@ -13,7 +13,7 @@
 //! that no dispense volume, temperature, or arm movement can violate
 //! physical safety constraints — even if the LLM hallucinates bad values.
 //!
-//! Run inside Docker:
+//! Run with:
 //!   cargo test --package proof_synthesizer --test titration_e2e -- --nocapture
 
 use proof_synthesizer::compiler::{find_verus, invoke_verus};
@@ -209,7 +209,7 @@ fn verus_available() -> bool {
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH)"]
 async fn e2e_titration_verified() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available");
@@ -278,7 +278,7 @@ async fn e2e_titration_verified() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH)"]
 async fn e2e_unsafe_titration_blocked() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available");

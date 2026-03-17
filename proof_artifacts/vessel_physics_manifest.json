@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "generated_unix_secs": 1773777235,
+  "build": {
+    "git_commit": "7ba7dcd7848826696b16042f1c3b6bbcd857d97e",
+    "binary_hash": "b88b4d7a942d73ba80c474046bcd99ff8246db57bb03649cdd7be3acc6eeef4a",
+    "workspace_hash": "d0625405b329bf7f416597065b291eeea08342976ef5a9b36abc2a5e1adeaaa0",
+    "container_image_digest": null,
+    "device_id": null,
+    "firmware_version": null
+  },
+  "artifacts": [
+    {
+      "id": "lab_safety_verus",
+      "source_path": "verus_verified/vessel_registry.rs",
+      "source_hash": "b88b4d7a942d73ba80c474046bcd99ff8246db57bb03649cdd7be3acc6eeef4a",
+      "mir_path": null,
+      "mir_hash": null,
+      "lean": [],
+      "verus": {
+        "path": "verus_verified/vessel_registry.rs",
+        "hash": "b88b4d7a942d73ba80c474046bcd99ff8246db57bb03649cdd7be3acc6eeef4a",
+        "status": "Passed"
+      },
+      "theorem_count": 11,
+      "sorry_count": 0,
+      "status": "Passed",
+      "metadata": {
+        "verus_stdout": "verification results:: 11 verified, 0 errors\n",
+        "generated_by": "vessel_physics/generate_manifest.py"
+      }
+    },
+    {
+      "id": "protocol_safety_verus",
+      "source_path": "verus_verified/protocol_safety.rs",
+      "source_hash": "77cd4998c01c7f82f463201476afa1b37bd2459f80503408d85fdf6ecb8c9933",
+      "mir_path": null,
+      "mir_hash": null,
+      "lean": [],
+      "verus": {
+        "path": "verus_verified/protocol_safety.rs",
+        "hash": "77cd4998c01c7f82f463201476afa1b37bd2459f80503408d85fdf6ecb8c9933",
+        "status": "Passed"
+      },
+      "theorem_count": 13,
+      "sorry_count": 0,
+      "status": "Passed",
+      "metadata": {
+        "verus_stdout": "verification results:: 13 verified, 0 errors\n",
+        "generated_by": "vessel_physics/generate_manifest.py"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "action": "dispense",
+      "risk_class": "LiquidHandling",
+      "required_artifacts": [
+        "lab_safety_verus"
+      ],
+      "rationale": "Liquid dispensing requires Verus-verified volume safety proof"
+    },
+    {
+      "action": "aspirate",
+      "risk_class": "LiquidHandling",
+      "required_artifacts": [
+        "lab_safety_verus"
+      ],
+      "rationale": "Liquid aspiration requires Verus-verified volume safety proof"
+    },
+    {
+      "action": "propose_protocol",
+      "risk_class": "LiquidHandling",
+      "required_artifacts": [
+        "lab_safety_verus",
+        "protocol_safety_verus"
+      ],
+      "rationale": "Multi-step protocol execution requires both vessel physics and protocol-level safety proofs"
+    },
+    {
+      "action": "read_absorbance",
+      "risk_class": "ReadOnly",
+      "required_artifacts": [],
+      "rationale": "Read-only spectrophotometer measurement \u2014 no proof required"
+    }
+  ]
+}

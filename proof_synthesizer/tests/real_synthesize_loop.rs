@@ -67,7 +67,7 @@ fn llm_endpoint_configured() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "requires live LLM endpoint + Verus binary; run inside Docker"]
+#[ignore = "requires live LLM endpoint + Verus binary"]
 async fn real_synthesize_proof_fixes_micro_precondition_violation() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("proof_synthesizer=debug".parse().unwrap()))
@@ -152,7 +152,7 @@ fn main() { let _ = count_up(5); }
 "#;
 
 #[tokio::test]
-#[ignore = "requires live LLM endpoint + Verus binary; run inside Docker"]
+#[ignore = "requires live LLM endpoint + Verus binary"]
 async fn real_synthesize_proof_adds_loop_invariant() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

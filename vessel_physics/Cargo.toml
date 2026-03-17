@@ -1,0 +1,19 @@
+[package]
+name = "vessel_physics"
+version = "0.1.0"
+edition = "2021"
+description = "Formally verified vessel physics for AxiomLab — VesselRegistry with PyO3 Python bindings"
+
+[lib]
+name = "vessel_physics"
+# cdylib  → Python extension (.so / .dylib) built by maturin
+# rlib    → Rust unit tests and downstream Rust consumers
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+[dev-dependencies]
+# No extra test dependencies needed — stdlib only
+
+[workspace]

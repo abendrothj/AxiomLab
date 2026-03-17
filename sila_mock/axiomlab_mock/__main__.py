@@ -8,14 +8,13 @@ from typing import Optional
 from uuid import UUID
 
 import typer
-from sila2.framework.utils import running_in_docker
 from typer import BadParameter, Option
 
 from .server import Server
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_IP = "0.0.0.0" if running_in_docker() else "127.0.0.1"  # noqa: S104, possible bind to all interfaces
+_DEFAULT_IP = "127.0.0.1"
 
 
 def main(

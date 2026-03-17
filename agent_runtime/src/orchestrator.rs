@@ -7,19 +7,26 @@
 //! 4. Validate actions against sandbox → approval → capability → proof policy.
 //! 5. Execute tool calls and advance the experiment lifecycle.
 
-use crate::audit::{AuditEvent, AuditSigner, emit_jsonl, emit_remote_with_retry, trace_id};
+use crate::audit::{
+    AuditEvent, AuditSigner, emit_jsonl, emit_protocol_conclusion, emit_protocol_step,
+    emit_remote_with_retry, trace_id,
+};
+use crate::rekor;
 use crate::approvals::{ApprovalPolicy, risk_class_for_action};
 use crate::capabilities::CapabilityPolicy;
 use crate::events::{
-    EventSink, LlmTokenEvent, NotebookEntryEvent, StateTransitionEvent, ToolExecutionEvent,
+    EventSink, LlmTokenEvent, NotebookEntryEvent, ProtocolConclusionEvent, ProtocolStepEvent,
+    StateTransitionEvent, ToolExecutionEvent,
 };
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
+use crate::protocol::{Protocol, ProtocolPlan, ProtocolRunResult, StepOutcome};
 use crate::revocation::RevocationList;
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
 use proof_artifacts::manifest::RiskClass;
 use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -260,6 +267,19 @@ impl<L: LlmBackend> Orchestrator<L> {
                 content: response.clone(),
             });
 
+            // Check for propose_protocol — a structured multi-step protocol.
+            if let Some(protocol_result) =
+                self.try_propose_protocol(&response).await
+            {
+                let result_json =
+                    serde_json::to_string(&protocol_result).unwrap_or_default();
+                history.push(ChatMessage {
+                    role: "user".into(),
+                    content: format!("Protocol run result: {result_json}"),
+                });
+                continue;
+            }
+
             // Try to parse as a tool call.
             if let Some(tool_result) = self.try_tool_call(&response).await {
                 let result_json = serde_json::to_string(&tool_result).unwrap_or_default();
@@ -305,6 +325,281 @@ impl<L: LlmBackend> Orchestrator<L> {
         Err(OrchestratorError::Halted(
             "max iterations reached".to_owned(),
         ))
+    }
+
+    /// Check if the LLM response is a `propose_protocol` call.
+    ///
+    /// Returns `Some(ProtocolRunResult)` if the response was a valid protocol
+    /// proposal that was executed.  Returns `None` if the response is not a
+    /// `propose_protocol` call (so the caller can fall through to `try_tool_call`).
+    async fn try_propose_protocol(&self, response: &str) -> Option<ProtocolRunResult> {
+        let parsed: serde_json::Value = serde_json::from_str(response).ok()?;
+        if parsed.get("tool")?.as_str()? != "propose_protocol" {
+            return None;
+        }
+        let params = parsed.get("params")?;
+        let plan: ProtocolPlan = serde_json::from_value(params.clone())
+            .map_err(|e| warn!("propose_protocol: invalid plan JSON: {e}"))
+            .ok()?;
+
+        if let Err(e) = plan.validate() {
+            warn!("propose_protocol: plan validation failed: {e}");
+            return None;
+        }
+
+        let protocol = plan.into_protocol();
+        Some(self.run_protocol(protocol).await)
+    }
+
+    /// Execute a tool call from pre-parsed structured data.
+    ///
+    /// Runs the full 5-stage validation pipeline (sandbox → approval → capability
+    /// → proof policy → dispatch) without JSON parsing.  Used by [`run_protocol`]
+    /// to execute individual protocol steps.
+    ///
+    /// Returns a [`ToolResult`] regardless of whether the action was allowed —
+    /// `ToolResult.success` indicates the outcome.
+    pub async fn execute_tool_direct(
+        &self,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> ToolResult {
+        // Synthesise a JSON string and route through try_tool_call so all
+        // validation logic stays in one place.
+        let json = serde_json::json!({ "tool": tool_name, "params": params });
+        match self.try_tool_call(&json.to_string()).await {
+            Some(result) => result,
+            None => ToolResult {
+                name: tool_name.to_owned(),
+                output: serde_json::Value::String(
+                    "tool call schema rejected (internal error)".into(),
+                ),
+                success: false,
+            },
+        }
+    }
+
+    /// Run a structured [`Protocol`], executing each step through the full
+    /// 5-stage validation pipeline.
+    ///
+    /// After each step the LLM is shown the result so it can adapt its plan.
+    /// After all steps it is asked for a scientific conclusion, which is written
+    /// to the audit log with a per-conclusion Ed25519 signature.
+    pub async fn run_protocol(&self, protocol: Protocol) -> ProtocolRunResult {
+        let run_id = uuid::Uuid::new_v4();
+        info!(
+            protocol_id = %protocol.id,
+            run_id = %run_id,
+            name = %protocol.name,
+            steps = protocol.steps.len(),
+            "starting protocol run"
+        );
+
+        // Compute the manifest hash for audit records.
+        let manifest_hash = self
+            .policy_engine
+            .as_ref()
+            .map(|e| {
+                let raw = serde_json::to_string(e.manifest()).unwrap_or_default();
+                format!("{:x}", sha2::Sha256::digest(raw.as_bytes()))
+            })
+            .unwrap_or_else(|| "no-manifest".into());
+
+        let mut step_results: Vec<StepOutcome> = Vec::new();
+        let mut steps_succeeded = 0usize;
+
+        // Build a conversation for the LLM to observe step results.
+        let mut messages = vec![ChatMessage {
+            role: "system".into(),
+            content: format!(
+                "You are observing the execution of protocol '{}'. \
+                 Hypothesis: {}\n\
+                 You will see each step result in turn. After all steps, \
+                 provide a scientific conclusion as plain text.",
+                protocol.name, protocol.hypothesis
+            ),
+        }];
+
+        for (i, step) in protocol.steps.iter().enumerate() {
+            info!(step = i, tool = %step.tool, "executing protocol step");
+
+            let result = self.execute_tool_direct(&step.tool, step.params.clone()).await;
+            let allowed = result.success;
+            let rejection_reason = if !allowed {
+                result.output.as_str().map(|s| s.to_owned())
+            } else {
+                None
+            };
+
+            // Write to audit chain.
+            if let Some(path) = &self.config.audit_log_path {
+                let _ = emit_protocol_step(
+                    path,
+                    protocol.id,
+                    run_id,
+                    i,
+                    &step.tool,
+                    &step.description,
+                    allowed,
+                    rejection_reason.as_deref(),
+                    &manifest_hash,
+                    self.config.audit_signer.as_ref(),
+                );
+            }
+
+            // Emit event to visualizer.
+            if let Some(sink) = &self.config.event_sink {
+                sink.on_protocol_step(ProtocolStepEvent {
+                    protocol_id: protocol.id.to_string(),
+                    run_id: run_id.to_string(),
+                    step_index: i,
+                    tool: step.tool.clone(),
+                    description: step.description.clone(),
+                    allowed,
+                    timestamp_ms: unix_ms(),
+                });
+            }
+
+            // Feed result back to LLM as an observation.
+            let obs = if allowed {
+                format!(
+                    "Step {i} ({} — {}): SUCCESS. Result: {}",
+                    step.tool,
+                    step.description,
+                    serde_json::to_string(&result.output).unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "Step {i} ({} — {}): REJECTED. Reason: {}",
+                    step.tool,
+                    step.description,
+                    rejection_reason.as_deref().unwrap_or("unknown")
+                )
+            };
+            messages.push(ChatMessage { role: "user".into(), content: obs });
+
+            if allowed {
+                steps_succeeded += 1;
+            }
+
+            step_results.push(StepOutcome {
+                step_index: i,
+                tool: step.tool.clone(),
+                description: step.description.clone(),
+                allowed,
+                result: if allowed { Some(result.output) } else { None },
+                rejection_reason,
+            });
+        }
+
+        // Ask the LLM for its scientific conclusion.
+        messages.push(ChatMessage {
+            role: "user".into(),
+            content: format!(
+                "Protocol complete. {steps_succeeded}/{} steps succeeded. \
+                 Write your scientific conclusion based on these observations.",
+                protocol.steps.len()
+            ),
+        });
+
+        let conclusion = match self.llm.chat(&messages, self.config.reasoning_temperature).await {
+            Ok(text) => sanitize_llm_response(&text),
+            Err(e) => {
+                warn!(error = %e, "LLM failed to generate protocol conclusion");
+                format!(
+                    "Protocol '{name}' completed: {steps_succeeded}/{total} steps succeeded. \
+                     LLM conclusion unavailable: {e}",
+                    name = protocol.name,
+                    total = protocol.steps.len()
+                )
+            }
+        };
+
+        info!(
+            protocol_id = %protocol.id,
+            run_id = %run_id,
+            steps_succeeded,
+            "protocol run concluded"
+        );
+
+        // Write signed conclusion to audit chain, then anchor externally to Rekor.
+        if let Some(path) = &self.config.audit_log_path {
+            let conclusion_line = emit_protocol_conclusion(
+                path,
+                protocol.id,
+                run_id,
+                &protocol.name,
+                &conclusion,
+                protocol.steps.len(),
+                steps_succeeded,
+                self.config.audit_signer.as_ref(),
+            );
+
+            if let (Ok(line), Some(signer)) =
+                (conclusion_line, self.config.audit_signer.as_ref())
+            {
+                if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let (Some(hash), Some(sig)) = (
+                        entry["entry_hash"].as_str(),
+                        entry["entry_sig_b64"].as_str(),
+                    ) {
+                        let pubkey_pem = rekor::ed25519_pubkey_pem(&signer.verifying_key_bytes());
+                        match rekor::anchor(hash, sig, &pubkey_pem).await {
+                            Ok(anchor) => {
+                                info!(
+                                    rekor_uuid        = %anchor.uuid,
+                                    log_index         = anchor.log_index,
+                                    integrated_time   = anchor.integrated_time,
+                                    "protocol conclusion anchored to Rekor transparency log"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "Rekor anchoring failed — local audit chain intact"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit conclusion event.
+        if let Some(sink) = &self.config.event_sink {
+            sink.on_protocol_conclusion(ProtocolConclusionEvent {
+                protocol_id: protocol.id.to_string(),
+                run_id: run_id.to_string(),
+                protocol_name: protocol.name.clone(),
+                conclusion: conclusion.clone(),
+                steps_succeeded,
+                steps_total: protocol.steps.len(),
+                timestamp_ms: unix_ms(),
+            });
+
+            // Also write to the Lab Notebook.
+            sink.on_notebook_entry(crate::events::NotebookEntryEvent {
+                experiment_id: protocol.id.to_string(),
+                entry: conclusion.clone(),
+                timestamp_ms: unix_ms(),
+                tool_that_triggered: "propose_protocol".into(),
+                outcome: if steps_succeeded == protocol.steps.len() {
+                    "discovery".into()
+                } else {
+                    "inconclusive".into()
+                },
+            });
+        }
+
+        ProtocolRunResult {
+            protocol_id: protocol.id,
+            run_id,
+            protocol_name: protocol.name,
+            steps_total: protocol.steps.len(),
+            steps_succeeded,
+            conclusion,
+            step_results,
+        }
     }
 
     /// Attempt to parse a tool call from the LLM response, validate it

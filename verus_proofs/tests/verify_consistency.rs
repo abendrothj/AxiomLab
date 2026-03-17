@@ -122,7 +122,7 @@ fn safety_functions_consistent_with_predicates() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH)"]
 fn verus_proofs_still_hold() {
     match verify::verify_lab_safety() {
         Some(result) => {
@@ -149,8 +149,8 @@ fn verus_proofs_still_hold() {
         None => {
             eprintln!(
                 "SKIP: Verus compiler not available.\n\
-                 Run inside Docker to execute real verification:\n\
-                 docker compose run --rm axiomlab cargo test --package verus_proofs --test verify_consistency"
+                 Install Verus from https://github.com/verus-lang/verus/releases (extract to ~/verus/)\n\
+                 Then: cargo test --package verus_proofs --test verify_consistency --ignored"
             );
         }
     }

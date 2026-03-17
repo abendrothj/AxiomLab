@@ -8,7 +8,7 @@
 //!   2. invoke_verus() with unsafe code → verification fails
 //!   3. diagnostics::parse() extracts real Verus errors
 //!
-//! Run inside Docker: cargo test --package proof_synthesizer --test real_verus_integration
+//! Run with: cargo test --package proof_synthesizer --test real_verus_integration
 //! Requires: VERUS_PATH environment variable pointing to the verus binary.
 
 use proof_synthesizer::compiler::{find_verus, invoke_verus};
@@ -99,7 +99,7 @@ fn verus_available() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH)"]
 async fn real_verus_safe_code_accepted() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available (set VERUS_PATH or install verus)");
@@ -122,7 +122,7 @@ async fn real_verus_safe_code_accepted() {
 }
 
 #[tokio::test]
-#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH)"]
 async fn real_verus_unsafe_code_rejected() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available (set VERUS_PATH or install verus)");
@@ -161,7 +161,7 @@ async fn real_verus_unsafe_code_rejected() {
 }
 
 #[tokio::test]
-#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH); run inside Docker"]
+#[ignore = "requires Verus binary (VERUS_PATH or verus on PATH)"]
 async fn real_verus_diagnostics_pipeline() {
     if !verus_available() {
         eprintln!("SKIP: Verus not available (set VERUS_PATH or install verus)");

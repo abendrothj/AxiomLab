@@ -8,7 +8,6 @@ name = "axiomlab-server"
 path = "src/main.rs"
 
 [dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
 agent_runtime  = { path = "../agent_runtime" }
 proof_artifacts = { path = "../proof_artifacts" }
 axum           = { version = "0.7", features = ["ws"] }

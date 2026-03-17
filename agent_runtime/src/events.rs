@@ -68,6 +68,44 @@ pub struct NotebookEntryEvent {
     pub outcome: String,
 }
 
+/// Fired when a protocol step is executed (allowed or rejected).
+#[derive(Clone, Serialize)]
+pub struct ProtocolStepEvent {
+    /// UUID of the protocol being run.
+    pub protocol_id: String,
+    /// UUID of this specific run.
+    pub run_id: String,
+    /// Zero-based index of this step.
+    pub step_index: usize,
+    /// Tool name.
+    pub tool: String,
+    /// Human-readable description of the step's intent.
+    pub description: String,
+    /// Whether the 5-stage pipeline allowed this step.
+    pub allowed: bool,
+    /// Unix timestamp in milliseconds.
+    pub timestamp_ms: u64,
+}
+
+/// Fired when a protocol run concludes and the LLM has written its conclusion.
+#[derive(Clone, Serialize)]
+pub struct ProtocolConclusionEvent {
+    /// UUID of the protocol.
+    pub protocol_id: String,
+    /// UUID of this run.
+    pub run_id: String,
+    /// Protocol name.
+    pub protocol_name: String,
+    /// LLM's scientific conclusion.
+    pub conclusion: String,
+    /// Number of steps that were allowed and succeeded.
+    pub steps_succeeded: usize,
+    /// Total steps in the protocol.
+    pub steps_total: usize,
+    /// Unix timestamp in milliseconds.
+    pub timestamp_ms: u64,
+}
+
 // ── Trait ─────────────────────────────────────────────────────────
 
 /// Synchronous event sink for the orchestrator.
@@ -75,9 +113,17 @@ pub struct NotebookEntryEvent {
 /// Implementations must be `Send + Sync` because the orchestrator runs inside
 /// a Tokio task. All methods are synchronous fire-and-forget; the sink should
 /// not block — use internal queues or channels if back-pressure is needed.
+///
+/// Protocol-level methods have default no-op implementations so that existing
+/// [`EventSink`] implementors don't need to be updated.
 pub trait EventSink: Send + Sync {
     fn on_state_transition(&self, event: StateTransitionEvent);
     fn on_tool_execution(&self, event: ToolExecutionEvent);
     fn on_llm_token(&self, event: LlmTokenEvent);
     fn on_notebook_entry(&self, event: NotebookEntryEvent);
+
+    /// Called after each step in a protocol run.  Default: no-op.
+    fn on_protocol_step(&self, _event: ProtocolStepEvent) {}
+    /// Called when a protocol run concludes with a signed conclusion.  Default: no-op.
+    fn on_protocol_conclusion(&self, _event: ProtocolConclusionEvent) {}
 }

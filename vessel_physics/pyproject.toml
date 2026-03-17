@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "vessel_physics"
+version = "0.1.0"
+requires-python = ">=3.9"
+description = "Formally verified vessel physics for AxiomLab"
+
+[tool.maturin]
+# Build the extension module from this Cargo.toml
+manifest-path = "Cargo.toml"

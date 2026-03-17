@@ -1,59 +1,100 @@
 # AxiomLab
 
-> A memory-safe Rust runtime for autonomous AI-driven lab exploration, with formal verification tooling and SiLA 2 hardware integration.
+> A memory-safe Rust runtime for autonomous AI-driven lab exploration, with formal verification and SiLA 2 hardware integration.
 
-## What This Actually Is
+## What This Is
 
-AxiomLab is a working prototype of an autonomous science agent. An LLM (local Ollama) continuously proposes lab experiments, and a Rust orchestrator validates every proposed action through a 5-stage safety pipeline before dispatching it to lab hardware over SiLA 2 gRPC. Results are streamed to a web dashboard in real time.
+AxiomLab is a working prototype of an autonomous science agent. An LLM (local Ollama) continuously proposes lab experiments. A Rust orchestrator validates every proposed action through a 5-stage safety pipeline before dispatching it to lab hardware over SiLA 2 gRPC. Hardware physics — volumes, capacities, overflow prevention — are enforced by formally verified Rust code proved correct by the Verus SMT solver. Multi-step experiments are expressed as structured protocols with cryptographically signed audit records anchored to the Sigstore Rekor transparency log.
 
-**What works today (tested, integrated, proven by 19 passing integration tests):**
+**What works today (tested, integrated):**
+
 - **5-stage tool validation pipeline** — sandbox allowlist → two-person approval → capability bounds → proof-artifact policy → audit + dispatch
-- **SiLA 2 gRPC hardware layer** — 6 instruments (liquid handler, robotic arm, spectrophotometer, incubator, centrifuge, pH meter) with 12 operations, talking to a real gRPC server
-- **Proof-policy gating** — Verus verification artifacts gate high-risk actions (actuation, destructive); read-only actions pass without proofs
+- **SiLA 2 gRPC hardware layer** — 6 instruments (liquid handler, robotic arm, spectrophotometer, incubator, centrifuge, pH meter) with 12 operations
+- **Formally verified vessel physics** — `vessel_physics` Rust crate stores volumes as u64 nanoliters; `proved_add`/`proved_sub` operations are proved correct by Verus (11 theorems, 0 errors). The `ProofManifest` is generated from real Verus compiler output, not a hardcoded fixture.
+- **Formally verified protocol safety** — `verus_verified/protocol_safety.rs` proves step count bounds, total volume bounds, and dilution series safety (13 theorems, 0 errors).
+- **Closed proof chain** — LLM intent → Rust proof gate (reads `vessel_physics_manifest.json`) → PyO3 boundary → `proved_add`/`proved_sub` (Z3-verified integer arithmetic) → SiLA 2 gRPC
+- **Proof-policy gating** — Verus verification artifacts gate high-risk actions (actuation, liquid handling); read-only actions pass without proofs
+- **Structured experiment protocols** — LLM proposes `ProtocolPlan` (name, hypothesis, ordered steps); a `ProtocolExecutor` iterates steps through the full 5-stage pipeline, feeds observations back to the LLM for adaptation, then requests a signed conclusion
+- **Per-event Ed25519 audit signatures** — every audit record (including protocol step records and conclusion records) is individually signed and hash-chained into an append-only JSONL log
+- **Sigstore Rekor anchoring** — protocol conclusions are submitted to the public Rekor transparency log; the UUID and integrated timestamp provide an external, independently verifiable timestamp
 - **Continuous autonomous loop** — LLM proposes → orchestrator validates → hardware executes → results feed back → LLM proposes next
 - **Web visualizer** — real-time WebSocket dashboard with activity feed, state graph, and discovery journal
-- **Immutable SQLite audit log** — append-only, WAL-mode event database that survives server restarts
-- **Docker Compose** — three-service stack (Ollama LLM, SiLA 2 Python mock, AxiomLab Rust server) with health checks
 
 **What is simulated / not yet production:**
-- Hardware is a **Python SiLA 2 mock server** returning plausible values — not real physical instruments
-- LLM is **qwen2.5-coder:7b** via local Ollama — capable enough for structured tool calls, not a frontier reasoning model
-- The "science" is constraint-space exploration — the agent probes parameter bounds and reports what it finds, not novel chemistry
-- Verus formal verification only runs on **x86-linux** (ARM gets a graceful stub)
+
+- Hardware is a **Python SiLA 2 server** returning simulated values — physics enforced by verified Rust, but no real physical instruments are connected
+- LLM is **qwen2.5-coder:7b** via local Ollama — capable for structured tool calls, not a frontier reasoning model
 - Two-person approval uses Ed25519 signatures but key management is manual / external
+
+## Proof Chain
+
+The complete authorization path for a liquid handling operation:
+
+```text
+LLM intent
+  → Rust proof gate
+      reads vessel_physics_manifest.json (real Verus compiler output)
+      ArtifactStatus::Passed iff Verus exited 0
+  → PyO3 boundary
+      Python SiLA 2 server calls into Rust VesselRegistry
+  → proved_add / proved_sub
+      Z3-verified integer arithmetic on u64 nanoliters
+      preconditions enforced before calling
+  → SiLA 2 gRPC → instrument response
+```
+
+For structured protocol runs, an additional layer wraps the above:
+
+```text
+LLM emits ProtocolPlan JSON
+  → parsed and validated (step count ≤ 20, tool names non-empty)
+  → Verus proves: step count ≤ MAX_STEPS, total volume ≤ capacity
+  → ProtocolExecutor iterates steps, each gated by the full 5-stage pipeline
+  → ProtocolStepRecord (tool, params, result, proof_artifact_hash, chain hash, Ed25519 sig)
+  → ProtocolConclusionRecord (LLM conclusion, Ed25519 signed)
+  → Sigstore Rekor submission (UUID + integrated timestamp)
+```
+
+The Verus proofs live in `verus_verified/`. Run them with:
+
+```bash
+~/verus/verus verus_verified/vessel_registry.rs    # 11 verified, 0 errors
+~/verus/verus verus_verified/lab_safety.rs          # 6 verified, 0 errors
+~/verus/verus verus_verified/protocol_safety.rs     # 13 verified, 0 errors
+```
 
 ## Crate Map
 
 | Crate | Purpose | Status |
-|---|---|---|
-| `server` | Axum HTTP + WebSocket server, SQLite event log, continuous exploration loop | Working, tested |
-| `agent_runtime` | Orchestrator (5-stage validation), SiLA 2 gRPC clients (6 instruments), sandbox, capabilities, approvals, audit, tools | Working, 19 integration tests |
+| --- | --- | --- |
+| `server` | Axum HTTP + WebSocket server, in-memory event buffer, continuous exploration loop | Working |
+| `agent_runtime` | Orchestrator (5-stage validation), protocol executor, SiLA 2 gRPC clients (6 instruments), sandbox, capabilities, approvals, audit, Rekor anchoring | Working, integration-tested |
 | `proof_artifacts` | Manifest schema, RuntimePolicyEngine, RiskClass/ActionPolicy, Ed25519 signing, CI gate | Working, used in production pipeline |
-| `scientific_compute` | Pure-Rust linear algebra (`nalgebra`), FFT (`rustfft`), OLS regression, lab data parsing | Working |
+| `vessel_physics` | Formally verified vessel physics — u64 nanoliter VesselRegistry with PyO3 Python bindings | Working; build with `maturin develop` |
+| `scientific_compute` | Pure-Rust linear algebra (`nalgebra`), FFT (`rustfft`), OLS regression, Hill equation fitting, lab data parsing | Working |
 | `physical_types` | Compile-time dimensional analysis via `uom` | Working |
-| `verus_proofs` | Verus-compatible specs (dual `rustc`/Verus compilation shim), hardware-bound invariants | Compiles; Verus verification requires x86-linux |
-| `proof_synthesizer` | VeruSAGE-inspired observe→reason→act loop for iterative Verus proof repair | Compiles; requires Verus + LLM to run |
-| `aeneas_lean_semantics` | Rust MIR → Aeneas → Lean 4 translation pipeline | Compiles; requires Aeneas + Lean toolchain |
+| `verus_proofs` | Verus-compatible specs (dual `rustc`/Verus compilation shim), hardware-bound invariants | Working |
+| `proof_synthesizer` | VeruSAGE-inspired observe→reason→act loop for iterative Verus proof repair | Compiles; requires Verus + LLM |
 
 ## Deployment Hardening: Five Validation Stages
 
-Every tool call from the LLM passes through all five stages in `agent_runtime/src/orchestrator.rs` before reaching hardware. This is real code, not a design doc — it runs in production and is tested by 19 integration tests.
+Every tool call from the LLM passes through all five stages in `agent_runtime/src/orchestrator.rs` before reaching hardware.
 
-| Stage | Component | What It Does | Tested By |
-|---|---|---|---|
-| **0. Sandbox** | Command allowlist | Blocks tools not in the allowlist | `sandbox_rejects_disallowed_command`, `orchestrator_sandbox_blocks_unauthorized_tool` |
-| **1. Approval** | Two-person control | Ed25519 signatures required for high-risk actions | `proof_policy_enforcement` tests |
-| **2. Capability** | Numeric bounds | Rejects parameters outside hardware limits (e.g., volume > 1000µL, x > 300mm) | `capability_rejects_out_of_bounds_*`, `orchestrator_capability_rejects_then_retries` |
-| **3. Fail-Closed** | High-risk gate | If no proof policy engine is configured, all actuation/destructive actions are denied | Implicit in orchestrator logic |
-| **4. Proof Policy** | Artifact authorization | Checks Verus verification status; blocks actuation if proofs are missing/failed | `proof_policy_blocks_actuation_with_failed_verus`, `orchestrator_proof_policy_blocks_actuation_allows_reads` |
-| **5. Dispatch** | Audit + execute | Logs hash-chained audit event, dispatches tool call over SiLA 2 gRPC | `orchestrator_drives_multi_step_experiment_through_sila2` |
+| Stage | Component | What It Does |
+| --- | --- | --- |
+| **0. Sandbox** | Command allowlist | Blocks tools not in the allowlist |
+| **1. Approval** | Two-person control | Ed25519 signatures required for high-risk actions |
+| **2. Capability** | Numeric bounds | Rejects parameters outside hardware limits (e.g., volume > 1000 µL, x > 300 mm) |
+| **3. Fail-Closed** | High-risk gate | If no proof policy engine is configured, all actuation/destructive actions are denied |
+| **4. Proof Policy** | Artifact authorization | Checks Verus verification status from manifest; blocks actuation if proofs are missing/failed |
+| **5. Dispatch** | Audit + execute | Logs Ed25519-signed hash-chained audit event, dispatches tool call over SiLA 2 gRPC |
 
 ## SiLA 2 Hardware Integration
 
 AxiomLab talks to lab hardware using the [SiLA 2](https://sila-standard.com/) standard over gRPC. Six instruments are implemented:
 
 | Instrument | Operations | Risk Class |
-|---|---|---|
+| --- | --- | --- |
 | Liquid Handler | `dispense`, `aspirate` | LiquidHandling |
 | Robotic Arm | `move_arm` | Actuation |
 | Spectrophotometer | `read_absorbance` | ReadOnly |
@@ -61,158 +102,129 @@ AxiomLab talks to lab hardware using the [SiLA 2](https://sila-standard.com/) st
 | Centrifuge | `spin_centrifuge`, `read_centrifuge_temperature` | Actuation / ReadOnly |
 | pH Meter | `read_ph`, `calibrate_ph` | ReadOnly |
 
-**Current state:** A Python SiLA 2 mock server (`sila_mock/`) implements all six instruments with the `sila2` v0.14.0 library. The Rust side (`agent_runtime/src/hardware.rs`) uses `tonic` v0.12 gRPC clients. All 12 operations are tested end-to-end through the validation pipeline.
+**Physics layer:** The Python SiLA 2 server delegates all volume arithmetic to the `vessel_physics` Rust crate via PyO3. Dispense and aspirate call `proved_add`/`proved_sub` — operations proved correct by Verus. The Beer-Lambert absorbance model reads vessel state from the same Rust registry.
 
-**To use real hardware:** Replace the Python mock with actual SiLA 2-compliant instrument drivers. The Rust client code doesn't change — SiLA 2 is the interface contract.
+**To use real hardware:** Replace the Python SiLA 2 server with actual SiLA 2-compliant instrument drivers. The Rust client code in `agent_runtime/src/hardware.rs` doesn't change — SiLA 2 is the interface contract.
 
 ## Quick Start
 
-### Option A: Docker Compose (recommended — everything works out of the box)
-
 ```bash
-docker compose up --build
-# Starts: Ollama (LLM) + SiLA 2 mock (hardware) + AxiomLab server
-# Web dashboard: http://localhost:3000
-# The agent begins autonomous exploration automatically
-```
-
-**What happens:** Ollama pulls `qwen2.5-coder:7b`, the Python SiLA 2 mock starts on port 50052, and the Rust server connects to both. The LLM proposes experiments, the orchestrator validates them through all 5 stages, and SiLA 2 gRPC calls execute against the mock instruments. Results stream to the web dashboard via WebSocket.
-
-### Option B: Local development (no Docker, no LLM)
-
-```bash
-# Build the workspace
+# Build the Rust workspace
 cargo build
 
-# Run unit + pure-Rust tests (no external dependencies)
-cargo test -p agent_runtime -- --test sila2_e2e capability sandbox proof_policy
+# Build the PyO3 vessel_physics extension (requires maturin)
+pip install maturin
+VIRTUAL_ENV=$VIRTUAL_ENV PATH="$VIRTUAL_ENV/bin:$PATH" \
+    maturin develop --manifest-path vessel_physics/Cargo.toml
 
-# Run integration tests (requires SiLA 2 mock on localhost:50052)
-cd sila_mock && python -m axiomlab_mock --insecure &
-cargo test -p agent_runtime -- --test sila2_e2e --test orchestrator_sila2
+# Run pure-Rust tests (no external dependencies)
+cargo test -p agent_runtime
+
+# Start the SiLA 2 server and run integration tests
+cd sila_mock && python3 -m axiomlab_mock --insecure -p 50052 &
+cargo test -p agent_runtime --test vessel_simulation_e2e -- --ignored --test-threads=1
+cargo test -p agent_runtime --test sila2_e2e -- --ignored --test-threads=1
 ```
 
-### Option C: Run just the SiLA 2 integration tests
+### Run Verus proofs
 
 ```bash
-# Start the mock hardware server
-cd sila_mock && python -m axiomlab_mock --insecure &
+# Install Verus (macOS ARM64, Linux x86-64, Linux ARM64)
+# Download from https://github.com/verus-lang/verus/releases
+# Extract to ~/verus/, chmod +x ~/verus/verus
 
-# Run all 19 integration tests
-cargo test -p agent_runtime --test sila2_e2e --test orchestrator_sila2 2>&1 | tail -5
-# Expected: test result: ok. 19 passed; 0 failed
+~/verus/verus verus_verified/vessel_registry.rs
+# Expected: verification results:: 11 verified, 0 errors
+
+~/verus/verus verus_verified/lab_safety.rs
+# Expected: verification results:: 6 verified, 0 errors
+
+~/verus/verus verus_verified/protocol_safety.rs
+# Expected: verification results:: 13 verified, 0 errors
+
+# Regenerate the proof manifest from real Verus output
+python3 vessel_physics/generate_manifest.py
 ```
 
-## Test Coverage
+## Formal Verification
 
-### Integration Tests (19 total — all passing)
+AxiomLab has three sets of formally verified code (30 theorems total, 0 errors).
 
-**`agent_runtime/tests/sila2_e2e.rs`** — 14 tests covering the validation pipeline at the component level:
-- 8 tests hit the live SiLA 2 mock over gRPC (dispense, move_arm, read_absorbance, spin_centrifuge, pH, full pipeline with/without proof policy)
-- 6 pure-Rust tests validate sandbox rejection, capability bounds, and proof policy logic without any network
+### Vessel Physics (`verus_verified/vessel_registry.rs`)
 
-**`agent_runtime/tests/orchestrator_sila2.rs`** — 5 tests using the real `Orchestrator.run_experiment()` with a scripted LLM:
-- Multi-step experiment (move_arm → dispense → read_absorbance → conclude)
-- Proof policy blocks actuation but allows reads
-- Capability bounds reject then retry within limits
-- Sandbox blocks unauthorized tools
-- Full 5-instrument titration workflow (calibrate_ph → move_arm → dispense → read_ph → read_absorbance)
+11 theorems proved by Verus (Z3 SMT solver).
 
-**What these tests prove:** The complete validation pipeline works end-to-end — LLM output is parsed, validated through all 5 stages, dispatched over real gRPC to a real server, and results are captured with audit trails. Rejection at each stage is independently tested.
+| Theorem | What It Proves |
+| --- | --- |
+| `empty_satisfies_inv` | An empty vessel trivially satisfies the volume invariant |
+| `proved_add` | Dispensing within capacity preserves `volume_nl ≤ max_nl` |
+| `proved_sub` | Aspirating never underflows; result stays ≤ volume_nl |
+| `dispense_preserves_inv` | Invariant holds after any valid dispense |
+| `aspirate_preserves_inv` | Invariant holds after any valid aspirate |
+| `dispense_chain_safe` | Two consecutive dispenses stay within capacity |
+| `aspirate_inverts_dispense` | Aspirating exactly what was dispensed returns to original volume |
+| `partial_aspirate_safe` | Partial aspirate stays within [0, max] |
+| `fill_to_capacity_is_valid` | Filling to exactly max is valid |
+| `drain_to_zero_is_valid` | Draining to zero is valid |
+| `main` | Concrete exercise: dispense → dispense → aspirate → drain |
 
-**What these tests don't prove:** Real physical hardware safety (the mock returns plausible values, not real sensor data). LLM reasoning quality (the scripted LLM always makes the right call). Network failure handling. Concurrent multi-agent scenarios.
+### Hardware Safety Bounds (`verus_verified/lab_safety.rs`)
 
-## Docker Compose Architecture
+Arm extension, temperature, pressure, rotation speed limits. 6 theorems, 0 errors.
 
-```
-┌─────────────┐     ┌──────────────┐     ┌──────────────────┐
-│   Ollama     │     │  SiLA 2 Mock │     │   AxiomLab       │
-│  (LLM)      │◄────│  (Hardware)  │◄────│   (Rust Server)  │
-│  port 11434  │     │  port 50052  │     │   port 3000      │
-│  qwen2.5     │     │  6 instruments│    │   axum + ws      │
-│  -coder:7b   │     │  Python/gRPC │     │   SQLite audit   │
-└─────────────┘     └──────────────┘     └──────────────────┘
-```
+### Protocol Safety (`verus_verified/protocol_safety.rs`)
 
-**Environment variables:**
-- `SILA2_ENDPOINT` — gRPC endpoint for hardware (default: `http://sila2-mock:50052`)
-- `AXIOMLAB_LLM_ENDPOINT` — Ollama API (default: `http://ollama:11434/v1`)
-- `AXIOMLAB_LLM_MODEL` — model name (default: `qwen2.5-coder:7b`)
-- `VERUS_VERIFIED` — set to `1` in Docker to indicate Verus verification passed at build time
-- `AXIOMLAB_DOCKER` — set to `1` inside the container
-## Proof Release Gate
+Protocol-level invariants: step count bounded, total volume bounded, dilution series safe. 13 theorems, 0 errors.
 
-```bash
-./scripts/proof_release_gate.sh
-```
+### Other Tooling
 
-Runs a 10-step release gate that builds the binary, generates and signs a proof manifest, enforces CI policy checks, runs sandbox/policy tests, verifies the audit chain, and exports a replayable compliance bundle. Outputs are in `.artifacts/proof/`.
-
-## Formal Verification Tooling
-
-AxiomLab includes three formal verification paths. These are **tooling integrations**, not claims that the entire system is formally verified.
-
-| Tool | What It Does | Current State |
-|---|---|---|
-| **Verus** | SMT-based verification of Rust code via Z3 | `verus_verified/lab_safety.rs` and `dilution_protocol.rs` are verified. Verus only runs on x86-linux. ARM gets a stub. |
-| **Aeneas** | Translates Rust MIR → pure lambda calculus → Lean 4 | Pipeline is implemented in `aeneas_lean_semantics/`. Requires Aeneas binary. |
-| **Lean 4** | Interactive theorem prover for verifying translated code | Lean files exist in `lean4/`. Requires Lean toolchain. |
-
-**Proof synthesis** (`proof_synthesizer/`): An LLM-in-the-loop agent that invokes the Verus compiler, parses diagnostics, and asks the LLM to fix proof annotations. Inspired by VeruSAGE. Requires both Verus and an LLM to run.
-
-## Web Visualizer
-
-A React + Vite dashboard that connects to the server via WebSocket:
-- **Left panel:** Live activity feed — tool executions with success/rejection status
-- **Center panel:** State transition graph via ReactFlow
-- **Right panel:** Discovery journal — experiment conclusions logged by the agent
-- **Header:** Iteration counter, current stage, connection status
-
-Persists across refreshes — journal and history are loaded from SQLite on page load.
-
-```bash
-cd visualizer && npm install && npm run dev
-# Connects to AxiomLab server on localhost:3000
-```
+| Tool | What It Does | State |
+| --- | --- | --- |
+| **proof_synthesizer** | LLM-in-the-loop Verus proof repair (observe → reason → act) | Requires Verus + LLM |
 
 ## Known Limitations
 
-These are honest assessments — not future roadmap items.
-
 | Limitation | Detail |
-|---|---|
-| **Mock hardware** | The SiLA 2 mock returns plausible fake data. No real instruments have been connected. |
-| **Local LLM** | qwen2.5-coder:7b is good enough for structured tool calls but is not a frontier reasoning model. Discovery quality depends on the model. |
-| **Verus is x86-only** | Formal verification only runs on x86-linux. ARM builds skip Verus gracefully. |
-| **No real science yet** | The agent explores parameter bounds of mock instruments. It hasn't discovered anything novel. |
+| --- | --- |
+| **Simulated hardware** | The SiLA 2 server returns simulated values. No real instruments have been connected. |
+| **Local LLM** | qwen2.5-coder:7b is sufficient for structured tool calls but not for novel scientific reasoning. Discovery quality is model-dependent. |
 | **Single-agent** | One LLM loop, one hardware pool. No multi-agent coordination. |
+| **Audit is local + Rekor-anchored** | Each event is Ed25519-signed and hash-chained. Protocol conclusions are submitted to Sigstore Rekor for external timestamp witnessing. A complete chain rewrite with a fresh signing key could still pass local checks — HSM-backed keys are needed for production. |
 | **Key management** | Ed25519 signing is implemented but key custody, rotation, and revocation are manual. |
-| **Audit is local** | Hash-chained audit log detects local tampering but has no external anchor or per-event signatures. |
-| **No real error recovery** | If gRPC fails or LLM returns garbage, the loop logs and retries. No sophisticated retry/fallback logic. |
 
 ## Project Structure
 
-```
+```text
 AxiomLab/
-├── server/              # Axum HTTP/WS server + SQLite + exploration loop
-├── agent_runtime/       # Orchestrator, SiLA 2 clients, sandbox, capabilities, audit
-│   ├── src/hardware.rs  # SiLA 2 gRPC client pool (6 instruments)
-│   ├── src/orchestrator.rs  # 5-stage validation pipeline
-│   ├── tests/sila2_e2e.rs   # 14 integration tests
-│   └── tests/orchestrator_sila2.rs  # 5 orchestrator-level tests
-├── proof_artifacts/     # Manifest schema, policy engine, signing
-├── scientific_compute/  # nalgebra, rustfft, OLS, lab data
-├── physical_types/      # uom dimensional analysis
-├── verus_proofs/        # Verus specs + verification shim
-├── proof_synthesizer/   # LLM-driven Verus proof repair
-├── aeneas_lean_semantics/  # MIR → Aeneas → Lean pipeline
-├── lean4/               # Lean 4 theorem files
-├── verus_verified/      # Verified Rust source (lab_safety.rs)
-├── sila_mock/           # Python SiLA 2 mock server (6 instruments)
-├── visualizer/          # React + Vite web dashboard
-├── scripts/             # proof_release_gate.sh
-├── docker-compose.yml   # Three-service stack
-└── Dockerfile           # Multi-stage build (Verus + Aeneas + Lean + Rust)
+├── server/                  # Axum HTTP/WS server + in-memory event buffer + exploration loop
+├── agent_runtime/           # Orchestrator, protocol executor, SiLA 2 clients, sandbox, capabilities, audit, Rekor
+│   ├── src/hardware.rs      # SiLA 2 gRPC client pool (6 instruments)
+│   ├── src/orchestrator.rs  # 5-stage validation pipeline + protocol execution
+│   ├── src/protocol.rs      # Protocol, ProtocolPlan, ProtocolStep types
+│   ├── src/protocol_executor.rs  # ProtocolExecutor: drives steps through orchestrator
+│   ├── src/audit.rs         # Hash-chained JSONL audit log, per-event Ed25519 signatures
+│   ├── src/rekor.rs         # Sigstore Rekor transparency-log anchoring
+│   └── tests/               # Integration tests (vessel simulation, e2e, orchestrator)
+├── vessel_physics/          # Rust VesselRegistry (u64 nl) + PyO3 Python bindings
+│   ├── src/lib.rs           # proved_add, proved_sub, VesselRegistry, PyO3 class
+│   └── generate_manifest.py # Runs Verus, writes vessel_physics_manifest.json
+├── proof_artifacts/         # Manifest schema, RuntimePolicyEngine, signing
+│   └── vessel_physics_manifest.json  # Real Verus compiler output (committed)
+├── verus_verified/          # Verus-proved Rust source files
+│   ├── vessel_registry.rs   # 11 theorems: volume invariant preservation
+│   ├── lab_safety.rs        # 6 theorems: hardware bounds (arm, temp, pressure)
+│   ├── protocol_safety.rs   # 13 theorems: step count, volume, dilution series bounds
+│   └── lab_safety_UNSAFE.rs # Demonstrates code that Verus correctly rejects
+├── scientific_compute/      # nalgebra, rustfft, OLS, Hill equation fitting, lab data parsing
+├── physical_types/          # uom dimensional analysis
+├── verus_proofs/            # Verus specs + dual-compilation shim
+├── proof_synthesizer/       # LLM-driven Verus proof repair
+├── sila_mock/               # Python SiLA 2 server (6 instruments, physics via vessel_physics)
+│   └── axiomlab_mock/
+│       ├── vessel_state.py          # PyO3 adapter → Rust backend
+│       └── _vessel_state_python.py  # Pure-Python fallback (no Verus guarantees)
+├── visualizer/              # React + Vite web dashboard
+└── scripts/                 # proof_release_gate.sh
 ```
 
 ## License
