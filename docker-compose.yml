@@ -1,16 +1,48 @@
 services:
+  # -- Ollama LLM server --
+  ollama:
+    image: ollama/ollama:latest
+    container_name: axiomlab-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull qwen2.5-coder:7b; wait"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # -- SiLA 2 mock hardware server --
+  sila2-mock:
+    build:
+      context: ./sila_mock
+      dockerfile: Dockerfile
+    container_name: axiomlab-sila2
+    ports:
+      - "50052:50052"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('127.0.0.1',50052)); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- AxiomLab server (Rust) --
   axiomlab:
     build:
       context: .
       dockerfile: Dockerfile
-      # No explicit platform \u2014 Docker BuildKit will build for the host architecture.
-      # Verus is x86-linux only; on arm64 the Dockerfile installs a graceful stub.
-    # No platform pin \u2014 the container runs natively on the host (amd64 or arm64).
     container_name: axiomlab
+    ports:
+      - "3000:3000"
+    depends_on:
+      ollama:
+        condition: service_healthy
+      sila2-mock:
+        condition: service_healthy
     volumes:
-      # Mount source for live editing (overrides COPY in Dockerfile)
       - .:/axiomlab
-      # Persist cargo registry + build cache across runs
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
       - axiomlab-target:/axiomlab/target
@@ -18,16 +50,15 @@ services:
       - VERUS_PATH=/usr/local/bin/verus
       - AENEAS_PATH=/usr/local/bin/aeneas
       - RUST_LOG=info
-      # Signal to tests that we're running inside Docker (enables full verification)
       - AXIOMLAB_DOCKER=1
-      # Pass through optional LLM config
-      - AXIOMLAB_LLM_ENDPOINT=${AXIOMLAB_LLM_ENDPOINT:-}
-      - AXIOMLAB_LLM_API_KEY=${AXIOMLAB_LLM_API_KEY:-}
-      - AXIOMLAB_LLM_MODEL=${AXIOMLAB_LLM_MODEL:-}
+      - VERUS_VERIFIED=1
+      # LLM -> Ollama container
+      - AXIOMLAB_LLM_ENDPOINT=http://ollama:11434/v1
+      - AXIOMLAB_LLM_API_KEY=no-key
+      - AXIOMLAB_LLM_MODEL=${AXIOMLAB_LLM_MODEL:-qwen2.5-coder:7b}
+      # SiLA 2 -> mock container
+      - SILA2_ENDPOINT=http://sila2-mock:50052
     working_dir: /axiomlab
-    # Default command: run all tests
-    command: cargo test
-    # Keep stdin open for interactive use with `docker compose run`
     stdin_open: true
     tty: true
 
@@ -35,3 +66,4 @@ volumes:
   cargo-registry:
   cargo-git:
   axiomlab-target:
+  ollama-models:

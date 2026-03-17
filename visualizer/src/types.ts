@@ -1,4 +1,4 @@
-// ── Tauri event payloads ──────────────────────────────────────────
+// ── WebSocket event payloads ──────────────────────────────────────
 //
 // Field names are exact snake_case matches to the Rust serde-derived structs
 // in agent_runtime/src/events.rs.  Do not rename without updating both sides.
@@ -59,7 +59,7 @@ export interface StirParams {
   rpm: number;
 }
 
-// ── Tauri event name constants ────────────────────────────────────
+// ── Event name constants ──────────────────────────────────────────
 
 export const EVENTS = {
   LLM_TOKEN: "llm_token",

@@ -7,7 +7,6 @@ members = [
     "proof_synthesizer",
     "aeneas_lean_semantics",
     "proof_artifacts",
-    "visualizer/src-tauri",
     "server",
 ]
 resolver = "2"

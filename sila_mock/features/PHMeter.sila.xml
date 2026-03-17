@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Feature SiLA2Version="1.0" FeatureVersion="1.0" MaturityLevel="Draft"
+         Originator="org.axiomlab"
+         Category="measurement"
+         xmlns="http://www.sila-standard.org"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>PHMeter</Identifier>
+  <DisplayName>pH Meter</DisplayName>
+  <Description>Potentiometric pH measurement device.</Description>
+
+  <Command>
+    <Identifier>ReadPH</Identifier>
+    <DisplayName>Read pH</DisplayName>
+    <Description>Measure pH of a sample.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>SampleId</Identifier>
+      <DisplayName>Sample ID</DisplayName>
+      <Description>Identifier of the sample to measure.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>PHValue</Identifier>
+      <DisplayName>pH Value</DisplayName>
+      <Description>Measured pH (0–14).</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Response>
+    <Response>
+      <Identifier>Temperature</Identifier>
+      <DisplayName>Temperature at Read</DisplayName>
+      <Description>Sample temperature during measurement in Celsius.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Response>
+  </Command>
+
+  <Command>
+    <Identifier>Calibrate</Identifier>
+    <DisplayName>Calibrate</DisplayName>
+    <Description>Two-point calibration with standard buffer solutions.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>BufferPH1</Identifier>
+      <DisplayName>First Buffer pH</DisplayName>
+      <Description>pH value of first calibration buffer.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>BufferPH2</Identifier>
+      <DisplayName>Second Buffer pH</DisplayName>
+      <Description>pH value of second calibration buffer.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>CalibrationStatus</Identifier>
+      <DisplayName>Calibration Status</DisplayName>
+      <Description>Calibration result: 'Success' or 'Failed'.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Response>
+  </Command>
+</Feature>

@@ -20,6 +20,12 @@ rand = { workspace = true }
 scientific_compute = { path = "../scientific_compute" }
 physical_types = { path = "../physical_types" }
 proof_artifacts = { path = "../proof_artifacts" }
+tonic = "0.12"
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
 
 [features]
 hardware = []

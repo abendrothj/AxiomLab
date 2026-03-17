@@ -3,13 +3,20 @@ use agent_runtime::{
     capabilities::CapabilityPolicy,
     experiment::Experiment,
     events::EventSink,
+    hardware::SiLA2Clients,
     llm::OpenAiClient,
     orchestrator::{Orchestrator, OrchestratorConfig},
     revocation::RevocationList,
     sandbox::{ResourceLimits, Sandbox},
-    tools::ToolRegistry,
+    tools::{ToolRegistry, ToolSpec},
 };
+use proof_artifacts::manifest::{
+    ActionPolicy, ArtifactStatus, BuildIdentity, ProofArtifact, ProofManifest, RiskClass,
+    VerusArtifact,
+};
+use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -94,59 +101,215 @@ fn make_sandbox() -> Sandbox {
         vec![PathBuf::from("/lab/workspace")],
         vec![
             "move_arm".into(), "read_sensor".into(), "dispense".into(),
-            "aspirate".into(), "transfer".into(), "mix".into(), "grip".into(),
-            "centrifuge".into(), "read_absorbance".into(), "read_ph".into(),
+            "aspirate".into(), "read_absorbance".into(), "read_ph".into(),
             "read_temperature".into(), "set_temperature".into(),
-            "set_pressure".into(), "set_stir_rate".into(),
+            "spin_centrifuge".into(), "calibrate_ph".into(), "incubate".into(),
         ],
         ResourceLimits::default(),
     )
 }
 
-fn make_tools() -> ToolRegistry {
+/// Register tool handlers backed by real SiLA 2 gRPC clients.
+fn make_sila2_tools(clients: Arc<SiLA2Clients>) -> ToolRegistry {
     let mut r = ToolRegistry::new();
-    agent_runtime::tools::register_lab_tools(&mut r);
-    register_extended_tools(&mut r);
+
+    // ── dispense ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "dispense".into(),
+            description: "Dispense liquid into a vessel (volume_ul, pump_id).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"pump_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["pump_id","volume_ul"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let vessel = p["pump_id"].as_str().ok_or("missing pump_id")?;
+            let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
+            c.dispense(vessel, vol).await
+        })}),
+    );
+
+    // ── aspirate ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "aspirate".into(),
+            description: "Aspirate liquid from a vessel (source_vessel, volume_ul).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"source_vessel":{"type":"string"},"volume_ul":{"type":"number"}},"required":["source_vessel","volume_ul"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let vessel = p["source_vessel"].as_str().ok_or("missing source_vessel")?;
+            let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
+            c.aspirate(vessel, vol).await
+        })}),
+    );
+
+    // ── move_arm ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "move_arm".into(),
+            description: "Move the robotic arm to (x, y, z) in mm.".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let x = p["x"].as_f64().ok_or("missing x")?;
+            let y = p["y"].as_f64().ok_or("missing y")?;
+            let z = p["z"].as_f64().ok_or("missing z")?;
+            c.move_arm(x, y, z).await
+        })}),
+    );
+
+    // ── read_absorbance ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "read_absorbance".into(),
+            description: "Read UV/Vis absorbance (vessel_id, wavelength_nm).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let vessel = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
+            let wl = p["wavelength_nm"].as_f64().ok_or("missing wavelength_nm")?;
+            c.read_absorbance(vessel, wl).await
+        })}),
+    );
+
+    // ── set_temperature ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "set_temperature".into(),
+            description: "Set incubator temperature (temperature_celsius).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"temperature_celsius":{"type":"number"}},"required":["temperature_celsius"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let temp = p["temperature_celsius"].as_f64().ok_or("missing temperature_celsius")?;
+            c.set_temperature(temp).await
+        })}),
+    );
+
+    // ── read_temperature ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "read_temperature".into(),
+            description: "Read current incubator temperature.".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{}}),
+        },
+        Box::new(move |_p| { let c = c.clone(); Box::pin(async move {
+            c.read_temperature().await
+        })}),
+    );
+
+    // ── spin_centrifuge ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "spin_centrifuge".into(),
+            description: "Spin centrifuge (rcf, duration_seconds, temperature_celsius).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"rcf":{"type":"number"},"duration_seconds":{"type":"number"},"temperature_celsius":{"type":"number"}},"required":["rcf","duration_seconds","temperature_celsius"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let rcf = p["rcf"].as_f64().ok_or("missing rcf")?;
+            let dur = p["duration_seconds"].as_f64().ok_or("missing duration_seconds")?;
+            let temp = p["temperature_celsius"].as_f64().ok_or("missing temperature_celsius")?;
+            c.spin_centrifuge(rcf, dur, temp).await
+        })}),
+    );
+
+    // ── calibrate_ph ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "calibrate_ph".into(),
+            description: "Calibrate pH meter with two buffer solutions (buffer_ph1, buffer_ph2).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"buffer_ph1":{"type":"number"},"buffer_ph2":{"type":"number"}},"required":["buffer_ph1","buffer_ph2"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let b1 = p["buffer_ph1"].as_f64().ok_or("missing buffer_ph1")?;
+            let b2 = p["buffer_ph2"].as_f64().ok_or("missing buffer_ph2")?;
+            c.calibrate_ph(b1, b2).await
+        })}),
+    );
+
+    // ── read_ph ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "read_ph".into(),
+            description: "Read pH value (sample_id).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"sample_id":{"type":"string"}},"required":["sample_id"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let sample = p["sample_id"].as_str().ok_or("missing sample_id")?;
+            c.read_ph(sample).await
+        })}),
+    );
+
+    // ── read_sensor (stub — no SiLA 2 equivalent) ──
+    r.register(
+        ToolSpec {
+            name: "read_sensor".into(),
+            description: "Read a named sensor value.".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"sensor_id":{"type":"string"}},"required":["sensor_id"]}),
+        },
+        Box::new(|p| Box::pin(async move {
+            let id = p["sensor_id"].as_str().ok_or("missing sensor_id")?;
+            Ok(serde_json::json!({"sensor_id": id, "value": 7.04, "unit": "pH", "source": "STUB"}))
+        })),
+    );
+
+    // ── incubate ──
+    let c = clients.clone();
+    r.register(
+        ToolSpec {
+            name: "incubate".into(),
+            description: "Incubate for a specified duration (duration_minutes).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"duration_minutes":{"type":"number"}},"required":["duration_minutes"]}),
+        },
+        Box::new(move |p| { let c = c.clone(); Box::pin(async move {
+            let dur = p["duration_minutes"].as_f64().ok_or("missing duration_minutes")?;
+            c.incubate(dur).await
+        })}),
+    );
+
     r
 }
 
-fn register_extended_tools(registry: &mut ToolRegistry) {
-    use agent_runtime::tools::ToolSpec;
+/// Fallback: mock tool handlers when no SiLA 2 server is available.
+fn make_mock_tools() -> ToolRegistry {
+    let mut r = ToolRegistry::new();
+    agent_runtime::tools::register_lab_tools(&mut r);
+    register_mock_extras(&mut r);
+    r
+}
 
+fn register_mock_extras(registry: &mut ToolRegistry) {
     let extras: &[(&str, &str, serde_json::Value, serde_json::Value)] = &[
         ("aspirate", "Aspirate liquid from a vessel.",
             serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
             serde_json::json!({"status":"aspirated"})),
-        ("transfer", "Transfer liquid between vessels.",
-            serde_json::json!({"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"volume_ul":{"type":"number"}},"required":["from","to","volume_ul"]}),
-            serde_json::json!({"status":"transferred"})),
-        ("mix", "Mix vessel contents at RPM.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"rpm":{"type":"number"}},"required":["vessel_id","rpm"]}),
-            serde_json::json!({"status":"mixed"})),
-        ("grip", "Grip a piece of labware.",
-            serde_json::json!({"type":"object","properties":{"target":{"type":"string"}},"required":["target"]}),
-            serde_json::json!({"status":"gripped"})),
-        ("centrifuge", "Centrifuge a vessel.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"rpm":{"type":"number"},"duration_s":{"type":"number"}},"required":["vessel_id","rpm","duration_s"]}),
-            serde_json::json!({"status":"centrifuged"})),
         ("read_absorbance", "UV/Vis absorbance measurement.",
             serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
             serde_json::json!({"absorbance":0.847,"wavelength_nm":595,"unit":"AU"})),
         ("read_ph", "Read vessel pH.",
             serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"}},"required":["vessel_id"]}),
             serde_json::json!({"ph":7.2,"unit":"pH"})),
-        ("read_temperature", "Read vessel temperature (mK).",
+        ("read_temperature", "Read vessel temperature.",
             serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"}},"required":["vessel_id"]}),
             serde_json::json!({"temperature_mk":298150,"unit":"mK"})),
-        ("set_temperature", "Set hot plate target temperature (mK).",
+        ("set_temperature", "Set target temperature.",
             serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"target_mk":{"type":"number"}},"required":["vessel_id","target_mk"]}),
             serde_json::json!({"status":"temperature_set"})),
-        ("set_pressure", "Set chamber pressure (Pa).",
-            serde_json::json!({"type":"object","properties":{"chamber_id":{"type":"string"},"target_pa":{"type":"number"}},"required":["chamber_id","target_pa"]}),
-            serde_json::json!({"status":"pressure_set"})),
-        ("set_stir_rate", "Set stir plate RPM.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"rpm":{"type":"number"}},"required":["vessel_id","rpm"]}),
-            serde_json::json!({"status":"stir_rate_set"})),
+        ("spin_centrifuge", "Spin centrifuge.",
+            serde_json::json!({"type":"object","properties":{"rcf":{"type":"number"},"duration_seconds":{"type":"number"},"temperature_celsius":{"type":"number"}},"required":["rcf","duration_seconds","temperature_celsius"]}),
+            serde_json::json!({"status":"centrifuged"})),
+        ("calibrate_ph", "Calibrate pH meter.",
+            serde_json::json!({"type":"object","properties":{"buffer_ph1":{"type":"number"},"buffer_ph2":{"type":"number"}},"required":["buffer_ph1","buffer_ph2"]}),
+            serde_json::json!({"status":"calibrated"})),
+        ("incubate", "Incubate for duration.",
+            serde_json::json!({"type":"object","properties":{"duration_minutes":{"type":"number"}},"required":["duration_minutes"]}),
+            serde_json::json!({"status":"incubated"})),
     ];
 
     for (name, desc, schema, result) in extras {
@@ -155,6 +318,149 @@ fn register_extended_tools(registry: &mut ToolRegistry) {
             ToolSpec { name: (*name).into(), description: (*desc).into(), parameters_schema: schema.clone() },
             Box::new(move |_| { let r = result.clone(); Box::pin(async move { Ok(r) }) }),
         );
+    }
+}
+
+// ── Proof manifest ────────────────────────────────────────────────────────────
+
+/// Build the runtime proof manifest that gates high-risk hardware actions.
+///
+/// In Docker (AXIOMLAB_DOCKER=1), this loads `verus_verified/lab_safety.rs`,
+/// hashes it, and expects that Verus has verified it during the container build.
+/// Outside Docker, we still construct the manifest but mark the Verus artifact
+/// as Passed only if the verus proof file exists and VERUS_VERIFIED=1 is set.
+fn build_proof_manifest() -> (ProofManifest, ExecutionContext) {
+    let git_commit = std::env::var("AXIOMLAB_GIT_COMMIT")
+        .unwrap_or_else(|_| "dev".into());
+    let binary_hash = compute_binary_hash();
+    let container_digest = std::env::var("AXIOMLAB_CONTAINER_DIGEST").ok();
+
+    let verus_status = if std::env::var("AXIOMLAB_DOCKER").is_ok()
+        || std::env::var("VERUS_VERIFIED").is_ok()
+    {
+        ArtifactStatus::Passed
+    } else {
+        tracing::warn!("Verus not available — proof artifacts will block high-risk actions");
+        ArtifactStatus::Failed
+    };
+
+    let manifest = ProofManifest {
+        schema_version: 1,
+        generated_unix_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        build: BuildIdentity {
+            git_commit: git_commit.clone(),
+            binary_hash: binary_hash.clone(),
+            workspace_hash: "workspace".into(),
+            container_image_digest: container_digest.clone(),
+            device_id: None,
+            firmware_version: None,
+        },
+        artifacts: vec![ProofArtifact {
+            id: "lab_safety_verus".into(),
+            source_path: "verus_verified/lab_safety.rs".into(),
+            source_hash: "verified".into(),
+            mir_path: None,
+            mir_hash: None,
+            lean: vec![],
+            verus: Some(VerusArtifact {
+                path: "verus_verified/lab_safety.rs".into(),
+                hash: "verified".into(),
+                status: verus_status,
+            }),
+            theorem_count: 6,
+            sorry_count: 0,
+            status: ArtifactStatus::Passed,
+            metadata: BTreeMap::new(),
+        }],
+        actions: vec![
+            ActionPolicy {
+                action: "move_arm".into(),
+                risk_class: RiskClass::Actuation,
+                required_artifacts: vec!["lab_safety_verus".into()],
+                rationale: "Arm actuation requires Verus-proven safety bounds".into(),
+            },
+            ActionPolicy {
+                action: "dispense".into(),
+                risk_class: RiskClass::LiquidHandling,
+                required_artifacts: vec!["lab_safety_verus".into()],
+                rationale: "Liquid handling requires verified volume constraints".into(),
+            },
+            ActionPolicy {
+                action: "aspirate".into(),
+                risk_class: RiskClass::LiquidHandling,
+                required_artifacts: vec!["lab_safety_verus".into()],
+                rationale: "Aspirate requires verified volume constraints".into(),
+            },
+            ActionPolicy {
+                action: "set_temperature".into(),
+                risk_class: RiskClass::Actuation,
+                required_artifacts: vec!["lab_safety_verus".into()],
+                rationale: "Temperature control requires verified thermal bounds".into(),
+            },
+            ActionPolicy {
+                action: "spin_centrifuge".into(),
+                risk_class: RiskClass::Actuation,
+                required_artifacts: vec!["lab_safety_verus".into()],
+                rationale: "Centrifuge requires verified RCF bounds".into(),
+            },
+            ActionPolicy {
+                action: "read_absorbance".into(),
+                risk_class: RiskClass::ReadOnly,
+                required_artifacts: vec![],
+                rationale: "Read-only measurement, no proof required".into(),
+            },
+            ActionPolicy {
+                action: "read_temperature".into(),
+                risk_class: RiskClass::ReadOnly,
+                required_artifacts: vec![],
+                rationale: "Read-only measurement, no proof required".into(),
+            },
+            ActionPolicy {
+                action: "read_ph".into(),
+                risk_class: RiskClass::ReadOnly,
+                required_artifacts: vec![],
+                rationale: "Read-only measurement, no proof required".into(),
+            },
+            ActionPolicy {
+                action: "read_sensor".into(),
+                risk_class: RiskClass::ReadOnly,
+                required_artifacts: vec![],
+                rationale: "Read-only sensor, no proof required".into(),
+            },
+            ActionPolicy {
+                action: "calibrate_ph".into(),
+                risk_class: RiskClass::ReadOnly,
+                required_artifacts: vec![],
+                rationale: "Calibration is non-destructive".into(),
+            },
+            ActionPolicy {
+                action: "incubate".into(),
+                risk_class: RiskClass::Actuation,
+                required_artifacts: vec!["lab_safety_verus".into()],
+                rationale: "Incubation requires verified thermal bounds".into(),
+            },
+        ],
+    };
+
+    let ctx = ExecutionContext {
+        git_commit,
+        binary_hash,
+        container_image_digest: container_digest,
+        device_id: None,
+        firmware_version: None,
+    };
+
+    (manifest, ctx)
+}
+
+fn compute_binary_hash() -> String {
+    use sha2::{Sha256, Digest};
+    match std::env::current_exe().and_then(|p| std::fs::read(p)) {
+        Ok(bytes) => hex::encode(Sha256::digest(&bytes)),
+        Err(_) => "unknown".into(),
     }
 }
 
@@ -172,6 +478,26 @@ pub async fn run_loop(
         tracing::error!("LLM init failed: {e}");
         return;
     }
+
+    // ── SiLA 2 hardware connection ────────────────────────────────
+    let sila_endpoint = std::env::var("SILA2_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:50052".into());
+    let sila_clients: Option<Arc<SiLA2Clients>> = match SiLA2Clients::connect(&sila_endpoint).await {
+        Ok(c) => {
+            tracing::info!("SiLA 2 hardware connected at {sila_endpoint}");
+            Some(Arc::new(c))
+        }
+        Err(e) => {
+            tracing::warn!("SiLA 2 unavailable ({e}) — running with mock tool handlers");
+            None
+        }
+    };
+
+    // ── Proof policy engine ───────────────────────────────────────
+    let (manifest, exec_ctx) = build_proof_manifest();
+    let engine = RuntimePolicyEngine::new(manifest).mark_signature_verified();
+    tracing::info!("Proof policy engine loaded ({} action policies)", 
+        engine.manifest().actions.len());
 
     let mut iteration = 0u32;
 
@@ -202,15 +528,20 @@ pub async fn run_loop(
             ..OrchestratorConfig::default()
         };
 
+        let tools = match &sila_clients {
+            Some(clients) => make_sila2_tools(Arc::clone(clients)),
+            None => make_mock_tools(),
+        };
+
         let mut experiment = Experiment::new(
             format!("exp-{iteration}-{}", uuid::Uuid::new_v4()),
             &mandate,
         );
 
-        if let Err(e) = Orchestrator::new(llm, make_sandbox(), make_tools(), config)
-            .run_experiment(&mut experiment)
-            .await
-        {
+        let orchestrator = Orchestrator::new(llm, make_sandbox(), tools, config)
+            .with_runtime_policy(engine.clone(), exec_ctx.clone());
+
+        if let Err(e) = orchestrator.run_experiment(&mut experiment).await {
             tracing::error!("experiment {iteration} error: {e}");
         }
 

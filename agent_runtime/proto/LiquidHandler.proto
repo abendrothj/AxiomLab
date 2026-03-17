@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+import "SiLAFramework.proto";
+
+package sila2.org.axiomlab.liquidhandling.liquidhandler.v1;
+
+/* Dispense, aspirate and transfer liquids between vessels. */
+service LiquidHandler {
+  /* Dispense a volume of liquid into a target vessel. */
+  rpc Dispense (sila2.org.axiomlab.liquidhandling.liquidhandler.v1.Dispense_Parameters) returns (sila2.org.axiomlab.liquidhandling.liquidhandler.v1.Dispense_Responses) {}
+  /* Aspirate a volume of liquid from a source vessel. */
+  rpc Aspirate (sila2.org.axiomlab.liquidhandling.liquidhandler.v1.Aspirate_Parameters) returns (sila2.org.axiomlab.liquidhandling.liquidhandler.v1.Aspirate_Responses) {}
+}
+
+/* Parameters for Dispense */
+message Dispense_Parameters {
+  sila2.org.silastandard.String TargetVessel = 1;  /* ID of the vessel to dispense into. */
+  sila2.org.silastandard.Real VolumeUl = 2;  /* Volume to dispense in microlitres. */
+}
+
+/* Responses of Dispense */
+message Dispense_Responses {
+  sila2.org.silastandard.Real DispensedVolumeUl = 1;  /* Actual volume dispensed, confirmed by hardware. */
+}
+
+/* Parameters for Aspirate */
+message Aspirate_Parameters {
+  sila2.org.silastandard.String SourceVessel = 1;  /* ID of the vessel to aspirate from. */
+  sila2.org.silastandard.Real VolumeUl = 2;  /* Volume to aspirate in microlitres. */
+}
+
+/* Responses of Aspirate */
+message Aspirate_Responses {
+  sila2.org.silastandard.Real AspiratedVolumeUl = 1;  /* Actual volume aspirated, confirmed by hardware. */
+}

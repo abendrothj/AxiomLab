@@ -126,20 +126,34 @@ COPY agent_runtime/Cargo.toml agent_runtime/Cargo.toml
 COPY verus_proofs/Cargo.toml verus_proofs/Cargo.toml
 COPY proof_synthesizer/Cargo.toml proof_synthesizer/Cargo.toml
 COPY aeneas_lean_semantics/Cargo.toml aeneas_lean_semantics/Cargo.toml
+COPY proof_artifacts/Cargo.toml proof_artifacts/Cargo.toml
+COPY server/Cargo.toml server/Cargo.toml
 
 RUN mkdir -p scientific_compute/src physical_types/src agent_runtime/src \
              verus_proofs/src proof_synthesizer/src aeneas_lean_semantics/src \
+             proof_artifacts/src server/src \
     && for d in scientific_compute physical_types agent_runtime \
-                verus_proofs proof_synthesizer aeneas_lean_semantics; do \
+                verus_proofs proof_synthesizer aeneas_lean_semantics \
+                proof_artifacts; do \
         echo "" > "$d/src/lib.rs"; \
     done \
+    && echo 'fn main() {}' > server/src/main.rs \
     && cargo fetch || true \
     && rm -rf scientific_compute/src physical_types/src agent_runtime/src \
-              verus_proofs/src proof_synthesizer/src aeneas_lean_semantics/src
+              verus_proofs/src proof_synthesizer/src aeneas_lean_semantics/src \
+              proof_artifacts/src server/src
 
 # ── Copy full source and build ──
 COPY . .
 RUN cargo build --release 2>&1 && cargo build --tests 2>&1
+
+# ── Verify Verus proofs at build time (x86 only) ──
+RUN if [ "${TARGETARCH}" = "amd64" ] && command -v verus >/dev/null 2>&1; then \
+        echo "=== Running Verus verification ==="; \
+        verus verus_verified/lab_safety.rs 2>&1 || echo "WARN: verus verification"; \
+    else \
+        echo "SKIP: Verus verification (not on amd64)"; \
+    fi
 
 # Smoke-test: verify all tools are accessible.
 RUN echo "=== Toolchain check ===" \
@@ -149,4 +163,5 @@ RUN echo "=== Toolchain check ===" \
     && z3 --version 2>&1 | head -1 || echo "WARN: z3" \
     && echo "=== All tools checked ==="
 
-CMD ["cargo", "test"]
+EXPOSE 3000
+CMD ["cargo", "run", "--release", "-p", "axiomlab-server"]

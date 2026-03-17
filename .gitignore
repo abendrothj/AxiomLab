@@ -25,3 +25,15 @@ visualizer/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Python
+**venv
+__pycache__/
+*.pyc
+*.egg-info/
+
+# SiLA 2 generated
+sila_mock/axiomlab_mock/generated/
+
+# Docker volumes
+ollama-models/

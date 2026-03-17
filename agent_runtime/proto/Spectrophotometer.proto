@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+import "SiLAFramework.proto";
+
+package sila2.org.axiomlab.measurement.spectrophotometer.v1;
+
+/* UV/Vis absorbance measurement device. */
+service Spectrophotometer {
+  /* Measure optical absorbance at a given wavelength. */
+  rpc ReadAbsorbance (sila2.org.axiomlab.measurement.spectrophotometer.v1.ReadAbsorbance_Parameters) returns (sila2.org.axiomlab.measurement.spectrophotometer.v1.ReadAbsorbance_Responses) {}
+}
+
+/* Parameters for ReadAbsorbance */
+message ReadAbsorbance_Parameters {
+  sila2.org.silastandard.String VesselId = 1;  /* ID of the vessel to measure. */
+  sila2.org.silastandard.Real WavelengthNm = 2;  /* Measurement wavelength in nanometres (200–1000). */
+}
+
+/* Responses of ReadAbsorbance */
+message ReadAbsorbance_Responses {
+  sila2.org.silastandard.Real Absorbance = 1;  /* Measured absorbance in Absorbance Units. */
+  sila2.org.silastandard.Real WavelengthNm = 2;  /* Wavelength at which measurement was taken. */
+}

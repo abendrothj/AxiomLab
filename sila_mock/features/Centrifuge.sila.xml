@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Feature SiLA2Version="1.0" FeatureVersion="1.0" MaturityLevel="Draft"
+         Originator="org.axiomlab"
+         Category="separation"
+         xmlns="http://www.sila-standard.org"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>Centrifuge</Identifier>
+  <DisplayName>Centrifuge</DisplayName>
+  <Description>Sample preparation device for separation, clarification, and pelleting.</Description>
+
+  <Command>
+    <Identifier>Spin</Identifier>
+    <DisplayName>Spin</DisplayName>
+    <Description>Spin samples at specified RCF for a duration.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>RCF</Identifier>
+      <DisplayName>Relative Centrifugal Force</DisplayName>
+      <Description>RCF in g (100–5000 g).</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>DurationSeconds</Identifier>
+      <DisplayName>Duration (sec)</DisplayName>
+      <Description>Spin duration in seconds.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>TemperatureCelsius</Identifier>
+      <DisplayName>Temperature (°C)</DisplayName>
+      <Description>Optional temperature control (4–40°C). 0 = room temperature.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>ActualRCF</Identifier>
+      <DisplayName>Actual RCF</DisplayName>
+      <Description>Actual RCF achieved.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Response>
+    <Response>
+      <Identifier>ElapsedSeconds</Identifier>
+      <DisplayName>Elapsed Time</DisplayName>
+      <Description>Actual spin time in seconds.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Response>
+  </Command>
+
+  <Command>
+    <Identifier>ReadTemperature</Identifier>
+    <DisplayName>Read Temperature</DisplayName>
+    <Description>Get the current rotor temperature.</Description>
+    <Observable>No</Observable>
+    <Response>
+      <Identifier>CurrentTemperature</Identifier>
+      <DisplayName>Current Temperature</DisplayName>
+      <Description>Current rotor temperature in Celsius.</Description>
+      <DataType><Basic>Real</Basic></DataType>
+    </Response>
+  </Command>
+</Feature>

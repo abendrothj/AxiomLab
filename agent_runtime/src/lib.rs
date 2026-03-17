@@ -18,3 +18,4 @@ pub mod approvals;
 pub mod revocation;
 pub mod attestation;
 pub mod events;
+pub mod hardware;
