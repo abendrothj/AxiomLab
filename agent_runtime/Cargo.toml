@@ -18,7 +18,6 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 uuid = { workspace = true }
 rand = { workspace = true }
 scientific_compute = { path = "../scientific_compute" }
-physical_types = { path = "../physical_types" }
 proof_artifacts = { path = "../proof_artifacts" }
 tonic = "0.12"
 prost = "0.13"

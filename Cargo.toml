@@ -1,10 +1,7 @@
 [workspace]
 members = [
     "scientific_compute",
-    "physical_types",
     "agent_runtime",
-    "verus_proofs",
-    "proof_synthesizer",
     "proof_artifacts",
     "server",
 ]
@@ -25,9 +22,6 @@ num-complex = "0.4"
 
 # Phase 2 – Agent runtime
 reqwest = { version = "0.12", features = ["json"] }
-
-# Phase 3 – Proof synthesis
-regex = "1"
 
 # Shared
 tempfile = "3"

@@ -8,7 +8,6 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
- "physical_types",
  "proof_artifacts",
  "prost",
  "prost-build",
@@ -1218,14 +1217,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "physical_types"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
- "uom",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1333,23 +1324,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "proof_synthesizer"
-version = "0.1.0"
-dependencies = [
- "agent_runtime",
- "regex",
- "reqwest",
- "scientific_compute",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2419,13 +2393,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "verus_proofs"
-version = "0.1.0"
-dependencies = [
- "tokio",
-]
 
 [[package]]
 name = "want"

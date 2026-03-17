@@ -250,9 +250,12 @@ impl<L: LlmBackend> Orchestrator<L> {
         for iteration in 0..self.config.max_iterations {
             info!(iteration, stage = ?experiment.stage, "orchestrator step");
 
-            let temperature = match experiment.stage {
-                Stage::Proposed => self.config.reasoning_temperature,
-                _ => self.config.code_gen_temperature,
+            // First call: reasoning temperature for planning.
+            // Subsequent calls: lower temperature for precise tool-call generation.
+            let temperature = if iteration == 0 {
+                self.config.reasoning_temperature
+            } else {
+                self.config.code_gen_temperature
             };
 
             let raw_response = self.llm.chat(&history, temperature).await?;
@@ -284,6 +287,12 @@ impl<L: LlmBackend> Orchestrator<L> {
 
             // Try to parse as a tool call.
             if let Some(tool_result) = self.try_tool_call(&response).await {
+                // Advance to Executing on the first real tool call.
+                if experiment.stage == Stage::Proposed {
+                    let prev = experiment.stage;
+                    experiment.advance(Stage::Executing)?;
+                    self.emit_transition(experiment, prev);
+                }
                 let result_json = serde_json::to_string(&tool_result).unwrap_or_default();
                 history.push(ChatMessage {
                     role: "user".into(),
@@ -292,21 +301,20 @@ impl<L: LlmBackend> Orchestrator<L> {
                 continue;
             }
 
-            // Try to extract generated code.
-            if let Some(code) = extract_rust_code(&response) {
-                info!(len = code.len(), "extracted generated Rust code");
-                experiment.source_code = Some(code);
-                if experiment.stage == Stage::Proposed {
-                    let prev = experiment.stage;
-                    experiment.advance(Stage::CodeGenerated)?;
-                    self.emit_transition(experiment, prev);
-                }
-            }
-
             // Check for completion signal.
             if response.contains("\"done\"") && response.contains("true") {
                 let summary = extract_summary(&response);
-                self.advance_to_completion(experiment)?;
+                // Advance through any remaining stages to Completed.
+                if experiment.stage == Stage::Proposed {
+                    let prev = experiment.stage;
+                    experiment.advance(Stage::Executing)?;
+                    self.emit_transition(experiment, prev);
+                }
+                {
+                    let prev = experiment.stage;
+                    experiment.advance(Stage::Completed)?;
+                    self.emit_transition(experiment, prev);
+                }
                 // Emit a Lab Notebook entry with the AI's documented finding.
                 if let Some(sink) = &self.config.event_sink {
                     sink.on_notebook_entry(NotebookEntryEvent {
@@ -782,26 +790,6 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
     }
 
-    fn advance_to_completion(
-        &self,
-        experiment: &mut Experiment,
-    ) -> Result<(), OrchestratorError> {
-        let stages = [
-            Stage::CodeGenerated,
-            Stage::Verified,
-            Stage::Executing,
-            Stage::Analysing,
-            Stage::Completed,
-        ];
-        for &s in &stages {
-            if experiment.stage < s {
-                let prev = experiment.stage;
-                experiment.advance(s)?;
-                self.emit_transition(experiment, prev);
-            }
-        }
-        Ok(())
-    }
 }
 
 // ── Event utilities ───────────────────────────────────────────────────────────
@@ -919,36 +907,9 @@ fn validate_tool_call_schema(value: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-// ── Code extraction ───────────────────────────────────────────────────────────
-
-/// Extract the first ```rust ... ``` block from a string.
-fn extract_rust_code(text: &str) -> Option<String> {
-    let start = text.find("```rust")?;
-    let code_start = start + 7;
-    let end = text[code_start..].find("```")?;
-    let code = text[code_start..code_start + end].trim();
-    if code.is_empty() {
-        None
-    } else {
-        Some(code.to_owned())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extract_code_block() {
-        let text = "Here is code:\n```rust\nfn main() {}\n```\nDone.";
-        let code = extract_rust_code(text).unwrap();
-        assert_eq!(code, "fn main() {}");
-    }
-
-    #[test]
-    fn no_code_block() {
-        assert!(extract_rust_code("no code here").is_none());
-    }
 
     #[test]
     fn sanitize_truncates_oversized_response() {

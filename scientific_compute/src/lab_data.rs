@@ -271,7 +271,7 @@ mod tests {
         let (x, y) = parse_xy_csv(CONCENTRATION_SERIES_CSV).expect("should parse");
         assert_eq!(x.len(), 5);
         // Beer-Lambert should give near-linear relationship
-        use crate::discovery::linear_regression;
+        use crate::fitting::linear_regression;
         let fit = linear_regression(&x, &y).expect("fit should succeed");
         assert!(
             fit.r_squared > 0.9999,
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn detect_nonlinearity_from_csv() {
         let (x, y) = parse_xy_csv(NONLINEAR_CSV).expect("should parse");
-        use crate::discovery::linear_regression;
+        use crate::fitting::linear_regression;
         let fit = linear_regression(&x, &y).expect("fit should succeed");
         // Quadratic data: linear fit should be poor
         assert!(
