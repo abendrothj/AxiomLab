@@ -88,7 +88,9 @@ impl Default for OrchestratorConfig {
             max_iterations: 20,
             code_gen_temperature: 0.2,
             reasoning_temperature: 0.7,
-            audit_log_path: std::env::var("AXIOMLAB_AUDIT_LOG").ok(),
+            audit_log_path: Some(
+                crate::audit::audit_log_path().to_string_lossy().into_owned()
+            ),
             capability_policy: Some(CapabilityPolicy::default_lab()),
             approval_policy: Some(ApprovalPolicy::default_high_risk()),
             session_nonce: Some(uuid::Uuid::new_v4().to_string()),

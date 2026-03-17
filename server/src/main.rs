@@ -1,3 +1,4 @@
+mod discovery;
 mod simulator;
 mod ws_sink;
 
@@ -10,6 +11,10 @@ use axum::{
     routing::get,
     Router,
 };
+use agent_runtime::audit::{
+    anchor_chain_tip_to_rekor, audit_log_path, emit_session_start, rotate_if_needed, AuditSigner,
+};
+use discovery::{journal_path, DiscoveryJournal};
 use std::{
     net::SocketAddr,
     sync::{
@@ -31,6 +36,7 @@ struct AppState {
     notebook:  Arc<Mutex<Vec<serde_json::Value>>>,
     log:       Arc<Mutex<ExplorationLog>>,
     events:    EventBuffer,
+    journal:   Arc<Mutex<DiscoveryJournal>>,
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -52,6 +58,12 @@ async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
         "iteration": s.iteration.load(Ordering::SeqCst),
         "notebook":  notebook,
     }))
+}
+
+/// The persistent discovery journal — findings, hypotheses, run history.
+async fn journal_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let journal = s.journal.lock().unwrap().clone();
+    axum::Json(journal)
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -114,7 +126,66 @@ async fn main() {
         .init();
 
     let (tx, _) = broadcast::channel::<String>(512);
-    let events = EventBuffer::default();
+    let events  = EventBuffer::default();
+
+    // ── Audit log setup ───────────────────────────────────────────────────────
+    let audit_path = audit_log_path();
+    rotate_if_needed(&audit_path).unwrap_or_else(|e| {
+        tracing::warn!("Audit log rotation failed: {e}");
+        None
+    });
+    let audit_path_str = audit_path.to_string_lossy().into_owned();
+    let session_id     = uuid::Uuid::new_v4().to_string();
+    let git_commit     = std::env::var("AXIOMLAB_GIT_COMMIT").unwrap_or_else(|_| "dev".into());
+    let audit_signer   = AuditSigner::from_env();
+    emit_session_start(
+        &audit_path_str,
+        &session_id,
+        audit_signer.as_ref().map(|s| s.public_key_b64()).unwrap_or("unsigned"),
+        &git_commit,
+        audit_signer.as_ref(),
+    ).unwrap_or_else(|e| {
+        tracing::warn!("Failed to write session_start audit entry: {e}");
+        String::new()
+    });
+    tracing::info!(
+        path  = %audit_path_str,
+        session = %session_id,
+        "Audit log ready"
+    );
+
+    // Periodic Rekor checkpoint — anchor the chain tip every 15 minutes.
+    if let Some(signer) = audit_signer {
+        let path_for_rekor = audit_path_str.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(
+                tokio::time::Duration::from_secs(15 * 60)
+            );
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                anchor_chain_tip_to_rekor(&path_for_rekor, &signer).await;
+            }
+        });
+    } else {
+        tracing::warn!(
+            "No AXIOMLAB_AUDIT_SIGNING_KEY set — audit entries will be unsigned \
+             and Rekor checkpointing is disabled. Set the key for production use."
+        );
+    }
+
+    // Load the persistent discovery journal (or start fresh).
+    let path    = journal_path();
+    let journal = Arc::new(Mutex::new(DiscoveryJournal::load(&path)));
+    {
+        let j = journal.lock().unwrap();
+        tracing::info!(
+            runs = j.runs.len(),
+            findings = j.findings.len(),
+            hypotheses = j.hypotheses.len(),
+            "Discovery journal loaded"
+        );
+    }
 
     let state = AppState {
         tx,
@@ -123,6 +194,7 @@ async fn main() {
         notebook:  Arc::new(Mutex::new(Vec::new())),
         log:       Arc::new(Mutex::new(ExplorationLog::default())),
         events:    events.clone(),
+        journal:   Arc::clone(&journal),
     };
 
     // Auto-start the exploration loop immediately on server launch.
@@ -132,6 +204,7 @@ async fn main() {
             log:      Arc::clone(&state.log),
             notebook: Arc::clone(&state.notebook),
             events,
+            journal:  Arc::clone(&journal),
         });
         state.running.store(true, Ordering::SeqCst);
         let running   = Arc::clone(&state.running);
@@ -147,9 +220,10 @@ async fn main() {
         .append_index_html_on_directories(true);
 
     let app = Router::new()
-        .route("/ws",          get(ws_handler))
-        .route("/api/status",  get(status_handler))
-        .route("/api/history", get(history_handler))
+        .route("/ws",            get(ws_handler))
+        .route("/api/status",    get(status_handler))
+        .route("/api/history",   get(history_handler))
+        .route("/api/journal",   get(journal_handler))
         .fallback_service(static_files)
         .layer(CorsLayer::permissive())
         .with_state(state);

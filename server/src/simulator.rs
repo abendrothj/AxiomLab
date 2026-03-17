@@ -1,5 +1,7 @@
+use crate::discovery::{journal_path, DiscoveryJournal, HypothesisStatus};
 use crate::ws_sink::{ExplorationLog, WebSocketSink};
 use agent_runtime::{
+    audit::{audit_log_path, emit_journal_finding, emit_journal_hypothesis},
     capabilities::CapabilityPolicy,
     experiment::Experiment,
     events::EventSink,
@@ -21,7 +23,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 use tokio::time::{sleep, Duration};
@@ -54,14 +56,27 @@ propose_protocol accepts JSON of the form:\n\
    ]}\n\
 Rules: 1–20 steps, tool names must be from the available tool list, params must be objects.\n\
 \n\
-Instrument your exploration: after each result, write a concise notebook entry stating \
-what you now believe to be true and what you intend to test next. Build a coherent model \
-of the constraint surface from the inside out. When you have enough evidence to describe \
+Instrument your exploration: after each significant result, call `update_journal` to \
+record what you now believe (add_finding) or a new hypothesis to test (add_hypothesis). \
+When you confirm or disprove a hypothesis, update its status. The journal persists \
+across runs — your accumulated knowledge is always at the top of each session. \
+Build a coherent model from the inside out. When you have enough evidence to describe \
 the shape of this universe's limits, conclude with: \
 {\"done\": true, \"summary\": \"<your constraint map>\"}";
 
-fn build_mandate(iteration: u32, log: &ExplorationLog, policy: &CapabilityPolicy) -> String {
+fn build_mandate(
+    iteration: u32,
+    log: &ExplorationLog,
+    journal: &DiscoveryJournal,
+    policy: &CapabilityPolicy,
+) -> String {
     let mut m = BASE_MANDATE.to_owned();
+
+    // Inject persistent discovery journal summary — the LLM's cross-run memory.
+    let journal_summary = journal.summary_for_llm();
+    if !journal_summary.is_empty() {
+        m.push_str(&journal_summary);
+    }
 
     if iteration == 1 {
         return m;
@@ -120,14 +135,14 @@ fn make_sandbox() -> Sandbox {
             "aspirate".into(), "read_absorbance".into(), "read_ph".into(),
             "read_temperature".into(), "set_temperature".into(),
             "spin_centrifuge".into(), "calibrate_ph".into(), "incubate".into(),
-            "propose_protocol".into(),
+            "propose_protocol".into(), "update_journal".into(),
         ],
         ResourceLimits::default(),
     )
 }
 
 /// Register tool handlers backed by real SiLA 2 gRPC clients.
-fn make_sila2_tools(clients: Arc<SiLA2Clients>) -> ToolRegistry {
+fn make_sila2_tools(clients: Arc<SiLA2Clients>, journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegistry {
     let mut r = ToolRegistry::new();
 
     // ── dispense ──
@@ -307,18 +322,129 @@ fn make_sila2_tools(clients: Arc<SiLA2Clients>) -> ToolRegistry {
         })),
     );
 
+    register_journal_tool(&mut r, journal);
+
     r
+}
+
+/// Register the `update_journal` tool into any tool registry.
+///
+/// The tool gives the LLM agency over its own discovery journal — it can record
+/// findings, add hypotheses, and update their status.  The journal Arc is
+/// captured by the handler closure so every call persists to disk.
+fn register_journal_tool(registry: &mut ToolRegistry, journal: Arc<Mutex<DiscoveryJournal>>) {
+    let jpath = journal_path();
+    registry.register(
+        ToolSpec {
+            name: "update_journal".into(),
+            description: "Record a scientific finding or manage a hypothesis in the \
+                persistent discovery journal. Use this after observing something new. \
+                Actions: add_finding, add_hypothesis, confirm_hypothesis, \
+                reject_hypothesis, set_hypothesis_status.".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add_finding", "add_hypothesis", "confirm_hypothesis",
+                                 "reject_hypothesis", "set_hypothesis_status"]
+                    },
+                    "statement": {
+                        "type": "string",
+                        "description": "The finding or hypothesis statement (for add_* actions)"
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Evidence supporting the finding (for add_finding)"
+                    },
+                    "hypothesis_id": {
+                        "type": "string",
+                        "description": "ID of the hypothesis to update (for confirm/reject/set_status)"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["proposed", "testing", "confirmed", "rejected"],
+                        "description": "New status (for set_hypothesis_status)"
+                    }
+                },
+                "required": ["action"]
+            }),
+        },
+        Box::new(move |p| {
+            let journal    = Arc::clone(&journal);
+            let jpath      = jpath.clone();
+            let audit_path = audit_log_path().to_string_lossy().into_owned();
+            Box::pin(async move {
+                let action = p["action"].as_str().ok_or("missing action")?;
+                let mut j  = journal.lock().map_err(|_| "journal lock poisoned")?;
+                match action {
+                    "add_finding" => {
+                        let stmt = p["statement"].as_str().ok_or("missing statement")?.to_string();
+                        let ev   = p["evidence"].as_str().unwrap_or("").to_string();
+                        let evidence = if ev.is_empty() { vec![] } else { vec![ev.clone()] };
+                        let id = j.add_finding(stmt.clone(), evidence);
+                        j.save(&jpath).ok();
+                        emit_journal_finding(&audit_path, &id, &stmt, &ev, None).ok();
+                        Ok(serde_json::json!({"recorded": "finding", "id": id, "statement": stmt}))
+                    }
+                    "add_hypothesis" => {
+                        let stmt = p["statement"].as_str().ok_or("missing statement")?.to_string();
+                        let id = j.add_hypothesis(stmt.clone());
+                        j.save(&jpath).ok();
+                        emit_journal_hypothesis(&audit_path, &id, &stmt, "proposed", None).ok();
+                        Ok(serde_json::json!({"recorded": "hypothesis", "id": id, "statement": stmt}))
+                    }
+                    "confirm_hypothesis" => {
+                        let id   = p["hypothesis_id"].as_str().ok_or("missing hypothesis_id")?;
+                        let stmt = j.hypotheses.iter().find(|h| h.id == id)
+                            .map(|h| h.statement.clone()).unwrap_or_default();
+                        let ok = j.update_hypothesis_status(id, HypothesisStatus::Confirmed);
+                        j.save(&jpath).ok();
+                        emit_journal_hypothesis(&audit_path, id, &stmt, "confirmed", None).ok();
+                        Ok(serde_json::json!({"updated": ok, "status": "confirmed"}))
+                    }
+                    "reject_hypothesis" => {
+                        let id   = p["hypothesis_id"].as_str().ok_or("missing hypothesis_id")?;
+                        let stmt = j.hypotheses.iter().find(|h| h.id == id)
+                            .map(|h| h.statement.clone()).unwrap_or_default();
+                        let ok = j.update_hypothesis_status(id, HypothesisStatus::Rejected);
+                        j.save(&jpath).ok();
+                        emit_journal_hypothesis(&audit_path, id, &stmt, "rejected", None).ok();
+                        Ok(serde_json::json!({"updated": ok, "status": "rejected"}))
+                    }
+                    "set_hypothesis_status" => {
+                        let id         = p["hypothesis_id"].as_str().ok_or("missing hypothesis_id")?;
+                        let status_str = p["status"].as_str().ok_or("missing status")?;
+                        let status = match status_str {
+                            "proposed"  => HypothesisStatus::Proposed,
+                            "testing"   => HypothesisStatus::Testing,
+                            "confirmed" => HypothesisStatus::Confirmed,
+                            "rejected"  => HypothesisStatus::Rejected,
+                            s           => return Err(format!("unknown status: {s}")),
+                        };
+                        let stmt = j.hypotheses.iter().find(|h| h.id == id)
+                            .map(|h| h.statement.clone()).unwrap_or_default();
+                        let ok = j.update_hypothesis_status(id, status);
+                        j.save(&jpath).ok();
+                        emit_journal_hypothesis(&audit_path, id, &stmt, status_str, None).ok();
+                        Ok(serde_json::json!({"updated": ok}))
+                    }
+                    _ => Err(format!("unknown action: {action}")),
+                }
+            })
+        }),
+    );
 }
 
 /// Fallback: mock tool handlers when no SiLA 2 server is available.
-fn make_mock_tools() -> ToolRegistry {
+fn make_mock_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     agent_runtime::tools::register_lab_tools(&mut r);
-    register_mock_extras(&mut r);
+    register_mock_extras(&mut r, journal);
     r
 }
 
-fn register_mock_extras(registry: &mut ToolRegistry) {
+fn register_mock_extras(registry: &mut ToolRegistry, journal: Arc<Mutex<DiscoveryJournal>>) {
     let extras: &[(&str, &str, serde_json::Value, serde_json::Value)] = &[
         ("aspirate", "Aspirate liquid from a vessel.",
             serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
@@ -367,6 +493,8 @@ fn register_mock_extras(registry: &mut ToolRegistry) {
             Err("propose_protocol is handled by the orchestrator".into())
         })),
     );
+
+    register_journal_tool(registry, journal);
 }
 
 // ── Proof manifest ────────────────────────────────────────────────────────────
@@ -590,8 +718,9 @@ pub async fn run_loop(
         };
 
         let mandate = {
-            let log = sink.log.lock().unwrap();
-            build_mandate(iteration, &log, &policy)
+            let log     = sink.log.lock().unwrap();
+            let journal = sink.journal.lock().unwrap();
+            build_mandate(iteration, &log, &journal, &policy)
         };
 
         let config = OrchestratorConfig {
@@ -605,8 +734,8 @@ pub async fn run_loop(
         };
 
         let tools = match &sila_clients {
-            Some(clients) => make_sila2_tools(Arc::clone(clients)),
-            None => make_mock_tools(),
+            Some(clients) => make_sila2_tools(Arc::clone(clients), Arc::clone(&sink.journal)),
+            None => make_mock_tools(Arc::clone(&sink.journal)),
         };
 
         let mut experiment = Experiment::new(

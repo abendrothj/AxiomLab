@@ -4,9 +4,186 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
+
+// ── Data directory & audit log path ──────────────────────────────────────────
+
+/// Root directory for all AxiomLab persistent data.
+///
+/// Controlled by `AXIOMLAB_DATA_DIR` (default: `.artifacts`).
+/// All audit logs, discovery journals, and proof artifacts are anchored here.
+pub fn data_dir() -> PathBuf {
+    std::env::var("AXIOMLAB_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(".artifacts"))
+}
+
+/// Default path for the active audit log file.
+///
+/// Overridden by `AXIOMLAB_AUDIT_LOG`.
+pub fn audit_log_path() -> PathBuf {
+    std::env::var("AXIOMLAB_AUDIT_LOG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir().join("audit").join("runtime_audit.jsonl"))
+}
+
+/// Rotate the audit log if it exceeds 100 MB or was last written on a previous day.
+///
+/// The active file is renamed to `runtime_audit_YYYY-MM-DD[_N].jsonl` and a
+/// fresh file is started.  Returns the archived path if a rotation happened.
+pub fn rotate_if_needed(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    const MAX_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
+
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Ok(None), // file doesn't exist yet — nothing to rotate
+    };
+
+    if meta.len() == 0 {
+        return Ok(None);
+    }
+
+    let needs_rotation = meta.len() > MAX_BYTES || {
+        // Check if the file was last written before today (UTC).
+        let modified = meta.modified()?;
+        let modified_secs = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Seconds since midnight UTC for each timestamp.
+        modified_secs / 86400 < now_secs / 86400
+    };
+
+    if !needs_rotation {
+        return Ok(None);
+    }
+
+    // Build archive name: runtime_audit_YYYY-MM-DD[_N].jsonl
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (y, mo, d) = unix_secs_to_ymd(now_secs);
+    let base = format!("runtime_audit_{y:04}-{mo:02}-{d:02}");
+    let mut archive = parent.join(format!("{base}.jsonl"));
+    let mut n = 1u32;
+    while archive.exists() {
+        archive = parent.join(format!("{base}_{n}.jsonl"));
+        n += 1;
+    }
+    std::fs::rename(path, &archive)?;
+    tracing::info!(archived = %archive.display(), "Audit log rotated");
+    Ok(Some(archive))
+}
+
+fn unix_secs_to_ymd(secs: u64) -> (u32, u32, u32) {
+    // Minimal UTC date calculation (no external crate needed).
+    let days = (secs / 86400) as u32;
+    // Gregorian calendar from Julian Day Number.
+    let z = days + 2440588; // Unix epoch is JDN 2440588
+    let h = 4 * z + 3;
+    let c = h / 146097;
+    let r = h % 146097 / 4;
+    let n = 5 * r + 2;
+    let d = n % 153 / 5 + 1;
+    let m = n / 153 % 12 + 3;
+    let y = 100 * c + r / 365 - if m > 12 { 4699 } else { 4700 };
+    let m = if m > 12 { m - 12 } else { m };
+    (y, m, d)
+}
+
+/// Emit a `session_start` entry that links this process's signing key to the
+/// previous chain, maintaining cross-restart continuity.
+///
+/// The `prev_tail_hash` is the `entry_hash` of the last line in the previous
+/// (or current) audit file — proving the new session continues the same chain.
+pub fn emit_session_start(
+    path: &str,
+    session_id: &str,
+    pubkey_b64: &str,
+    git_commit: &str,
+    signer: Option<&AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "session_id":  session_id,
+        "pubkey_b64":  pubkey_b64,
+        "git_commit":  git_commit,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id:  format!("session_start-{session_id}"),
+        action:    "session_start".into(),
+        decision:  "allow".into(),
+        reason:    details.to_string(),
+        success:   true,
+        approval_ids: None,
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Anchor the current chain tip to Sigstore Rekor.
+///
+/// Reads the last `entry_hash` from the audit file, signs it with the audit
+/// signer, and submits a `hashedrekord` entry to Rekor.  On success, writes
+/// a `rekor_checkpoint` audit entry containing the UUID and log index so the
+/// anchor is itself part of the verifiable chain.
+///
+/// This is best-effort: failures are logged as warnings and do not affect the
+/// local chain.
+pub async fn anchor_chain_tip_to_rekor(path: &str, signer: &AuditSigner) {
+    let tip = match last_entry_hash(path) {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            tracing::debug!("rekor checkpoint: audit file empty, skipping");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "rekor checkpoint: failed to read chain tip");
+            return;
+        }
+    };
+
+    let sig_b64  = signer.sign(tip.as_bytes());
+    let pubkey   = crate::rekor::ed25519_pubkey_pem(&signer.verifying_key_bytes());
+
+    match crate::rekor::anchor(&tip, &sig_b64, &pubkey).await {
+        Ok(anchor) => {
+            tracing::info!(
+                uuid       = %anchor.uuid,
+                log_index  = anchor.log_index,
+                chain_tip  = %tip,
+                "Rekor checkpoint anchored"
+            );
+            // Record the anchor in the local chain so verifiers can correlate.
+            let details = serde_json::json!({
+                "chain_tip_hash": tip,
+                "rekor_uuid":     anchor.uuid,
+                "log_index":      anchor.log_index,
+                "integrated_time": anchor.integrated_time,
+            });
+            let event = AuditEvent {
+                unix_secs:    unix_secs_now(),
+                trace_id:     format!("rekor_checkpoint-{}", anchor.log_index),
+                action:       "rekor_checkpoint".into(),
+                decision:     "allow".into(),
+                reason:       details.to_string(),
+                success:      true,
+                approval_ids: None,
+            };
+            emit_jsonl(path, &event, Some(signer)).ok();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Rekor checkpoint failed — local chain intact");
+        }
+    }
+}
 
 // ── Protocol audit helpers ────────────────────────────────────────────────────
 
@@ -90,6 +267,64 @@ pub fn emit_protocol_conclusion(
     };
     let line = emit_jsonl(path, &event, signer)?;
     Ok(line)
+}
+
+/// Emit a journal finding record into the audit chain.
+///
+/// Called when the LLM records a confirmed scientific finding via `update_journal`.
+/// The finding statement and evidence are part of the signed chain, giving the
+/// scientific record the same tamper-evidence as hardware actions.
+pub fn emit_journal_finding(
+    path: &str,
+    finding_id: &str,
+    statement: &str,
+    evidence: &str,
+    signer: Option<&AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "finding_id": finding_id,
+        "statement": statement,
+        "evidence": evidence,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("journal_finding-{finding_id}"),
+        action: "journal_finding".into(),
+        decision: "allow".into(),
+        reason: details.to_string(),
+        success: true,
+        approval_ids: None,
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Emit a journal hypothesis update record into the audit chain.
+///
+/// Called when the LLM adds or changes the status of a hypothesis via
+/// `update_journal`.  Tracks the full lifecycle: Proposed → Testing →
+/// Confirmed/Rejected.
+pub fn emit_journal_hypothesis(
+    path: &str,
+    hypothesis_id: &str,
+    statement: &str,
+    status: &str,
+    signer: Option<&AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "hypothesis_id": hypothesis_id,
+        "statement": statement,
+        "status": status,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("journal_hypothesis-{hypothesis_id}"),
+        action: "journal_hypothesis".into(),
+        decision: "allow".into(),
+        reason: details.to_string(),
+        success: true,
+        approval_ids: None,
+    };
+    emit_jsonl(path, &event, signer)
 }
 
 fn unix_secs_now() -> u64 {
@@ -181,6 +416,11 @@ impl AuditSigner {
     /// Raw 32-byte Ed25519 verifying (public) key — used to build a PEM for Rekor.
     pub fn verifying_key_bytes(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Base64-encoded public key string, e.g. for embedding in audit records.
+    pub fn public_key_b64(&self) -> &str {
+        &self.public_key_b64
     }
 }
 

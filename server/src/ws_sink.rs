@@ -1,9 +1,12 @@
 use agent_runtime::events::{
-    EventSink, LlmTokenEvent, NotebookEntryEvent, StateTransitionEvent, ToolExecutionEvent,
+    EventSink, LlmTokenEvent, NotebookEntryEvent, ProtocolConclusionEvent, ProtocolStepEvent,
+    StateTransitionEvent, ToolExecutionEvent,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+
+use crate::discovery::{journal_path, DiscoveryJournal};
 
 // ── Exploration log ───────────────────────────────────────────────────────────
 
@@ -63,13 +66,15 @@ impl EventBuffer {
 
 // ── Server-side event sink ────────────────────────────────────────────────────
 
-/// Broadcasts all orchestrator events to every connected WebSocket client
-/// and buffers them in memory for the /api/history endpoint.
+/// Broadcasts all orchestrator events to every connected WebSocket client,
+/// buffers them in memory for /api/history, and persists protocol conclusions
+/// to the discovery journal.
 pub struct WebSocketSink {
-    pub tx:      broadcast::Sender<String>,
-    pub log:     Arc<Mutex<ExplorationLog>>,
+    pub tx:       broadcast::Sender<String>,
+    pub log:      Arc<Mutex<ExplorationLog>>,
     pub notebook: Arc<Mutex<Vec<serde_json::Value>>>,
-    pub events:  EventBuffer,
+    pub events:   EventBuffer,
+    pub journal:  Arc<Mutex<DiscoveryJournal>>,
 }
 
 impl WebSocketSink {
@@ -114,5 +119,43 @@ impl EventSink for WebSocketSink {
         }
         self.events.push_notebook(serde_json::to_value(&event).unwrap_or_default());
         self.broadcast("notebook_entry", &event);
+    }
+
+    fn on_protocol_step(&self, event: ProtocolStepEvent) {
+        self.broadcast("protocol_step", &event);
+    }
+
+    fn on_protocol_conclusion(&self, event: ProtocolConclusionEvent) {
+        // Persist to discovery journal.
+        {
+            let mut journal = self.journal.lock().unwrap();
+            journal.record_run(
+                &event.run_id,
+                &event.protocol_name,
+                // The conclusion event doesn't carry the hypothesis; we use the protocol name
+                // as a placeholder — the LLM can add a proper hypothesis via update_journal.
+                &event.protocol_name,
+                &event.conclusion,
+                event.steps_succeeded,
+                event.steps_total,
+            );
+            let path = journal_path();
+            if let Err(e) = journal.save(&path) {
+                tracing::warn!("Failed to save discovery journal: {e}");
+            }
+        }
+
+        // Also push to in-memory notebook buffer so it appears in /api/history.
+        let entry = serde_json::json!({
+            "type": "protocol_conclusion",
+            "protocol_name": event.protocol_name,
+            "conclusion": event.conclusion,
+            "steps_succeeded": event.steps_succeeded,
+            "steps_total": event.steps_total,
+            "timestamp_ms": event.timestamp_ms,
+        });
+        self.events.push_notebook(entry);
+
+        self.broadcast("protocol_conclusion", &event);
     }
 }
