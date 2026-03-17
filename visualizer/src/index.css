@@ -1,0 +1,66 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0b0d;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  color: #00ff9d;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin scrollbars across the UI */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #1a2035 transparent;
+}
+*::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #1a2035;
+  border-radius: 2px;
+}
+
+/* Blinking cursor for TerminalLog */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* Notebook entry slide-in */
+@keyframes slideInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* React Flow overrides — match the dark theme */
+.react-flow__background {
+  background: #0f1117 !important;
+}
+.react-flow__controls {
+  background: #0f1117 !important;
+  border: 1px solid #1a2035 !important;
+  border-radius: 4px !important;
+}
+.react-flow__controls button {
+  background: #0f1117 !important;
+  border-bottom: 1px solid #1a2035 !important;
+  color: #00ff9d !important;
+  fill: #00ff9d !important;
+}
+.react-flow__controls button:hover {
+  background: #1a2035 !important;
+}
+.react-flow__edge-path {
+  stroke-width: 2;
+}

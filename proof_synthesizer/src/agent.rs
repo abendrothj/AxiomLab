@@ -52,7 +52,7 @@ impl Default for SynthConfig {
             llm_api_key: std::env::var("AXIOMLAB_LLM_API_KEY")
                 .unwrap_or_else(|_| "no-key".into()),
             llm_model: std::env::var("AXIOMLAB_LLM_MODEL")
-                .unwrap_or_else(|_| "gpt-4o".into()),
+                .unwrap_or_else(|_| "qwen2.5-coder:7b".into()),
         }
     }
 }

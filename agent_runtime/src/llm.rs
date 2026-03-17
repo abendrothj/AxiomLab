@@ -64,16 +64,16 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     /// Build from environment variables:
-    /// - `AXIOMLAB_LLM_ENDPOINT` (e.g. `https://api.openai.com/v1`)
-    /// - `AXIOMLAB_LLM_API_KEY`
-    /// - `AXIOMLAB_LLM_MODEL` (default: `gpt-4o`)
+    /// - `AXIOMLAB_LLM_ENDPOINT` (default: `http://localhost:11434/v1`)
+    /// - `AXIOMLAB_LLM_API_KEY` (default: `no-key` for local Ollama)
+    /// - `AXIOMLAB_LLM_MODEL` (default: `qwen2.5-coder:7b`)
     pub fn from_env() -> Result<Self, LlmError> {
-        let endpoint =
-            std::env::var("AXIOMLAB_LLM_ENDPOINT").map_err(|_| LlmError::MissingEndpoint)?;
+        let endpoint = std::env::var("AXIOMLAB_LLM_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:11434/v1".to_owned());
         let api_key =
-            std::env::var("AXIOMLAB_LLM_API_KEY").map_err(|_| LlmError::MissingApiKey)?;
+            std::env::var("AXIOMLAB_LLM_API_KEY").unwrap_or_else(|_| "no-key".to_owned());
         let model =
-            std::env::var("AXIOMLAB_LLM_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
+            std::env::var("AXIOMLAB_LLM_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".to_owned());
         Ok(Self {
             client: reqwest::Client::new(),
             endpoint,

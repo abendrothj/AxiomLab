@@ -72,6 +72,11 @@ impl CapabilityPolicy {
         ])
     }
 
+    /// Return the maximum allowed value for `param` under `action`, if configured.
+    pub fn max_for(&self, action: &str, param: &str) -> Option<f64> {
+        self.actions.get(action)?.numeric_limits.get(param).map(|r| r.max)
+    }
+
     pub fn validate(&self, action: &str, params: &Value) -> Result<(), String> {
         let Some(cap) = self.actions.get(action) else {
             return Ok(());

@@ -10,6 +10,9 @@
 use crate::audit::{AuditEvent, AuditSigner, emit_jsonl, emit_remote_with_retry, trace_id};
 use crate::approvals::{ApprovalPolicy, risk_class_for_action};
 use crate::capabilities::CapabilityPolicy;
+use crate::events::{
+    EventSink, LlmTokenEvent, NotebookEntryEvent, StateTransitionEvent, ToolExecutionEvent,
+};
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::revocation::RevocationList;
@@ -18,6 +21,7 @@ use crate::tools::{ToolCall, ToolRegistry, ToolResult};
 use proof_artifacts::manifest::RiskClass;
 use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -62,6 +66,13 @@ pub struct OrchestratorConfig {
     pub audit_signer: Option<AuditSigner>,
     /// Revocation list for keys and approval IDs.
     pub revocation_list: RevocationList,
+    /// Optional event sink for live visualizer integration.
+    ///
+    /// When set, the orchestrator emits [`StateTransitionEvent`],
+    /// [`ToolExecutionEvent`], [`LlmTokenEvent`], and [`NotebookEntryEvent`]
+    /// after each significant action. All methods are synchronous and must not
+    /// block the orchestrator loop.
+    pub event_sink: Option<Arc<dyn EventSink>>,
 }
 
 impl Default for OrchestratorConfig {
@@ -76,6 +87,7 @@ impl Default for OrchestratorConfig {
             session_nonce: Some(uuid::Uuid::new_v4().to_string()),
             audit_signer: AuditSigner::from_env(),
             revocation_list: RevocationList::from_env(),
+            event_sink: None,
         }
     }
 }
@@ -126,6 +138,56 @@ impl<L: LlmBackend> Orchestrator<L> {
         self
     }
 
+    // ── Event helpers ─────────────────────────────────────────────
+
+    fn emit_transition(&self, experiment: &Experiment, from: Stage) {
+        if let Some(sink) = &self.config.event_sink {
+            sink.on_state_transition(StateTransitionEvent {
+                from: format!("{:?}", from),
+                to: format!("{:?}", experiment.stage),
+                experiment_id: experiment.id.clone(),
+                timestamp_ms: unix_ms(),
+            });
+        }
+    }
+
+    fn emit_tool_event(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+        status: &str,
+        reason: &str,
+    ) {
+        if let Some(sink) = &self.config.event_sink {
+            let target = extract_target(params);
+            let max_safe_limit = self
+                .config
+                .capability_policy
+                .as_ref()
+                .and_then(|cp| primary_cap_limit(cp, tool_name))
+                .unwrap_or(0.0);
+            sink.on_tool_execution(ToolExecutionEvent {
+                tool: tool_name.to_owned(),
+                target,
+                params: params.clone(),
+                max_safe_limit,
+                status: status.to_owned(),
+                reason: reason.to_owned(),
+            });
+        }
+    }
+
+    async fn stream_tokens(&self, text: &str) {
+        if let Some(sink) = &self.config.event_sink {
+            for ch in text.chars() {
+                sink.on_llm_token(LlmTokenEvent {
+                    token: ch.to_string(),
+                });
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            }
+        }
+    }
+
     /// Build the system prompt from tool specs.
     fn system_prompt(&self) -> String {
         let tool_descriptions: Vec<String> = self
@@ -159,6 +221,9 @@ impl<L: LlmBackend> Orchestrator<L> {
     ) -> Result<(), OrchestratorError> {
         info!(id = %experiment.id, hypothesis = %experiment.hypothesis, "starting experiment");
 
+        // Emit the initial Proposed state.
+        self.emit_transition(experiment, Stage::Proposed);
+
         let mut history = vec![
             ChatMessage {
                 role: "system".into(),
@@ -184,6 +249,9 @@ impl<L: LlmBackend> Orchestrator<L> {
             let raw_response = self.llm.chat(&history, temperature).await?;
             info!(len = raw_response.len(), "LLM response received");
 
+            // Stream tokens to the visualizer before further processing.
+            self.stream_tokens(&raw_response).await;
+
             // Sanitize before any further processing.
             let response = sanitize_llm_response(&raw_response);
 
@@ -207,13 +275,26 @@ impl<L: LlmBackend> Orchestrator<L> {
                 info!(len = code.len(), "extracted generated Rust code");
                 experiment.source_code = Some(code);
                 if experiment.stage == Stage::Proposed {
+                    let prev = experiment.stage;
                     experiment.advance(Stage::CodeGenerated)?;
+                    self.emit_transition(experiment, prev);
                 }
             }
 
             // Check for completion signal.
             if response.contains("\"done\"") && response.contains("true") {
+                let summary = extract_summary(&response);
                 self.advance_to_completion(experiment)?;
+                // Emit a Lab Notebook entry with the AI's documented finding.
+                if let Some(sink) = &self.config.event_sink {
+                    sink.on_notebook_entry(NotebookEntryEvent {
+                        experiment_id: experiment.id.clone(),
+                        entry: summary,
+                        timestamp_ms: unix_ms(),
+                        tool_that_triggered: "analysis".to_owned(),
+                        outcome: "discovery".to_owned(),
+                    });
+                }
                 info!(id = %experiment.id, "experiment completed");
                 return Ok(());
             }
@@ -245,6 +326,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
             self.audit_decision(tool_name, "deny", &e.to_string(), false, None).await;
+            self.emit_tool_event(tool_name, &params, "rejected", &e.to_string());
             return Some(ToolResult {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(e.to_string()),
@@ -293,6 +375,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                 }
                 Err(e) => {
                     self.audit_decision(tool_name, "deny", &e, false, None).await;
+                    self.emit_tool_event(tool_name, &params, "rejected", &e);
                     return Some(ToolResult {
                         name: tool_name.to_owned(),
                         output: serde_json::Value::String(e),
@@ -306,6 +389,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let Some(capability) = &self.config.capability_policy {
             if let Err(e) = capability.validate(tool_name, &params) {
                 self.audit_decision(tool_name, "deny", &e, false, None).await;
+                self.emit_tool_event(tool_name, &params, "rejected", &e);
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
                     output: serde_json::Value::String(e),
@@ -319,6 +403,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
             let msg = "high-risk action denied: runtime proof policy is not configured";
             self.audit_decision(tool_name, "deny", msg, false, None).await;
+            self.emit_tool_event(tool_name, &params, "rejected", msg);
             return Some(ToolResult {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(msg.into()),
@@ -331,6 +416,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
                 self.audit_decision(tool_name, "deny", &report.reason, false, None).await;
+                self.emit_tool_event(tool_name, &params, "rejected", &report.reason);
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
                     output: serde_json::json!({
@@ -354,6 +440,8 @@ impl<L: LlmBackend> Orchestrator<L> {
             None,
         )
         .await;
+
+        self.emit_tool_event(tool_name, &params, "success", "policy and sandbox checks passed");
 
         let call = ToolCall {
             name: tool_name.to_owned(),
@@ -410,11 +498,61 @@ impl<L: LlmBackend> Orchestrator<L> {
         ];
         for &s in &stages {
             if experiment.stage < s {
+                let prev = experiment.stage;
                 experiment.advance(s)?;
+                self.emit_transition(experiment, prev);
             }
         }
         Ok(())
     }
+}
+
+// ── Event utilities ───────────────────────────────────────────────────────────
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Extract a human-readable target identifier from tool params.
+/// Checks common field names in priority order.
+fn extract_target(params: &serde_json::Value) -> String {
+    for key in &["pump_id", "sensor_id", "vessel_id", "target", "chamber_id"] {
+        if let Some(v) = params.get(key).and_then(|v| v.as_str()) {
+            return v.to_owned();
+        }
+    }
+    // For move_arm, synthesize a position string.
+    if let (Some(x), Some(y), Some(z)) = (
+        params["x"].as_f64(),
+        params["y"].as_f64(),
+        params["z"].as_f64(),
+    ) {
+        return format!("({x:.0},{y:.0},{z:.0})mm");
+    }
+    "unknown".to_owned()
+}
+
+/// Return the primary upper-bound limit for the given tool from the capability policy.
+fn primary_cap_limit(policy: &CapabilityPolicy, tool_name: &str) -> Option<f64> {
+    match tool_name {
+        "dispense" => policy.max_for("dispense", "volume_ul"),
+        "move_arm" => policy.max_for("move_arm", "x"),
+        _ => None,
+    }
+}
+
+/// Extract the `summary` field from `{"done": true, "summary": "..."}` responses.
+fn extract_summary(text: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(s) = v.get("summary").and_then(|s| s.as_str()) {
+            return s.to_owned();
+        }
+    }
+    // Fallback: use the raw response trimmed to 500 chars.
+    text.chars().take(500).collect()
 }
 
 // ── LLM response sanitization ─────────────────────────────────────────────────

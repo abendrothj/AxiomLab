@@ -1,4 +1,4 @@
-/target
+**/target
 
 # Generated proof artifacts (runtime outputs, not source of truth)
 .artifacts/
@@ -7,4 +7,6 @@
 lean4/.lake/packages/
 lean4/.lake/build/
 lean4/.lake/config/
+
+visualizer/node_modules/
 
