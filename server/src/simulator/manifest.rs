@@ -138,19 +138,18 @@ fn load_manifest_artifacts() -> Vec<ProofArtifact> {
         "../proof_artifacts/vessel_physics_manifest.json",
     ];
     for path in &candidates {
-        if let Ok(raw) = std::fs::read_to_string(path) {
-            match serde_json::from_str::<ProofManifest>(&raw) {
-                Ok(m) => {
-                    tracing::info!(
-                        path = path,
-                        artifact_count = m.artifacts.len(),
-                        "Loaded Verus proof manifest"
-                    );
-                    return m.artifacts;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse manifest at {path}: {e}");
-                }
+        match proof_artifacts::policy::RuntimePolicyEngine::load_and_verify(path) {
+            Ok(engine) => {
+                let artifacts = engine.manifest().artifacts.clone();
+                tracing::info!(
+                    path,
+                    artifact_count = artifacts.len(),
+                    "Loaded and verified Verus proof manifest"
+                );
+                return artifacts;
+            }
+            Err(e) => {
+                tracing::warn!("Manifest verification failed at {path}: {e}");
             }
         }
     }

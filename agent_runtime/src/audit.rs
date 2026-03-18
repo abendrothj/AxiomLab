@@ -109,7 +109,7 @@ pub fn emit_session_start(
     session_id: &str,
     pubkey_b64: &str,
     git_commit: &str,
-    signer: Option<&AuditSigner>,
+    signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
     let details = serde_json::json!({
         "session_id":  session_id,
@@ -137,7 +137,7 @@ pub fn emit_session_start(
 ///
 /// This is best-effort: failures are logged as warnings and do not affect the
 /// local chain.
-pub async fn anchor_chain_tip_to_rekor(path: &str, signer: &AuditSigner) {
+pub async fn anchor_chain_tip_to_rekor(path: &str, signer: &dyn AuditSigner) {
     let tip = match last_entry_hash(path) {
         Ok(Some(h)) => h,
         Ok(None) => {
@@ -203,7 +203,7 @@ pub fn emit_protocol_step(
     rejection_reason: Option<&str>,
     proof_artifact_hash: &str,
     vessel_snapshot: Option<&serde_json::Value>,
-    signer: Option<&AuditSigner>,
+    signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
     let details = serde_json::json!({
         "protocol_id": protocol_id,
@@ -243,7 +243,7 @@ pub fn emit_protocol_conclusion(
     steps_total: usize,
     steps_succeeded: usize,
     template_id: Option<&str>,
-    signer: Option<&AuditSigner>,
+    signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
     // Conclusion-specific signature: sign (run_id || "\n" || conclusion).
     let conclusion_sig = signer.map(|s| {
@@ -285,7 +285,7 @@ pub fn emit_journal_finding(
     evidence: &str,
     measurements_json: &str,
     source: &str,
-    signer: Option<&AuditSigner>,
+    signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
     let details = serde_json::json!({
         "finding_id": finding_id,
@@ -316,7 +316,7 @@ pub fn emit_journal_hypothesis(
     hypothesis_id: &str,
     statement: &str,
     status: &str,
-    signer: Option<&AuditSigner>,
+    signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
     let details = serde_json::json!({
         "hypothesis_id": hypothesis_id,
@@ -346,7 +346,7 @@ pub fn emit_calibration(
     instrument: &str,
     standard: &str,
     offset: f64,
-    signer: Option<&AuditSigner>,
+    signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
     let details = serde_json::json!({
         "calibration_id": calibration_id,
@@ -362,6 +362,119 @@ pub fn emit_calibration(
         reason: details.to_string(),
         success: true,
         approval_ids: None,
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+// ── Approval WAL audit helpers ────────────────────────────────────────────────
+//
+// These four events bracket every approved dispatch and provide a recoverable
+// write-ahead log (WAL) for approval state across process restarts.
+//
+// Sequence:
+//   emit_pending_dispatch  — written BEFORE tool dispatch (WAL entry)
+//   emit_dispatch_complete — written AFTER successful dispatch
+//   (on restart with no dispatch_complete: emit_stalled_dispatch)
+//   emit_dispatch_cancelled — written when operator cancels a stalled dispatch
+
+/// Emit a `pending_dispatch` audit entry immediately before dispatching an
+/// approved tool call.  If the process crashes before `dispatch_complete` is
+/// written, the sidecar file will be found on restart and the dispatch is
+/// considered stalled.
+pub fn emit_pending_dispatch(
+    path: &str,
+    approval_id: &str,
+    tool: &str,
+    params: &serde_json::Value,
+    signer: Option<&dyn AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "approval_id": approval_id,
+        "tool": tool,
+        "params": params,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("pending_dispatch-{approval_id}"),
+        action: "pending_dispatch".into(),
+        decision: "allow".into(),
+        reason: details.to_string(),
+        success: true,
+        approval_ids: Some(vec![approval_id.to_string()]),
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Emit a `dispatch_complete` audit entry after a tool call successfully
+/// returns.  Presence of this entry in the audit log marks the dispatch as
+/// resolved; absence (with a sidecar present) indicates a stall.
+pub fn emit_dispatch_complete(
+    path: &str,
+    approval_id: &str,
+    tool: &str,
+    signer: Option<&dyn AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "approval_id": approval_id,
+        "tool": tool,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("dispatch_complete-{approval_id}"),
+        action: "dispatch_complete".into(),
+        decision: "allow".into(),
+        reason: details.to_string(),
+        success: true,
+        approval_ids: Some(vec![approval_id.to_string()]),
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Emit a `stalled_dispatch` audit entry when a sidecar is found at startup
+/// without a corresponding `dispatch_complete`.  Records the reason the
+/// dispatch could not be automatically resumed.
+pub fn emit_stalled_dispatch(
+    path: &str,
+    approval_id: &str,
+    tool: &str,
+    reason: &str,
+    signer: Option<&dyn AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "approval_id": approval_id,
+        "tool": tool,
+        "stall_reason": reason,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("stalled_dispatch-{approval_id}"),
+        action: "stalled_dispatch".into(),
+        decision: "deny".into(),
+        reason: details.to_string(),
+        success: false,
+        approval_ids: Some(vec![approval_id.to_string()]),
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Emit a `dispatch_cancelled` audit entry when the operator explicitly
+/// cancels a stalled dispatch rather than resuming it.
+pub fn emit_dispatch_cancelled(
+    path: &str,
+    approval_id: &str,
+    signer: Option<&dyn AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "approval_id": approval_id,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("dispatch_cancelled-{approval_id}"),
+        action: "dispatch_cancelled".into(),
+        decision: "deny".into(),
+        reason: details.to_string(),
+        success: false,
+        approval_ids: Some(vec![approval_id.to_string()]),
     };
     emit_jsonl(path, &event, signer)
 }
@@ -404,7 +517,7 @@ struct RemoteAuditConfig {
     timeout_ms: u64,
 }
 
-/// Ed25519 signing key for per-event audit signatures.
+/// Pluggable Ed25519 signing backend for per-event audit signatures.
 ///
 /// Each persisted audit entry carries an `entry_sig_b64` field: an Ed25519
 /// signature over the SHA-256 hash input (the same bytes used for the hash
@@ -414,17 +527,33 @@ struct RemoteAuditConfig {
 /// The corresponding public key is stored in `entry_pubkey_b64` on every entry
 /// so that `verify_chain` can authenticate without external state.
 ///
-/// Generate a key with `audit_keygen()`.  In production, store the private key
-/// in a secret manager and supply via `AXIOMLAB_AUDIT_SIGNING_KEY` (raw 32-byte
-/// base64).
-pub struct AuditSigner {
-    signing_key: SigningKey,
-    public_key_b64: String,
+/// # Implementations
+/// - [`FileBackedSigner`] — persists key to `~/.config/axiomlab/audit_signing.key`
+///   (or `AXIOMLAB_AUDIT_SIGNING_KEY_PATH`). Default for production.
+/// - Inline key via [`new_inline_signer`] — for CI and existing operator workflows
+///   using `AXIOMLAB_AUDIT_SIGNING_KEY` (raw 32-byte base64).
+///
+/// # Swapping backends
+/// Future backends (YubiHSM, AWS KMS) implement this trait and plug in without
+/// changing any call sites.
+pub trait AuditSigner: Send + Sync {
+    /// Sign `data` and return the base64-encoded Ed25519 signature.
+    fn sign(&self, data: &[u8]) -> String;
+    /// Base64-encoded Ed25519 public (verifying) key — embedded in every audit entry.
+    fn public_key_b64(&self) -> String;
+    /// Raw 32-byte verifying key — used to build a PEM for Rekor submission.
+    fn verifying_key_bytes(&self) -> [u8; 32];
 }
 
-impl AuditSigner {
-    /// Create from a 32-byte base64-encoded private key.
-    pub fn from_b64(b64: &str) -> Result<Self, String> {
+// ── Concrete: inline key (env-var or direct bytes) ────────────────────────────
+
+struct InlineKeySigner {
+    signing_key: SigningKey,
+    pubkey_b64: String,
+}
+
+impl InlineKeySigner {
+    fn from_b64(b64: &str) -> Result<Self, String> {
         let bytes = STANDARD
             .decode(b64.trim())
             .map_err(|e| format!("audit signing key base64 decode failed: {e}"))?;
@@ -432,34 +561,113 @@ impl AuditSigner {
             .try_into()
             .map_err(|_| "audit signing key must be 32 bytes".to_string())?;
         let sk = SigningKey::from_bytes(&arr);
-        let pk_b64 = STANDARD.encode(sk.verifying_key().to_bytes());
-        Ok(Self { signing_key: sk, public_key_b64: pk_b64 })
+        let pubkey_b64 = STANDARD.encode(sk.verifying_key().to_bytes());
+        Ok(Self { signing_key: sk, pubkey_b64 })
     }
+}
 
-    /// Load from `AXIOMLAB_AUDIT_SIGNING_KEY` environment variable.
-    pub fn from_env() -> Option<Self> {
-        let b64 = std::env::var("AXIOMLAB_AUDIT_SIGNING_KEY").ok()?;
-        match Self::from_b64(&b64) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!("ignoring invalid AXIOMLAB_AUDIT_SIGNING_KEY: {e}");
-                None
-            }
-        }
+impl AuditSigner for InlineKeySigner {
+    fn sign(&self, data: &[u8]) -> String {
+        STANDARD.encode(self.signing_key.sign(data).to_bytes())
     }
-
-    fn sign(&self, bytes: &[u8]) -> String {
-        STANDARD.encode(self.signing_key.sign(bytes).to_bytes())
-    }
-
-    /// Raw 32-byte Ed25519 verifying (public) key — used to build a PEM for Rekor.
-    pub fn verifying_key_bytes(&self) -> [u8; 32] {
+    fn public_key_b64(&self) -> String { self.pubkey_b64.clone() }
+    fn verifying_key_bytes(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
     }
+}
 
-    /// Base64-encoded public key string, e.g. for embedding in audit records.
-    pub fn public_key_b64(&self) -> &str {
-        &self.public_key_b64
+// ── Concrete: file-backed (persisted across restarts) ────────────────────────
+
+/// An [`AuditSigner`] that persists the Ed25519 private key to disk so that
+/// the signing key survives process restarts.
+///
+/// Key path (in priority order):
+/// 1. `AXIOMLAB_AUDIT_SIGNING_KEY_PATH` environment variable
+/// 2. `~/.config/axiomlab/audit_signing.key` (default)
+///
+/// On first use the key is generated and written with mode `0o600`.
+/// On subsequent starts the existing key is loaded, preserving chain continuity.
+pub struct FileBackedSigner {
+    inner: InlineKeySigner,
+}
+
+impl FileBackedSigner {
+    /// Load the key from `path`, or generate and persist a fresh one.
+    pub fn load_or_create(path: &std::path::Path) -> Result<Self, String> {
+        if path.exists() {
+            let b64 = std::fs::read_to_string(path)
+                .map_err(|e| format!("read signing key {}: {e}", path.display()))?;
+            let inner = InlineKeySigner::from_b64(b64.trim())?;
+            tracing::info!(path = %path.display(), "Loaded persistent audit signing key");
+            Ok(Self { inner })
+        } else {
+            let (priv_b64, _) = audit_keygen();
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create key dir {}: {e}", parent.display()))?;
+            }
+            std::fs::write(path, &priv_b64)
+                .map_err(|e| format!("write signing key {}: {e}", path.display()))?;
+            // Restrict to owner-read-write (best effort; no-op on Windows).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
+            }
+            tracing::info!(
+                path = %path.display(),
+                "Generated new persistent audit signing key (mode 0o600)"
+            );
+            Ok(Self { inner: InlineKeySigner::from_b64(&priv_b64)? })
+        }
+    }
+}
+
+impl AuditSigner for FileBackedSigner {
+    fn sign(&self, data: &[u8]) -> String { self.inner.sign(data) }
+    fn public_key_b64(&self) -> String { self.inner.public_key_b64() }
+    fn verifying_key_bytes(&self) -> [u8; 32] { self.inner.verifying_key_bytes() }
+}
+
+// ── Constructors ──────────────────────────────────────────────────────────────
+
+/// Build a signer from a raw 32-byte base64-encoded private key.
+/// Used in tests and for the `AXIOMLAB_AUDIT_SIGNING_KEY` inline-key path.
+pub fn new_inline_signer(b64: &str) -> Result<Box<dyn AuditSigner>, String> {
+    InlineKeySigner::from_b64(b64).map(|s| Box::new(s) as Box<dyn AuditSigner>)
+}
+
+/// Resolve the audit signer from the environment.
+///
+/// Priority:
+/// 1. `AXIOMLAB_AUDIT_SIGNING_KEY` — inline base64 private key (CI / legacy)
+/// 2. `AXIOMLAB_AUDIT_SIGNING_KEY_PATH` — path to a persistent key file
+/// 3. Default file `~/.config/axiomlab/audit_signing.key` (auto-created on first use)
+///
+/// Returns `None` only if all of the above fail with warnings.
+pub fn audit_signer_from_env() -> Option<Box<dyn AuditSigner>> {
+    // Priority 1: inline key (CI / existing operator workflows)
+    if let Ok(b64) = std::env::var("AXIOMLAB_AUDIT_SIGNING_KEY") {
+        match InlineKeySigner::from_b64(&b64) {
+            Ok(s) => return Some(Box::new(s)),
+            Err(e) => tracing::warn!("ignoring invalid AXIOMLAB_AUDIT_SIGNING_KEY: {e}"),
+        }
+    }
+    // Priority 2 & 3: file-backed (explicit path or default)
+    let path = std::env::var("AXIOMLAB_AUDIT_SIGNING_KEY_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::config_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("axiomlab")
+                .join("audit_signing.key")
+        });
+    match FileBackedSigner::load_or_create(&path) {
+        Ok(s) => Some(Box::new(s)),
+        Err(e) => {
+            tracing::warn!("could not load/create file-backed audit signing key: {e}");
+            None
+        }
     }
 }
 
@@ -507,20 +715,61 @@ struct HashInput<'a> {
     prev_hash: Option<&'a str>,
 }
 
+/// Attempt to set the kernel-level append-only flag on an open file.
+///
+/// On Linux with the `append-enforce` feature and sufficient privileges
+/// (`CAP_LINUX_IMMUTABLE`), this calls `FS_IOC_SETFLAGS` with `FS_APPEND_FL`.
+/// If the ioctl fails (unsupported fs, permission denied), a single `WARN` is
+/// emitted and execution continues — this is defence-in-depth, not a hard gate.
+///
+/// On non-Linux or without the feature, this is a no-op.
+#[allow(unused_variables)]
+fn try_set_append_only(path: &str) {
+    #[cfg(all(target_os = "linux", feature = "append-enforce"))]
+    {
+        use std::os::unix::io::AsRawFd;
+        // FS_APPEND_FL = 0x20 (defined in linux/fs.h)
+        const FS_APPEND_FL: libc::c_long = 0x20;
+        // FS_IOC_SETFLAGS = 0x40086602 on most arches
+        // Use ioctl_write_ptr! macro from libc or raw number.
+        // We use the raw ioctl number: _IOW('f', 2, long) = 0x40086602
+        const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
+
+        let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) else { return };
+        let fd = file.as_raw_fd();
+        let flags: libc::c_long = FS_APPEND_FL;
+        let ret = unsafe { libc::ioctl(fd, FS_IOC_SETFLAGS, &flags as *const _) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            tracing::warn!(
+                path,
+                error = %err,
+                "Could not set append-only inode flag (FS_IOC_SETFLAGS). \
+                 This is advisory only — the hash chain and Ed25519 signatures \
+                 remain the primary tamper-evidence mechanism."
+            );
+        }
+    }
+}
+
 pub fn emit_jsonl(
     path: &str,
     event: &AuditEvent,
-    signer: Option<&AuditSigner>,
+    signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent)?;
     }
 
+    // Attempt to set kernel append-only flag (Linux + append-enforce feature only).
+    // Called before opening the file so we don't hold the fd twice; no-op otherwise.
+    try_set_append_only(path);
+
     let prev_hash = last_entry_hash(path)?;
     let (entry_hash, canonical_bytes) = compute_entry_hash_with_bytes(event, prev_hash.as_deref())?;
 
     let (entry_sig_b64, entry_pubkey_b64) = signer
-        .map(|s| (Some(s.sign(&canonical_bytes)), Some(s.public_key_b64.clone())))
+        .map(|s| (Some(s.sign(&canonical_bytes)), Some(s.public_key_b64())))
         .unwrap_or((None, None));
 
     let persisted = PersistedAuditEvent {
@@ -780,6 +1029,101 @@ pub fn trace_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4())
 }
 
+// ── Protocol state scanner ────────────────────────────────────────────────────
+
+/// Scan the audit log for the execution state of a specific protocol.
+///
+/// Verifies the hash chain first — if the chain is invalid, the log cannot be
+/// trusted and recovery is aborted.  Then scans for `protocol_step` and
+/// `protocol_conclusion` entries matching `protocol_id`.
+///
+/// Returns:
+/// - `ProtocolScanResult::Complete` — conclusion entry found; run is done
+/// - `ProtocolScanResult::Interrupted(state)` — steps present, no conclusion
+/// - `ProtocolScanResult::ChainInvalid(reason)` — chain verification failed
+/// - `ProtocolScanResult::NotFound` — no entries for this protocol_id
+pub fn scan_for_protocol_state(
+    audit_path: &str,
+    protocol_id: &str,
+) -> crate::protocol::ProtocolScanResult {
+    use crate::protocol::{ProtocolRecoveryState, ProtocolScanResult};
+
+    // Verify chain integrity before trusting any entry.
+    if let Err(reason) = verify_chain(audit_path) {
+        return ProtocolScanResult::ChainInvalid(reason);
+    }
+
+    let content = match std::fs::read_to_string(audit_path) {
+        Ok(c) => c,
+        Err(_) => return ProtocolScanResult::NotFound,
+    };
+
+    let mut last_completed_step: Option<usize> = None;
+    let mut last_run_id: Option<String> = None;
+    let mut step_results: Vec<serde_json::Value> = Vec::new();
+    let mut found_any = false;
+    let mut found_conclusion = false;
+    let mut replicate_index = 0usize;
+
+    for line in content.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+
+        let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        let reason_str = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+        let Ok(details) = serde_json::from_str::<serde_json::Value>(reason_str) else { continue };
+
+        let entry_pid = details.get("protocol_id").and_then(|p| p.as_str()).unwrap_or("");
+        if entry_pid != protocol_id {
+            continue;
+        }
+
+        match action {
+            "protocol_step" => {
+                found_any = true;
+                let decision = v.get("decision").and_then(|d| d.as_str()).unwrap_or("");
+                if decision == "allow" {
+                    if let Some(idx) = details.get("step_index").and_then(|i| i.as_u64()) {
+                        last_completed_step = Some(idx as usize);
+                        last_run_id = details.get("run_id").and_then(|r| r.as_str()).map(|s| s.to_string());
+                        replicate_index = details.get("replicate_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                        step_results.push(details.clone());
+                    }
+                }
+            }
+            "protocol_conclusion" => {
+                if entry_pid == protocol_id {
+                    found_any = true;
+                    found_conclusion = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !found_any {
+        return ProtocolScanResult::NotFound;
+    }
+    if found_conclusion {
+        return ProtocolScanResult::Complete;
+    }
+
+    // Partial run — build recovery state.
+    let last_step = last_completed_step.unwrap_or(0);
+    let run_id_parsed = last_run_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_else(Uuid::new_v4);
+    let protocol_id_parsed = Uuid::parse_str(protocol_id).unwrap_or_else(|_| Uuid::new_v4());
+
+    ProtocolScanResult::Interrupted(ProtocolRecoveryState {
+        protocol_id: protocol_id_parsed,
+        run_id: run_id_parsed,
+        last_completed_step: last_step,
+        replicate_index,
+        step_results,
+    })
+}
+
 fn remote_config_from_env() -> Option<RemoteAuditConfig> {
     let url = std::env::var("AXIOMLAB_AUDIT_REMOTE_URL").ok()?;
     let retries = std::env::var("AXIOMLAB_AUDIT_REMOTE_RETRIES")
@@ -854,13 +1198,13 @@ mod tests {
     #[test]
     fn signed_chain_verifies_and_sig_tamper_detected() {
         let (sk_b64, _pk_b64) = audit_keygen();
-        let signer = AuditSigner::from_b64(&sk_b64).expect("valid signer");
+        let signer = new_inline_signer(&sk_b64).expect("valid signer");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit_signed.jsonl").to_string_lossy().to_string();
 
-        emit_jsonl(&path, &sample_event(10), Some(&signer)).expect("emit signed");
-        emit_jsonl(&path, &sample_event(11), Some(&signer)).expect("emit second signed");
+        emit_jsonl(&path, &sample_event(10), Some(signer.as_ref())).expect("emit signed");
+        emit_jsonl(&path, &sample_event(11), Some(signer.as_ref())).expect("emit second signed");
 
         verify_chain(&path).expect("signed chain should verify");
 

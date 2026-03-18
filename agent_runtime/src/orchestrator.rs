@@ -9,7 +9,7 @@
 
 use crate::approval_queue::{ApprovalContext, PendingApprovalQueue, ProtocolStepInfo};
 use crate::audit::{
-    AuditEvent, AuditSigner, emit_jsonl, emit_protocol_conclusion, emit_protocol_step,
+    AuditEvent, AuditSigner, audit_signer_from_env, emit_jsonl, emit_protocol_conclusion, emit_protocol_step,
     emit_remote_with_retry, trace_id,
 };
 use crate::rekor;
@@ -21,7 +21,7 @@ use crate::events::{
 };
 use crate::experiment::{Experiment, Stage};
 use crate::llm::{ChatMessage, LlmBackend};
-use crate::protocol::{Protocol, ProtocolPlan, ProtocolRunResult, StepOutcome};
+use crate::protocol::{Protocol, ProtocolPlan, ProtocolRunResult, RekorStatus, StepOutcome, ZkProofStatus};
 use crate::revocation::RevocationList;
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
@@ -78,7 +78,7 @@ pub struct OrchestratorConfig {
     /// Generate with `uuid::Uuid::new_v4().to_string()` at session start.
     pub session_nonce: Option<String>,
     /// Optional Ed25519 signer for per-event audit signatures.
-    pub audit_signer: Option<AuditSigner>,
+    pub audit_signer: Option<Box<dyn AuditSigner>>,
     /// Revocation list for keys and approval IDs.
     pub revocation_list: RevocationList,
     /// Optional event sink for live visualizer integration.
@@ -125,7 +125,7 @@ impl Default for OrchestratorConfig {
             capability_policy: Some(CapabilityPolicy::default_lab()),
             approval_policy: Some(ApprovalPolicy::default_high_risk()),
             session_nonce: Some(uuid::Uuid::new_v4().to_string()),
-            audit_signer: AuditSigner::from_env(),
+            audit_signer: audit_signer_from_env(),
             revocation_list: RevocationList::from_env(),
             event_sink: None,
             approval_queue: None,
@@ -179,6 +179,16 @@ impl<L: LlmBackend> Orchestrator<L> {
             .collect();
         self.policy_engine = Some(engine);
         self.policy_context = Some(context);
+        self
+    }
+
+    /// Inject a risk index without a full policy engine.
+    ///
+    /// Lets integration tests trigger Stage 3 (fail-closed) in isolation.
+    /// **Never use in production** — always call `with_runtime_policy` instead.
+    #[doc(hidden)]
+    pub fn with_risk_index_only(mut self, index: HashMap<String, RiskClass>) -> Self {
+        self.action_risk_index = index;
         self
     }
 
@@ -593,7 +603,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         rejection_reason.as_deref(),
                         &manifest_hash,
                         vessel_snapshot.as_ref(),
-                        self.config.audit_signer.as_ref(),
+                        self.config.audit_signer.as_deref(),
                     );
                 }
 
@@ -706,6 +716,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         );
 
         // Write signed conclusion to audit chain, then anchor externally to Rekor.
+        let mut rekor_status = RekorStatus::Skipped;
         if let Some(path) = &self.config.audit_log_path {
             let conclusion_line = emit_protocol_conclusion(
                 path,
@@ -716,11 +727,11 @@ impl<L: LlmBackend> Orchestrator<L> {
                 protocol.steps.len(),
                 steps_succeeded,
                 protocol.template_id.as_deref(),
-                self.config.audit_signer.as_ref(),
+                self.config.audit_signer.as_deref(),
             );
 
             if let (Ok(line), Some(signer)) =
-                (conclusion_line, self.config.audit_signer.as_ref())
+                (conclusion_line, self.config.audit_signer.as_deref())
             {
                 if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
                     if let (Some(hash), Some(sig)) = (
@@ -728,20 +739,20 @@ impl<L: LlmBackend> Orchestrator<L> {
                         entry["entry_sig_b64"].as_str(),
                     ) {
                         let pubkey_pem = rekor::ed25519_pubkey_pem(&signer.verifying_key_bytes());
-                        match rekor::anchor(hash, sig, &pubkey_pem).await {
-                            Ok(anchor) => {
+                        match rekor::submit_with_retry(hash, sig, &pubkey_pem).await {
+                            Ok(uuid) => {
                                 info!(
-                                    rekor_uuid        = %anchor.uuid,
-                                    log_index         = anchor.log_index,
-                                    integrated_time   = anchor.integrated_time,
+                                    rekor_uuid = %uuid,
                                     "protocol conclusion anchored to Rekor transparency log"
                                 );
+                                rekor_status = RekorStatus::Anchored { uuid };
                             }
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    "Rekor anchoring failed — local audit chain intact"
+                            Err(reason) => {
+                                error!(
+                                    error = %reason,
+                                    "Rekor anchoring failed after retries — local audit chain intact"
                                 );
+                                rekor_status = RekorStatus::Failed { reason };
                             }
                         }
                     }
@@ -775,6 +786,9 @@ impl<L: LlmBackend> Orchestrator<L> {
             });
         }
 
+        // Spawn background ZK proof task — does not block protocol completion.
+        let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
+
         ProtocolRunResult {
             protocol_id: protocol.id,
             run_id,
@@ -785,6 +799,209 @@ impl<L: LlmBackend> Orchestrator<L> {
             step_results,
             replicate_count: protocol.replicate_count,
             aggregate,
+            rekor_status,
+            zk_proof_status,
+        }
+    }
+
+    /// Resume a partially-completed protocol from a crash-recovery state.
+    ///
+    /// Seeds the LLM context with prior step results (as "observed" messages),
+    /// then continues from `last_completed_step + 1` through the remaining steps.
+    /// The conclusion, signing, and Rekor anchoring proceed identically to a
+    /// fresh `run_protocol` run.
+    ///
+    /// The caller must verify the audit chain is valid before calling this
+    /// (see `scan_for_protocol_state` which returns `ChainInvalid` if not).
+    pub async fn resume_protocol(
+        &self,
+        recovery: crate::protocol::ProtocolRecoveryState,
+        protocol: &Protocol,
+    ) -> ProtocolRunResult {
+        let run_id = recovery.run_id;
+        info!(
+            protocol_id = %protocol.id,
+            run_id = %run_id,
+            resume_from_step = recovery.last_completed_step + 1,
+            "resuming interrupted protocol run"
+        );
+
+        let manifest_hash = self
+            .policy_engine
+            .as_ref()
+            .map(|e| {
+                let raw = serde_json::to_string(e.manifest()).unwrap_or_default();
+                format!("{:x}", sha2::Sha256::digest(raw.as_bytes()))
+            })
+            .unwrap_or_else(|| "no-manifest".into());
+
+        // Seed LLM context with prior observations from the audit log.
+        let mut messages = vec![ChatMessage {
+            role: "system".into(),
+            content: format!(
+                "You are resuming protocol '{}' after an interruption. \
+                 Hypothesis: {}\n\
+                 The following steps were already completed before the interruption. \
+                 Continue from step {}.",
+                protocol.name,
+                protocol.hypothesis,
+                recovery.last_completed_step + 1,
+            ),
+        }];
+        for (i, prior) in recovery.step_results.iter().enumerate() {
+            messages.push(ChatMessage {
+                role: "user".into(),
+                content: format!(
+                    "[Prior] Step {i}: {}",
+                    serde_json::to_string(prior).unwrap_or_default()
+                ),
+            });
+        }
+
+        let resume_from = recovery.last_completed_step + 1;
+        let step_count = protocol.steps.len();
+        let total_replicates = protocol.replicate_count.max(1) as usize;
+        let mut all_step_results: Vec<StepOutcome> = Vec::new();
+        let mut rep_succeeded = 0usize;
+
+        for i in resume_from..step_count {
+            let step = &protocol.steps[i];
+            info!(step = i, tool = %step.tool, "executing resumed protocol step");
+
+            let step_actx = ApprovalContext {
+                hypothesis:                 protocol.hypothesis.clone(),
+                experiment_id:              protocol.id.to_string(),
+                iteration:                  (recovery.replicate_index * step_count + i) as u32,
+                risk_class:                 None,
+                recent_actions:             Vec::new(),
+                journal_summary:            self.config.journal_summary.clone(),
+                protocol_step:              Some(ProtocolStepInfo {
+                    protocol_name: protocol.name.clone(),
+                    step_index:    i,
+                    step_count,
+                    description:   step.description.clone(),
+                }),
+                findings_before_experiment: self.config.findings_at_start,
+            };
+
+            let result = self.execute_tool_direct(&step.tool, step.params.clone(), Some(step_actx)).await;
+            let allowed = result.success;
+            let rejection_reason = if !allowed {
+                result.output.as_str().map(|s| s.to_owned())
+            } else {
+                None
+            };
+            let vessel_snapshot = result.output.get("_vessel_snapshot").cloned();
+
+            if let Some(path) = &self.config.audit_log_path {
+                let _ = emit_protocol_step(
+                    path, protocol.id, run_id, i, &step.tool, &step.description,
+                    allowed, rejection_reason.as_deref(), &manifest_hash,
+                    vessel_snapshot.as_ref(), self.config.audit_signer.as_deref(),
+                );
+            }
+
+            let mut llm_output = result.output.clone();
+            if allowed {
+                if let Some(obj) = llm_output.as_object_mut() {
+                    obj.remove("_vessel_snapshot");
+                }
+                rep_succeeded += 1;
+            }
+
+            messages.push(ChatMessage {
+                role: "user".into(),
+                content: if allowed {
+                    format!(
+                        "Step {i} ({} — {}): SUCCESS. Result: {}",
+                        step.tool, step.description,
+                        serde_json::to_string(&llm_output).unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "Step {i} ({} — {}): REJECTED. Reason: {}",
+                        step.tool, step.description,
+                        rejection_reason.as_deref().unwrap_or("unknown")
+                    )
+                },
+            });
+
+            all_step_results.push(StepOutcome {
+                step_index: i,
+                replicate_index: recovery.replicate_index,
+                tool: step.tool.clone(),
+                description: step.description.clone(),
+                allowed,
+                result: if allowed { Some(llm_output) } else { None },
+                rejection_reason,
+            });
+        }
+
+        let steps_succeeded = rep_succeeded;
+        messages.push(ChatMessage {
+            role: "user".into(),
+            content: format!(
+                "Protocol resumed and completed. {steps_succeeded}/{} remaining steps succeeded. \
+                 Write your scientific conclusion based on all observations.",
+                step_count - resume_from
+            ),
+        });
+
+        let conclusion = match self.llm.chat(&messages, self.config.reasoning_temperature).await {
+            Ok(text) => sanitize_llm_response(&text),
+            Err(e) => {
+                warn!(error = %e, "LLM failed to generate conclusion for resumed protocol");
+                format!(
+                    "Protocol '{}' resumed: {steps_succeeded}/{} steps succeeded. \
+                     LLM conclusion unavailable: {e}",
+                    protocol.name, step_count - resume_from
+                )
+            }
+        };
+
+        let mut rekor_status = RekorStatus::Skipped;
+        if let Some(path) = &self.config.audit_log_path {
+            let conclusion_line = emit_protocol_conclusion(
+                path, protocol.id, run_id, &protocol.name, &conclusion,
+                step_count, steps_succeeded,
+                protocol.template_id.as_deref(), self.config.audit_signer.as_deref(),
+            );
+            if let (Ok(line), Some(signer)) = (conclusion_line, self.config.audit_signer.as_deref()) {
+                if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let (Some(hash), Some(sig)) = (
+                        entry["entry_hash"].as_str(), entry["entry_sig_b64"].as_str(),
+                    ) {
+                        let pubkey_pem = rekor::ed25519_pubkey_pem(&signer.verifying_key_bytes());
+                        match rekor::submit_with_retry(hash, sig, &pubkey_pem).await {
+                            Ok(uuid) => {
+                                info!(rekor_uuid = %uuid, "resumed protocol anchored to Rekor");
+                                rekor_status = RekorStatus::Anchored { uuid };
+                            }
+                            Err(reason) => {
+                                error!(error = %reason, "Rekor anchoring failed for resumed protocol");
+                                rekor_status = RekorStatus::Failed { reason };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Spawn background ZK proof task.
+        let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
+
+        ProtocolRunResult {
+            protocol_id: protocol.id,
+            run_id,
+            protocol_name: protocol.name.clone(),
+            steps_total: step_count,
+            steps_succeeded,
+            conclusion,
+            step_results: all_step_results,
+            replicate_count: total_replicates as u32,
+            aggregate: None,
+            rekor_status,
+            zk_proof_status,
         }
     }
 
@@ -816,7 +1033,42 @@ impl<L: LlmBackend> Orchestrator<L> {
             });
         }
 
+        // ── Stage 0.5: Tool parameter schema validation ───────────────────
+        if let Some(schema) = self.tools.schema_for(tool_name) {
+            if !schema.is_null() {
+                match jsonschema::JSONSchema::compile(schema) {
+                    Ok(compiled) => {
+                        if let Err(errors) = compiled.validate(&params) {
+                            let msg = errors
+                                .map(|e: jsonschema::ValidationError<'_>| e.to_string())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            warn!(tool = tool_name, %msg, "params failed schema validation");
+                            self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                            self.emit_tool_event(tool_name, &params, "rejected", &msg);
+                            return Some(ToolResult {
+                                name: tool_name.to_owned(),
+                                output: serde_json::Value::String(format!(
+                                    "parameter validation failed: {msg}"
+                                )),
+                                success: false,
+                                metadata: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        warn!(tool = tool_name, error = %e, "tool has malformed schema — skipping validation");
+                    }
+                }
+            }
+        }
+
         let risk_class = risk_class_for_action(tool_name, &self.action_risk_index);
+
+        // Tracks the approval queue ID when an operator approves an interactive
+        // action.  Set in the approval path below; consumed at stage 5 to emit
+        // WAL entries and purge the sidecar after a confirmed dispatch.
+        let mut dispatched_pending_id: Option<String> = None;
 
         // ── Stage 1: Two-person approval ──────────────────────────────────
         if let (Some(policy), Some(ctx)) = (&self.config.approval_policy, &self.policy_context) {
@@ -851,8 +1103,12 @@ impl<L: LlmBackend> Orchestrator<L> {
                     )
                     .await;
 
-                    // Always remove from queue after waking, regardless of outcome.
-                    queue.remove(&pending_id);
+                    // Remove from the in-memory map; keep the sidecar file as a
+                    // WAL marker until dispatch_complete is confirmed at stage 5.
+                    // On denied/timeout/error paths below, the sidecar is removed
+                    // via queue.remove() which the error arms call explicitly.
+                    queue.dequeue_approved(&pending_id);
+                    dispatched_pending_id = Some(pending_id.clone());
 
                     // Determine the augmented params (with bundle injected) or deny.
                     let augmented = match bundle_result {
@@ -864,6 +1120,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                             warn!(%pending_id, %msg);
                             self.audit_decision(tool_name, "deny", &msg, false, None).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
+                            queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
                                 output: serde_json::Value::String(msg),
@@ -874,6 +1131,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         Ok(Err(_recv_err)) => {
                             let msg = "approval cancelled: server shutting down";
                             self.audit_decision(tool_name, "deny", msg, false, None).await;
+                            queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
                                 output: serde_json::Value::String(msg.into()),
@@ -886,6 +1144,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                             warn!(%pending_id, %msg);
                             self.audit_decision(tool_name, "deny", &msg, false, None).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
+                            queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
                                 output: serde_json::Value::String(msg),
@@ -914,6 +1173,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                                 if self.config.revocation_list.is_approval_revoked(aid) {
                                     let msg = format!("approval {aid} has been revoked");
                                     self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                                    queue.purge_sidecar(&pending_id);
                                     return Some(ToolResult {
                                         name: tool_name.to_owned(),
                                         output: serde_json::Value::String(msg),
@@ -933,6 +1193,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         Err(e) => {
                             self.audit_decision(tool_name, "deny", &e, false, None).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &e);
+                            queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
                                 output: serde_json::Value::String(e),
@@ -1062,11 +1323,79 @@ impl<L: LlmBackend> Orchestrator<L> {
 
         self.emit_tool_event(tool_name, &params, "success", "policy and sandbox checks passed");
 
+        // WAL: emit pending_dispatch before dispatching an operator-approved action.
+        // If the process crashes after this point but before dispatch_complete is written,
+        // the sidecar file on disk marks the action as stalled for recovery on restart.
+        if let Some(ref aid) = dispatched_pending_id {
+            if let Some(path) = &self.config.audit_log_path {
+                crate::audit::emit_pending_dispatch(
+                    path, aid, tool_name, &params, self.config.audit_signer.as_deref(),
+                ).ok();
+            }
+        }
+
         let call = ToolCall {
             name: tool_name.to_owned(),
             params,
         };
-        Some(self.tools.dispatch(&call).await)
+        let result = self.tools.dispatch(&call).await;
+
+        // WAL: emit dispatch_complete and purge sidecar after a successful dispatch.
+        if let Some(ref aid) = dispatched_pending_id {
+            if let Some(path) = &self.config.audit_log_path {
+                crate::audit::emit_dispatch_complete(
+                    path, aid, tool_name, self.config.audit_signer.as_deref(),
+                ).ok();
+            }
+            if let Some(queue) = &self.config.approval_queue {
+                queue.purge_sidecar(aid);
+            }
+        }
+
+        Some(result)
+    }
+
+    /// Spawn a background task that generates a ZK audit proof and submits it
+    /// to Base L2.  Returns the initial status (`Pending` or `Disabled`).
+    ///
+    /// The task logs its outcome at INFO/ERROR but does not update
+    /// `ProtocolRunResult` in place — callers use the event bus for that.
+    fn spawn_zk_proof_if_configured(
+        &self,
+        audit_log_path: &Option<String>,
+    ) -> ZkProofStatus {
+        // Require the audit log path and Base L2 config.
+        let path = match audit_log_path.clone() {
+            Some(p) => p,
+            None => return ZkProofStatus::Disabled,
+        };
+
+        let cfg = match zk_audit::ZkConfig::from_env() {
+            Some(c) => c,
+            None => {
+                info!(
+                    "AXIOMLAB_BASE_RPC_URL not set — ZK audit proof disabled. \
+                     Set BASE_RPC_URL, BASE_CONTRACT_ADDR, and BASE_WALLET_KEY to enable."
+                );
+                return ZkProofStatus::Disabled;
+            }
+        };
+
+        tokio::spawn(async move {
+            match zk_audit::prove_and_submit(&path, &cfg).await {
+                Ok(tx) => {
+                    info!(
+                        tx_hash = %tx,
+                        "ZK audit proof submitted to Base — https://basescan.org/tx/{tx}"
+                    );
+                }
+                Err(e) => {
+                    error!(error = %e, "ZK audit proof submission failed");
+                }
+            }
+        });
+
+        ZkProofStatus::Pending
     }
 
     async fn audit_decision(
@@ -1093,7 +1422,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         let mut payload_line = serde_json::to_string(&event).unwrap_or_default();
 
         if let Some(path) = &self.config.audit_log_path {
-            match emit_jsonl(path, &event, self.config.audit_signer.as_ref()) {
+            match emit_jsonl(path, &event, self.config.audit_signer.as_deref()) {
                 Ok(line) => payload_line = line,
                 Err(e) => warn!(error = %e, "failed to write local audit event"),
             }

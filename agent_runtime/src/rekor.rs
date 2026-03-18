@@ -78,6 +78,59 @@ pub fn ed25519_pubkey_pem(raw: &[u8; 32]) -> String {
     )
 }
 
+// ── Retry wrapper ─────────────────────────────────────────────────────────────
+
+/// Submit to Rekor with up to 2 attempts, a 30-second timeout per attempt,
+/// and a 5-second backoff between attempts.
+///
+/// Returns `Ok(uuid)` on the first success, or `Err(last_error)` if both
+/// attempts fail.  Callers that treat Rekor as required for a protocol
+/// conclusion should propagate the error rather than discarding it.
+pub async fn submit_with_retry(
+    hash_hex: &str,
+    sig_b64: &str,
+    pubkey_pem: &str,
+) -> Result<String, String> {
+    const MAX_ATTEMPTS: u32 = 2;
+    const TIMEOUT_SECS: u64 = 30;
+    const BACKOFF_SECS: u64 = 5;
+
+    let mut last_err = String::new();
+
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(BACKOFF_SECS)).await;
+        }
+
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(TIMEOUT_SECS),
+            anchor(hash_hex, sig_b64, pubkey_pem),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(anchor)) => return Ok(anchor.uuid),
+            Ok(Err(e)) => {
+                last_err = e.to_string();
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    error = %last_err,
+                    "Rekor submission failed"
+                );
+            }
+            Err(_elapsed) => {
+                last_err = format!("timeout after {TIMEOUT_SECS}s");
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    "Rekor submission timed out"
+                );
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
 // ── Rekor submission ──────────────────────────────────────────────────────────
 
 /// Submit a SHA-256 hash + Ed25519 signature to the Sigstore Rekor transparency log.

@@ -23,6 +23,7 @@ use tokio::time::{sleep, Duration};
 pub async fn run_loop(
     sink: Arc<WebSocketSink>,
     running: Arc<AtomicBool>,
+    stalled: Arc<AtomicBool>,
     iteration_counter: Arc<AtomicU32>,
     approval_queue: Arc<PendingApprovalQueue>,
 ) {
@@ -59,6 +60,16 @@ pub async fn run_loop(
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
+        }
+
+        // Block the loop when a stalled dispatch is awaiting operator resolution.
+        if stalled.load(Ordering::SeqCst) {
+            tracing::debug!(
+                "Exploration loop paused — stalled dispatch pending operator action at \
+                 POST /api/approvals/recover/<id> or POST /api/approvals/recover/<id>/cancel"
+            );
+            sleep(Duration::from_secs(5)).await;
+            continue;
         }
 
         iteration += 1;

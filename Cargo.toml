@@ -4,6 +4,7 @@ members = [
     "agent_runtime",
     "proof_artifacts",
     "server",
+    "zk_audit",
 ]
 resolver = "2"
 

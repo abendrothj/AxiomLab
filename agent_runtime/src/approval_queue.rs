@@ -225,11 +225,33 @@ impl PendingApprovalQueue {
         (pending_id, rx)
     }
 
-    /// Remove a pending entry.  Called by the orchestrator after the oneshot
-    /// resolves (whether by submit, timeout, or server shutdown) to prevent
-    /// stale entries accumulating in the map.
+    /// Remove a pending entry from the in-memory map and delete its sidecar.
+    ///
+    /// Use this for denied/timed-out/cancelled paths where no dispatch is
+    /// happening and the sidecar is no longer needed.
     pub fn remove(&self, pending_id: &str) {
         self.inner.lock().unwrap().remove(pending_id);
+        remove_sidecar(pending_id);
+    }
+
+    /// Remove a pending entry from the in-memory map but **keep the sidecar**.
+    ///
+    /// Call this when the operator approves an action and the orchestrator is
+    /// about to proceed through the remaining validation stages toward dispatch.
+    /// The sidecar must stay on disk as a WAL record so that if the process
+    /// crashes before `purge_sidecar` is called, the stall detector can find
+    /// and report the interrupted dispatch on the next startup.
+    pub fn dequeue_approved(&self, pending_id: &str) {
+        self.inner.lock().unwrap().remove(pending_id);
+        // Sidecar is intentionally NOT removed here — it is removed after
+        // emit_dispatch_complete via purge_sidecar().
+    }
+
+    /// Delete the on-disk sidecar for a completed dispatch.
+    ///
+    /// Call this after `emit_dispatch_complete` succeeds to signal that the
+    /// dispatch is fully resolved and the sidecar is no longer a recovery marker.
+    pub fn purge_sidecar(&self, pending_id: &str) {
         remove_sidecar(pending_id);
     }
 

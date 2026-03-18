@@ -116,6 +116,14 @@ impl ToolRegistry {
         &self.specs
     }
 
+    /// Return the JSON Schema for the named tool's parameters, if registered.
+    pub fn schema_for(&self, tool_name: &str) -> Option<&serde_json::Value> {
+        self.specs
+            .iter()
+            .find(|s| s.name == tool_name)
+            .map(|s| &s.parameters_schema)
+    }
+
     /// Dispatch a tool call.
     pub async fn dispatch(&self, call: &ToolCall) -> ToolResult {
         match self.handlers.get(&call.name) {
@@ -192,7 +200,7 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
             parameters_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "sensor_id": { "type": "string" }
+                    "sensor_id": { "type": "string", "enum": ["pH-1", "temp-1", "pressure-1"] }
                 },
                 "required": ["sensor_id"]
             }),
@@ -228,7 +236,7 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
             parameters_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "pump_id": { "type": "string" },
+                    "pump_id": { "type": "string", "enum": ["pump-A", "pump-B", "pump-C"] },
                     "volume_ul": { "type": "number" }
                 },
                 "required": ["pump_id", "volume_ul"]

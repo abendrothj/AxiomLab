@@ -1,4 +1,6 @@
 use crate::manifest::{ArtifactStatus, ProofArtifact, ProofManifest, RiskClass};
+use crate::signature::{verify_signed_manifest, SignedProofManifest, MANIFEST_SIGNING_PUBLIC_KEY};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -213,6 +215,67 @@ impl RuntimePolicyEngine {
 
     pub fn artifact_for(&self, id: &str) -> Option<&ProofArtifact> {
         self.manifest.artifacts.iter().find(|a| a.id == id)
+    }
+
+    /// Load and cryptographically verify a signed manifest file.
+    ///
+    /// Reads the JSON file at `path` and verifies the Ed25519 signature against
+    /// the embedded `MANIFEST_SIGNING_PUBLIC_KEY`. Returns a verified engine on
+    /// success, or an error message describing what failed.
+    ///
+    /// **Escape hatch (dev/CI only):** set `AXIOMLAB_SKIP_MANIFEST_VERIFY=1` to
+    /// skip signature verification with a loud warning. Never set this in production.
+    pub fn load_and_verify(path: &str) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read manifest {path}: {e}"))?;
+
+        let skip = std::env::var("AXIOMLAB_SKIP_MANIFEST_VERIFY").as_deref() == Ok("1");
+
+        // Try to parse as SignedProofManifest first.
+        match serde_json::from_str::<SignedProofManifest>(&raw) {
+            Ok(signed) => {
+                if skip {
+                    tracing::warn!(
+                        path,
+                        "AXIOMLAB_SKIP_MANIFEST_VERIFY=1 — skipping signature check. \
+                         NOT SAFE FOR PRODUCTION."
+                    );
+                    return Ok(RuntimePolicyEngine::new(signed.manifest).mark_signature_verified());
+                }
+
+                let pk_bytes = STANDARD
+                    .decode(MANIFEST_SIGNING_PUBLIC_KEY)
+                    .map_err(|e| format!("invalid MANIFEST_SIGNING_PUBLIC_KEY constant: {e}"))?;
+
+                verify_signed_manifest(&signed, &pk_bytes)
+                    .map_err(|e| format!("manifest signature verification failed: {e}"))?;
+
+                tracing::info!(path, key_id = %signed.signature.key_id, "Manifest signature verified");
+                Ok(RuntimePolicyEngine::new(signed.manifest).mark_signature_verified())
+            }
+            Err(_) => {
+                // Fall back: try unsigned ProofManifest (backwards compat).
+                if skip {
+                    let manifest = serde_json::from_str::<ProofManifest>(&raw)
+                        .map_err(|e| format!("failed to parse manifest {path}: {e}"))?;
+                    tracing::warn!(
+                        path,
+                        "AXIOMLAB_SKIP_MANIFEST_VERIFY=1 — loading unsigned manifest. \
+                         Sign it with: python3 vessel_physics/generate_manifest.py \
+                         --sign ~/Documents/axiomlab_manifest_signing.private"
+                    );
+                    return Ok(RuntimePolicyEngine::new(manifest).mark_signature_verified());
+                }
+
+                Err(format!(
+                    "manifest at {path} is unsigned or malformed. \
+                     Sign it with:\n  \
+                     python3 vessel_physics/generate_manifest.py \
+                     --sign ~/Documents/axiomlab_manifest_signing.private\n\
+                     Or bypass (dev/CI only) with: AXIOMLAB_SKIP_MANIFEST_VERIFY=1"
+                ))
+            }
+        }
     }
 }
 

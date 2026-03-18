@@ -1,0 +1,86 @@
+name: Verus Proof Verification
+
+on:
+  push:
+    paths:
+      - 'verus_verified/**'
+      - 'vessel_physics/**'
+      - 'proof_artifacts/**'
+  pull_request:
+    paths:
+      - 'verus_verified/**'
+      - 'vessel_physics/**'
+      - 'proof_artifacts/**'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Verus
+        uses: actions/cache@v4
+        with:
+          path: ~/verus
+          key: verus-0.2025.1.1
+
+      - name: Download Verus
+        run: |
+          if [ ! -f ~/verus/verus ]; then
+            wget -q https://github.com/verus-lang/verus/releases/download/v0.2025.1.1/verus-x86_64-unknown-linux-gnu.tar.gz
+            mkdir -p ~/verus
+            tar -xzf verus-*.tar.gz -C ~/verus
+            chmod +x ~/verus/verus
+          fi
+
+      - name: Verify proofs
+        run: |
+          ~/verus/verus verus_verified/vessel_registry.rs
+          ~/verus/verus verus_verified/lab_safety.rs
+          ~/verus/verus verus_verified/protocol_safety.rs
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install signing dependencies
+        run: pip install cryptography
+
+      - name: Regenerate manifest (unsigned, for freshness check)
+        run: python3 vessel_physics/generate_manifest.py --no-sign
+
+      - name: Check manifest freshness
+        run: |
+          python3 -c "
+          import hashlib, json, sys, os
+
+          def canonical_hash(path):
+              with open(path) as f:
+                  d = json.load(f)
+              # Strip signature field if present (signed manifest format)
+              manifest = d.get('manifest', d)
+              manifest.pop('signature', None)
+              return hashlib.sha256(
+                  json.dumps(manifest, sort_keys=True).encode()
+              ).hexdigest()
+
+          generated = 'proof_artifacts/vessel_physics_manifest.json.new'
+          committed  = 'proof_artifacts/vessel_physics_manifest.json'
+
+          if not os.path.exists(generated):
+              print('SKIP: generate_manifest.py did not produce .new file')
+              sys.exit(0)
+
+          gen_hash = canonical_hash(generated)
+          com_hash = canonical_hash(committed)
+
+          if gen_hash != com_hash:
+              print('FAIL: manifest is stale — re-run generate_manifest.py and commit')
+              print(f'  generated: {gen_hash}')
+              print(f'  committed:  {com_hash}')
+              sys.exit(1)
+
+          print('OK: manifest matches verified sources')
+          "

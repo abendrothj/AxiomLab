@@ -45,7 +45,7 @@ pub(crate) fn make_sila2_tools(
         ToolSpec {
             name: "dispense".into(),
             description: "Dispense liquid into a vessel (volume_ul, pump_id).".into(),
-            parameters_schema: serde_json::json!({"type":"object","properties":{"pump_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["pump_id","volume_ul"]}),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"pump_id":{"type":"string","enum":["pump-A","pump-B","pump-C"]},"volume_ul":{"type":"number"}},"required":["pump_id","volume_ul"]}),
             parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
@@ -60,7 +60,7 @@ pub(crate) fn make_sila2_tools(
         ToolSpec {
             name: "aspirate".into(),
             description: "Aspirate liquid from a vessel (source_vessel, volume_ul).".into(),
-            parameters_schema: serde_json::json!({"type":"object","properties":{"source_vessel":{"type":"string"},"volume_ul":{"type":"number"}},"required":["source_vessel","volume_ul"]}),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"source_vessel":{"type":"string","enum":["vessel-1","vessel-2","vessel-3"]},"volume_ul":{"type":"number"}},"required":["source_vessel","volume_ul"]}),
             parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
@@ -91,7 +91,7 @@ pub(crate) fn make_sila2_tools(
         ToolSpec {
             name: "read_absorbance".into(),
             description: "Read UV/Vis absorbance (vessel_id, wavelength_nm).".into(),
-            parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["vessel-1","vessel-2","vessel-3"]},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
             parameter_units: HashMap::new(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
@@ -162,7 +162,7 @@ pub(crate) fn make_sila2_tools(
         ToolSpec {
             name: "read_ph".into(),
             description: "Read pH value (sample_id).".into(),
-            parameters_schema: serde_json::json!({"type":"object","properties":{"sample_id":{"type":"string"}},"required":["sample_id"]}),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"sample_id":{"type":"string","enum":["vessel-1","vessel-2","vessel-3"]}},"required":["sample_id"]}),
             parameter_units: HashMap::new(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
@@ -175,7 +175,7 @@ pub(crate) fn make_sila2_tools(
         ToolSpec {
             name: "read_sensor".into(),
             description: "Read a named sensor value.".into(),
-            parameters_schema: serde_json::json!({"type":"object","properties":{"sensor_id":{"type":"string"}},"required":["sensor_id"]}),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"sensor_id":{"type":"string","enum":["pH-1","temp-1","pressure-1"]}},"required":["sensor_id"]}),
             parameter_units: HashMap::new(),
         },
         Box::new(|p| Box::pin(async move {
@@ -337,7 +337,7 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
             ToolSpec {
                 name: "dispense".into(),
                 description: "Dispense liquid into a vessel (vessel_id, volume_ul).".into(),
-                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
                 parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
             },
             Box::new(move |p| {
@@ -365,7 +365,7 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
             ToolSpec {
                 name: "aspirate".into(),
                 description: "Aspirate liquid from a vessel (vessel_id, volume_ul).".into(),
-                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
                 parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
             },
             Box::new(move |p| {
@@ -396,7 +396,7 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
                 description: "Read UV/Vis absorbance (vessel_id, wavelength_nm). \
                     Uses Beer-Lambert physics: A = ε × fill_fraction × path_length × \
                     Gaussian(λ, peak=500 nm, σ=150 nm) + 2% noise.".into(),
-                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
                 parameter_units: HashMap::new(),
             },
             Box::new(move |p| {
@@ -467,7 +467,7 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
     // ── static mocks for instruments that don't affect vessel volume ──────────
     let static_extras: &[(&str, &str, serde_json::Value, serde_json::Value)] = &[
         ("read_ph", "Read vessel pH.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"}},"required":["vessel_id"]}),
+            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]}},"required":["vessel_id"]}),
             serde_json::json!({"ph":7.2,"unit":"pH","source":"mock"})),
         ("read_temperature", "Read current incubator temperature.",
             serde_json::json!({"type":"object","properties":{}}),

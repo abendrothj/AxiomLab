@@ -11,9 +11,11 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 **Production path (server + agent_runtime + proof_artifacts + vessel_physics):**
 
 - **server** — Axum HTTP server with WebSocket event streaming, in-memory event buffer, and the continuous exploration loop that drives the agent.
-  - [server/src/main.rs](server/src/main.rs) — HTTP endpoints (`/ws`, `/api/status`, `/api/history`, `/api/journal`), audit log rotation on startup, session_start entry, Rekor checkpoint task
+  - [server/src/main.rs](server/src/main.rs) — HTTP endpoints (`/ws`, `/api/status`, `/api/history`, `/api/journal`, `/api/journal/findings`, `/api/audit`, `/api/audit/verify`), audit log rotation on startup, session_start entry, Rekor checkpoint task, stale approval sidecar cleanup on startup
   - [server/src/simulator.rs](server/src/simulator.rs) — Connects SiLA 2 clients, loads proof manifest, creates orchestrator, runs LLM loop
   - [server/src/ws_sink.rs](server/src/ws_sink.rs) — WebSocket broadcast sink + in-memory EventBuffer (up to 2000 events per type, reset on restart)
+  - [server/src/audit_query.rs](server/src/audit_query.rs) — `GET /api/audit` (filter by action/decision/since/limit, max 1000 events); `GET /api/audit/verify` (direct hash-chain verification)
+  - [server/src/simulator/protocol_library.rs](server/src/simulator/protocol_library.rs) — Static protocol template registry (`beer-lambert-scan-v1`, `ph-titration-v1`); template IDs recorded in audit chain
 
 - **agent_runtime** — The orchestrator, protocol executor, and all safety layers.
   - [agent_runtime/src/orchestrator.rs](agent_runtime/src/orchestrator.rs) — 5-stage validation pipeline (`try_tool_call`), LLM chat loop (`run_experiment`), protocol execution (`run_protocol`)
@@ -23,7 +25,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
   - [agent_runtime/src/sandbox.rs](agent_runtime/src/sandbox.rs) — Path/command allowlist enforcement
   - [agent_runtime/src/capabilities.rs](agent_runtime/src/capabilities.rs) — Numeric parameter bounds (volume, position, temperature, etc.)
   - [agent_runtime/src/approvals.rs](agent_runtime/src/approvals.rs) — Two-person Ed25519 approval records
-  - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — Hash-chained JSONL audit log, per-event Ed25519 signatures, log rotation (100 MB / daily), `session_start` cross-restart continuity chain, `emit_journal_finding` / `emit_journal_hypothesis` semantic events
+  - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — Hash-chained JSONL audit log, per-event Ed25519 signatures, log rotation (100 MB / daily), `session_start` cross-restart continuity chain, `emit_journal_finding` (with structured measurements + source field) / `emit_journal_hypothesis` / `emit_calibration` / `emit_protocol_step` (with vessel snapshot) / `emit_protocol_conclusion` (with template_id) semantic events
   - [agent_runtime/src/rekor.rs](agent_runtime/src/rekor.rs) — Sigstore Rekor transparency-log anchoring: protocol conclusions + 15-minute chain-tip checkpoints
   - [agent_runtime/src/tools.rs](agent_runtime/src/tools.rs) — ToolCall/ToolResult types, ToolRegistry for dispatch
   - [agent_runtime/src/llm.rs](agent_runtime/src/llm.rs) — LLM client (OpenAI-compatible API)
@@ -44,7 +46,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 
 **Scientific compute (wired into agent loop):**
 
-- **scientific_compute** — Pure-Rust numerics: `nalgebra` linear algebra, `rustfft` FFT, OLS regression, Hill equation fitting (gradient descent), Michaelis-Menten enzyme kinetics, Welch t-test, AIC model selection. Exposed to the LLM via the `analyze_series` tool — the LLM collects raw readings then calls `analyze_series` to get `{"linear": {"slope": ..., "r_squared": ...}, "hill": {"ec50": ..., "aic": ...}, "recommended_model": "..."}` back.
+- **scientific_compute** — Pure-Rust numerics: `nalgebra` linear algebra, `rustfft` FFT, OLS regression, Hill equation fitting (gradient descent), Michaelis-Menten enzyme kinetics, Welch t-test, AIC model selection. Exposed to the LLM via the `analyze_series` tool — the LLM collects raw readings then calls `analyze_series` to get `{"linear": {"slope": ..., "r_squared": ...}, "hill": {"ec50": ..., "aic": ...}, "recommended_model": "..."}` back. When R² ≥ 0.80 (linear) or EC50 > 0 (Hill), the runtime auto-records a `source: "system"` finding with typed `Measurement` structs in the discovery journal and emits a signed audit entry.
 - **physical_types** — Compile-time dimensional analysis via `uom`
 
 **Formal verification tooling (requires external toolchains):**
@@ -204,7 +206,7 @@ The audit log is at `$AXIOMLAB_DATA_DIR/audit/runtime_audit.jsonl` (default: `.a
 
 **Rekor checkpoints**: Every 15 minutes (when `AXIOMLAB_AUDIT_SIGNING_KEY` is set), the current chain tip hash is signed and submitted to Sigstore Rekor. The returned UUID and integrated timestamp are written back into the chain as a `rekor_checkpoint` entry, providing an external cryptographic witness.
 
-**Semantic journal events**: When the LLM calls `update_journal`, dedicated `journal_finding` and `journal_hypothesis` audit entries are written alongside the journal JSON file — the scientific record is typed in the audit chain, not just buried in generic tool-call params.
+**Semantic journal events**: When the LLM calls `update_journal`, dedicated `journal_finding` and `journal_hypothesis` audit entries are written. `journal_finding` entries include structured `measurements_json` (typed numeric results) and a `source` field (`"system"` for auto-recorded curve-fit findings, `"llm"` for LLM-curated ones). `calibrate_ph` emits a `calibration` entry. Protocol step entries include a `vessel_snapshot` of pre-operation volumes for physical chain-of-custody.
 
 **Verify chain integrity:**
 
@@ -212,7 +214,20 @@ The audit log is at `$AXIOMLAB_DATA_DIR/audit/runtime_audit.jsonl` (default: `.a
 cargo run -p agent_runtime --bin auditctl -- verify --path .artifacts/audit/runtime_audit.jsonl
 ```
 
-### 3.5 Verify Signed Manifest
+### 3.5 Query the Audit Log
+
+```bash
+# Return all calibration events
+curl "http://localhost:3000/api/audit?action=calibration"
+
+# Return the last 50 denied actions since a Unix timestamp
+curl "http://localhost:3000/api/audit?decision=deny&since=1700000000&limit=50"
+
+# Verify hash chain integrity (returns {"verified": true} or {"verified": false, "error": "..."})
+curl "http://localhost:3000/api/audit/verify"
+```
+
+### 3.7 Verify Signed Manifest
 
 ```bash
 cargo run -p proof_artifacts --bin proofctl -- verify \
@@ -220,7 +235,7 @@ cargo run -p proof_artifacts --bin proofctl -- verify \
   --public-key .artifacts/proof/manifest_signing_key.public.b64
 ```
 
-### 3.6 Verify Rekor Anchor
+### 3.8 Verify Rekor Anchor
 
 After a protocol run, the Rekor UUID is logged at INFO level. To verify independently:
 
@@ -232,7 +247,7 @@ rekor-cli verify --uuid <uuid> --artifact-hash <sha256_hex>
 curl https://rekor.sigstore.dev/api/v1/log/entries/<uuid>
 ```
 
-### 3.7 Environment Variables
+### 3.9 Environment Variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -245,7 +260,7 @@ curl https://rekor.sigstore.dev/api/v1/log/entries/<uuid>
 | `AXIOMLAB_AUDIT_SIGNING_KEY` | — | Base64-encoded Ed25519 private key for per-event audit signatures and Rekor anchoring. If unset, events are unsigned and Rekor checkpointing is disabled. |
 | `AXIOMLAB_GIT_COMMIT` | `dev` | Git commit SHA embedded in session_start audit entry and proof manifest build identity. |
 
-### 3.8 Platform Notes
+### 3.10 Platform Notes
 
 - **macOS ARM64 (Apple Silicon):** Full Verus support via native ARM64 binary (`~/verus/verus`). Requires Rust toolchain `1.94.0-aarch64-apple-darwin`. All integration tests work.
 - **Linux x86-64:** Full Verus support via native x86-64 binary. All features work.
@@ -268,7 +283,11 @@ Before running high-risk actions:
 
 1. Persist the Ed25519 audit signing key across restarts (HSM or sealed storage) so chain continuity can be cryptographically proved end-to-end.
 2. Restrict trusted policy-engine constructor usage to test-only contexts.
-3. Replace hardware simulation with injected production driver traits.
-4. Extend integration tests to enforce signed-manifest-only authorization path.
-5. Add multi-agent coordination layer for parallel instrument utilization.
-6. Add an external audit mirror: periodically commit the JSONL audit log to an orphan git branch or push chain-tip hashes to a Gist to survive local disk failure (Rekor proves hashes existed; this preserves readable content).
+3. Replace hardware simulation with injected production driver traits (trait-based `SensorDriver` injection behind a `--feature hardware` gate).
+4. Extend integration tests to enforce signed-manifest-only authorization path; add rejection-path tests for all 5 pipeline stages.
+5. Make approval sidecar write + dispatch atomic (write sidecar → dispatch → delete; recovery on restart replays the dispatch rather than dropping it).
+6. Add a CI gate that verifies the committed `vessel_physics_manifest.json` was generated from the current `verus_verified/*.rs` sources (hash check).
+7. Add Rekor submission retry queue so a network outage at conclusion time doesn't silently drop the external witness.
+8. Validate string tool parameters (e.g., `pump_id`, `sensor_id`) against an allowed set at the capability stage to close injection surface.
+9. Add multi-agent coordination layer for parallel instrument utilization.
+10. Add an external audit mirror: periodically commit the JSONL audit log to an orphan git branch or push chain-tip hashes to a Gist to survive local disk failure (Rekor proves hashes existed; this preserves readable content).

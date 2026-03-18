@@ -17,8 +17,12 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 uuid = { workspace = true }
 rand = { workspace = true }
+dirs = "5"
 scientific_compute = { path = "../scientific_compute" }
 proof_artifacts = { path = "../proof_artifacts" }
+zk_audit = { path = "../zk_audit" }
+jsonschema = "0.18"
+libc = { version = "0.2", optional = true }
 tonic = "0.12"
 prost = "0.13"
 
@@ -28,6 +32,11 @@ prost-build = "0.13"
 
 [features]
 hardware = []
+# Enable kernel-level append-only flag on the audit log inode (Linux only).
+# Requires the process to have CAP_LINUX_IMMUTABLE or to be run as root.
+# If the ioctl fails (permission denied, unsupported fs), a single WARN is
+# logged and execution continues — never panics.
+append-enforce = ["libc"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

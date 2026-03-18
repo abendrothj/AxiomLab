@@ -177,6 +177,32 @@ impl ReplicateAggregate {
     }
 }
 
+/// Status of the ZK audit proof generation and Base L2 submission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ZkProofStatus {
+    /// Proof task spawned — result not yet available (async background task).
+    Pending,
+    /// Proof generated and submitted to Base; `tx_hash` links to basescan.org.
+    Verified { tx_hash: String },
+    /// Proof generation or submission failed.
+    Failed { reason: String },
+    /// ZK proving is disabled (`AXIOMLAB_BASE_RPC_URL` not set or
+    /// crate built without `prove`/`onchain` features).
+    Disabled,
+}
+
+/// Whether the protocol conclusion was successfully anchored to the Sigstore
+/// Rekor transparency log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RekorStatus {
+    /// Conclusion hash anchored; `uuid` links to the Rekor log entry.
+    Anchored { uuid: String },
+    /// All Rekor attempts failed.  Local audit chain is still intact.
+    Failed { reason: String },
+    /// No audit signer configured — Rekor submission skipped.
+    Skipped,
+}
+
 /// The complete result of running a protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolRunResult {
@@ -192,6 +218,41 @@ pub struct ProtocolRunResult {
     pub replicate_count: u32,
     /// Aggregate statistics across replicates; `None` for single-replicate runs.
     pub aggregate: Option<ReplicateAggregate>,
+    /// Rekor transparency-log anchoring status for this conclusion.
+    pub rekor_status: RekorStatus,
+    /// ZK audit proof status; `Pending` until the background task completes.
+    pub zk_proof_status: ZkProofStatus,
+}
+
+// ── Protocol recovery types ───────────────────────────────────────────────────
+
+/// Partial run state reconstructed from the audit log.
+///
+/// Used by [`scan_for_protocol_state`][crate::audit::scan_for_protocol_state]
+/// to find the last confirmed step so that `resume_protocol` can continue from
+/// the next step without re-executing already-dispatched actions.
+#[derive(Debug, Clone)]
+pub struct ProtocolRecoveryState {
+    pub protocol_id: Uuid,
+    pub run_id: Uuid,
+    /// 0-based index of the last step that was allowed and dispatched.
+    pub last_completed_step: usize,
+    pub replicate_index: usize,
+    /// Raw JSON output values from completed steps, in order.
+    pub step_results: Vec<serde_json::Value>,
+}
+
+/// Result of scanning the audit log for a protocol's execution state.
+#[derive(Debug)]
+pub enum ProtocolScanResult {
+    /// A `protocol_conclusion` entry exists — the run completed normally.
+    Complete,
+    /// Steps were started but no conclusion was written — can resume.
+    Interrupted(ProtocolRecoveryState),
+    /// The audit hash chain failed verification — unsafe to trust the log.
+    ChainInvalid(String),
+    /// No `protocol_step` entries were found for this protocol_id.
+    NotFound,
 }
 
 // ── JSON schema for propose_protocol ─────────────────────────────────────────

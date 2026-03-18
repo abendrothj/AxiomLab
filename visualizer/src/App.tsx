@@ -6,6 +6,9 @@ import {
 } from "./types";
 import { eventBus } from "./eventBus";
 import BlueprintGraph from "./components/BlueprintGraph";
+import ChainExplorer from "./pages/ChainExplorer";
+
+type Tab = "dashboard" | "chain";
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
@@ -58,6 +61,7 @@ function summarise(tool: string, params: Record<string, unknown>, status: string
 // ── Root component ────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [tab, setTab]               = useState<Tab>("dashboard");
   const [stage, setStage]           = useState<Stage>("");
   const [iteration, setIteration]   = useState(0);
   const [connected, setConnected]   = useState(false);
@@ -133,38 +137,47 @@ export default function App() {
       color: "#e2e8f0",
       overflow: "hidden",
     }}>
-      <Header stage={stage} stageColor={stageColor} iteration={iteration} connected={connected} />
+      <Header
+        stage={stage} stageColor={stageColor}
+        iteration={iteration} connected={connected}
+        tab={tab} onTabChange={setTab}
+      />
 
-      <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
-        <LivePanel
-          toolEvents={toolEvents}
-          stage={stage}
-          stageColor={stageColor}
-          thinking={thinking}
-        />
-        <div style={{ width: 1, background: "#111824", flexShrink: 0 }} />
+      {tab === "dashboard" ? (
+        <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
+          <LivePanel
+            toolEvents={toolEvents}
+            stage={stage}
+            stageColor={stageColor}
+            thinking={thinking}
+          />
+          <div style={{ width: 1, background: "#111824", flexShrink: 0 }} />
 
-        {/* Blueprint */}
-        <div style={{ width: "30%", display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
-          <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid #0e1520", flexShrink: 0 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.14em", color: "#e2e8f0" }}>BLUEPRINT</span>
+          {/* Blueprint */}
+          <div style={{ width: "30%", display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
+            <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid #0e1520", flexShrink: 0 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.14em", color: "#e2e8f0" }}>BLUEPRINT</span>
+            </div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <BlueprintGraph transitions={transitions} />
+            </div>
           </div>
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <BlueprintGraph transitions={transitions} />
-          </div>
+
+          <div style={{ width: 1, background: "#111824", flexShrink: 0 }} />
+          <DiscoveriesPanel notebook={notebook} />
         </div>
-
-        <div style={{ width: 1, background: "#111824", flexShrink: 0 }} />
-        <DiscoveriesPanel notebook={notebook} />
-      </div>
+      ) : (
+        <ChainExplorer />
+      )}
     </div>
   );
 }
 
 // ── Header ────────────────────────────────────────────────────────────────────
 
-function Header({ stage, stageColor, iteration, connected }: {
+function Header({ stage, stageColor, iteration, connected, tab, onTabChange }: {
   stage: string; stageColor: string; iteration: number; connected: boolean;
+  tab: Tab; onTabChange: (t: Tab) => void;
 }) {
   return (
     <div style={{
@@ -190,32 +203,57 @@ function Header({ stage, stageColor, iteration, connected }: {
         AXIOMLAB
       </div>
 
-      {/* Center: stage + iteration */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        {iteration > 0 && (
-          <span style={{
-            fontSize: 10, color: "#2a4a6a", letterSpacing: "0.1em",
-            background: "rgba(10,20,35,0.6)", padding: "3px 10px",
-            borderRadius: 3, border: "1px solid #1a2a3a",
-          }}>
-            ITER {iteration}
-          </span>
-        )}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 7,
-          padding: "4px 12px",
-          border: `1px solid ${stageColor}33`,
-          borderRadius: 3,
-          background: `${stageColor}0a`,
-          fontSize: 11, letterSpacing: "0.08em", color: stageColor,
-        }}>
-          <span style={{
-            width: 6, height: 6, borderRadius: "50%", background: stageColor,
-            boxShadow: stage ? `0 0 7px ${stageColor}` : "none",
-          }} />
-          {stage || "INITIALISING"}
-        </div>
+      {/* Tab bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        {(["dashboard", "chain"] as Tab[]).map((t) => (
+          <button
+            key={t}
+            onClick={() => onTabChange(t)}
+            style={{
+              background: tab === t ? "#0f1a26" : "transparent",
+              border: `1px solid ${tab === t ? "#1a3a50" : "transparent"}`,
+              borderRadius: 3,
+              color: tab === t ? "#00d4ff" : "#2a4a5a",
+              fontSize: 9, letterSpacing: "0.12em",
+              padding: "4px 12px",
+              cursor: "pointer",
+              fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+              transition: "color 0.15s, border-color 0.15s",
+            }}
+          >
+            {t === "dashboard" ? "DASHBOARD" : "CHAIN EXPLORER"}
+          </button>
+        ))}
       </div>
+
+      {/* Center: stage + iteration (dashboard only) */}
+      {tab === "dashboard" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {iteration > 0 && (
+            <span style={{
+              fontSize: 10, color: "#2a4a6a", letterSpacing: "0.1em",
+              background: "rgba(10,20,35,0.6)", padding: "3px 10px",
+              borderRadius: 3, border: "1px solid #1a2a3a",
+            }}>
+              ITER {iteration}
+            </span>
+          )}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 7,
+            padding: "4px 12px",
+            border: `1px solid ${stageColor}33`,
+            borderRadius: 3,
+            background: `${stageColor}0a`,
+            fontSize: 11, letterSpacing: "0.08em", color: stageColor,
+          }}>
+            <span style={{
+              width: 6, height: 6, borderRadius: "50%", background: stageColor,
+              boxShadow: stage ? `0 0 7px ${stageColor}` : "none",
+            }} />
+            {stage || "INITIALISING"}
+          </div>
+        </div>
+      )}
 
       {/* Connection */}
       <div style={{

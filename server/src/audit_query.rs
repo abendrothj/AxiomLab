@@ -1,12 +1,13 @@
 //! HTTP handlers for querying and verifying the audit log.
 //!
-//! `GET /api/audit`       — filter events by action / decision / since / limit
+//! `GET /api/audit`        — filter events by action / decision / since / limit
 //! `GET /api/audit/verify` — verify the full hash chain, returning `{verified: true}` or an error
+//! `GET /api/audit/raw`    — return the full JSONL audit log as `text/plain`
 
 use agent_runtime::audit::{audit_log_path, verify_chain};
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -96,6 +97,34 @@ pub async fn audit_query_handler(
     }
 
     Json(serde_json::json!(results))
+}
+
+/// `GET /api/audit/raw` — return the full JSONL audit log as `text/plain`.
+///
+/// Used by the Chain Explorer's "Download full log" button.
+/// Returns 404 with a JSON error if the log file does not yet exist.
+pub async fn audit_raw_handler(_state: State<AppState>) -> impl IntoResponse {
+    let path = audit_log_path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            content,
+        )
+            .into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "audit log not found\n".to_string(),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("error reading audit log: {e}\n"),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /api/audit/verify` — verify the hash chain integrity.

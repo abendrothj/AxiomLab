@@ -15,9 +15,19 @@ AxiomLab is a working prototype of an autonomous science agent. An LLM (local Ol
 - **Closed proof chain** — LLM intent → Rust proof gate (reads `vessel_physics_manifest.json`) → PyO3 boundary → `proved_add`/`proved_sub` (Z3-verified integer arithmetic) → SiLA 2 gRPC
 - **Proof-policy gating** — Verus verification artifacts gate high-risk actions (actuation, liquid handling); read-only actions pass without proofs
 - **Structured experiment protocols** — LLM proposes `ProtocolPlan` (name, hypothesis, ordered steps); a `ProtocolExecutor` iterates steps through the full 5-stage pipeline, feeds observations back to the LLM for adaptation, then requests a signed conclusion
+- **Protocol replication** — `replicate_count` (1–10) on `ProtocolPlan` reruns all steps N times; `ReplicateAggregate` computes mean ± SD of steps-succeeded across replicates and is included in the signed conclusion
 - **Per-event Ed25519 audit signatures** — every audit record (including protocol step records and conclusion records) is individually signed and hash-chained into an append-only JSONL log
+- **Vessel state in audit chain** — dispense and aspirate embed a pre-operation vessel snapshot in the audit record (stripped before the LLM sees the output), providing a physical chain of custody for liquid volumes
 - **Sigstore Rekor anchoring** — protocol conclusions are submitted to the public Rekor transparency log; the UUID and integrated timestamp provide an external, independently verifiable timestamp
 - **Scientific compute in the loop** — `analyze_series` tool lets the LLM submit raw (x, y) data points and receive structured fit results: OLS slope/R², Hill EC50/E_max, Michaelis-Menten Vmax/Km, AIC-based model recommendation
+- **Auto-findings from curve fits** — when `analyze_series` produces a linear R² ≥ 0.80 or a valid Hill fit, the runtime auto-records a `source: "system"` finding in the discovery journal with typed `Measurement` structs (value, unit, uncertainty) rather than prose strings, and emits a signed audit entry
+- **Structured measurements in findings** — every `Finding` carries a `Vec<Measurement> { parameter, value, unit, uncertainty }` so numeric results are queryable, not just readable
+- **Calibration log** — `calibrate_ph` records a `CalibrationRecord` in the discovery journal and emits a signed `calibration` audit event; calibration age and offset are injected into every LLM mandate
+- **Parameter-space coverage tracking** — numeric tool inputs (e.g., absorbance wavelengths) are logged as `ParameterProbe` records (capped at 500); `coverage_summary_for_llm()` injects `[min, max] · N values` per parameter into the mandate
+- **Unit metadata on tool schemas** — `ToolSpec.parameter_units` annotates every numeric parameter with its physical unit (e.g., `volume_ul → µL`, `x → mm`); injected into the LLM system prompt as `param [unit]` notes
+- **Protocol template registry** — `server/src/simulator/protocol_library.rs` registers canonical protocol templates (beer-lambert-scan-v1, ph-titration-v1) that can be referenced by `template_id` in `ProtocolPlan`; template ID is recorded in the audit chain for reproducibility
+- **Approval sidecar persistence** — pending approvals are written to `.artifacts/approvals/{id}.json` on enqueue and deleted on resolution; stale sidecars from a crashed run are detected and warned on startup
+- **Audit query API** — `GET /api/audit?action=&decision=&since=&limit=` streams the JSONL audit log with server-side filtering; `GET /api/audit/verify` verifies the full hash chain without spawning a subprocess
 - **Hypothesis lifecycle** — discovery journal tracks proposed → testing → confirmed / rejected; outer loop detects convergence (all hypotheses settled) and slows down, avoiding repeated experiments
 - **Continuous autonomous loop** — LLM proposes → orchestrator validates → hardware executes → results feed back → LLM analyzes → journal records → LLM proposes next
 - **Web visualizer** — real-time WebSocket dashboard with activity feed, state graph, and discovery journal
@@ -191,6 +201,8 @@ Protocol-level invariants: step count bounded, total volume bounded, dilution se
 | **Simulated hardware** | The SiLA 2 server returns simulated values. No real instruments have been connected. |
 | **Local LLM** | qwen2.5-coder:7b is sufficient for structured tool calls but not for novel scientific reasoning. Discovery quality is model-dependent. |
 | **Single-agent** | One LLM loop, one hardware pool. No multi-agent coordination. |
+| **Replication aggregate is step-count only** | `ReplicateAggregate` reports mean ± SD of *steps succeeded* per replicate, not inter-replicate variability in the measurements themselves (e.g., SD of absorbance readings across replicates). |
+| **Calibration is advisory** | The mandate warns when the pH meter calibration is stale, but no tool blocks a `read_ph` call if recalibration hasn't been performed. |
 | **Audit is local + Rekor-anchored** | Each event is Ed25519-signed and hash-chained. Protocol conclusions and 15-minute chain-tip checkpoints are submitted to Sigstore Rekor. Log rotation (100 MB / daily) and cross-restart `session_start` chaining are implemented. A complete chain rewrite with a fresh key still passes local checks — HSM-backed keys and an external content mirror are needed for production. |
 | **Key management** | Ed25519 signing is implemented but key custody, rotation, and revocation are manual. |
 

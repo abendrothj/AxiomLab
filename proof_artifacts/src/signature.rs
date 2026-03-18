@@ -6,6 +6,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Embedded manifest-signing public key (Ed25519, base64).
+///
+/// Generated with: `cargo run -p proof_artifacts --bin keygen`
+/// The corresponding private key is at ~/Documents/axiomlab_manifest_signing.private
+///
+/// To rotate: delete the private key file, run keygen again, paste the new public
+/// key here, re-sign the manifest with:
+///   python3 vessel_physics/generate_manifest.py --sign ~/Documents/axiomlab_manifest_signing.private
+pub const MANIFEST_SIGNING_PUBLIC_KEY: &str =
+    "uosEBKUMFKXGSaE7w0Quk67C6Ab9KUagim0uaicKB1o=";
+
 /// Signatures provide cryptographic provenance.
 /// SECURITY: Implement HSM/KMS signing and key rotation. See OPERATOR_GUIDE.md.
 
