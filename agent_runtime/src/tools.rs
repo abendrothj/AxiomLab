@@ -36,6 +36,26 @@ pub struct ToolResult {
     pub name: String,
     pub output: serde_json::Value,
     pub success: bool,
+    /// Optional side-channel metadata from the tool handler.
+    ///
+    /// Used to carry information that is useful for auditing or orchestration
+    /// but should not appear in the LLM context.  For example, `dispense` and
+    /// `aspirate` embed a `"_vessel_snapshot"` key here so `run_protocol` can
+    /// include the pre-operation lab state in the audit chain without polluting
+    /// the tool result the LLM sees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl Default for ToolResult {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            output: serde_json::Value::Null,
+            success: false,
+            metadata: None,
+        }
+    }
 }
 
 /// A boxed async handler: `params → Result<output, error_msg>`.
@@ -51,6 +71,22 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub parameters_schema: serde_json::Value,
+    /// Physical units for numeric parameters, e.g. `{"volume_ul": "µL", "x": "mm"}`.
+    /// Injected into the LLM system prompt so the model knows the expected unit for
+    /// each numeric argument.  Empty map means no unit annotations.
+    #[serde(default)]
+    pub parameter_units: HashMap<String, String>,
+}
+
+impl Default for ToolSpec {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            parameters_schema: serde_json::Value::Null,
+            parameter_units: HashMap::new(),
+        }
+    }
 }
 
 // ── Registry ─────────────────────────────────────────────────────
@@ -88,17 +124,20 @@ impl ToolRegistry {
                     name: call.name.clone(),
                     output,
                     success: true,
+                    metadata: None,
                 },
                 Err(e) => ToolResult {
                     name: call.name.clone(),
                     output: serde_json::Value::String(e),
                     success: false,
+                    metadata: None,
                 },
             },
             None => ToolResult {
                 name: call.name.clone(),
                 output: serde_json::Value::String(format!("tool not found: {}", call.name)),
                 success: false,
+                metadata: None,
             },
         }
     }
@@ -128,6 +167,11 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
                 },
                 "required": ["x", "y", "z"]
             }),
+            parameter_units: [
+                ("x".into(), "mm".into()),
+                ("y".into(), "mm".into()),
+                ("z".into(), "mm".into()),
+            ].into_iter().collect(),
         },
         Box::new(|params| {
             Box::pin(async move {
@@ -152,6 +196,7 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
                 },
                 "required": ["sensor_id"]
             }),
+            parameter_units: HashMap::new(),
         },
         Box::new(|params| {
             Box::pin(async move {
@@ -188,6 +233,7 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
                 },
                 "required": ["pump_id", "volume_ul"]
             }),
+            parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
         },
         Box::new(|params| {
             Box::pin(async move {

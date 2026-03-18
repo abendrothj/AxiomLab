@@ -41,6 +41,11 @@ pub struct Protocol {
     pub steps: Vec<ProtocolStep>,
     /// Unix timestamp (seconds) when this protocol was created.
     pub created_at_utc: i64,
+    /// Number of times to run the full step sequence (≥ 1).
+    pub replicate_count: u32,
+    /// Optional canonical protocol template ID (e.g. "beer-lambert-scan-v1").
+    /// `None` for fully custom, ad-hoc protocols.
+    pub template_id: Option<String>,
 }
 
 /// The JSON shape the LLM emits when calling `propose_protocol`.
@@ -55,7 +60,19 @@ pub struct ProtocolPlan {
     pub hypothesis: String,
     /// Ordered steps to execute (max [`MAX_PROTOCOL_STEPS`]).
     pub steps: Vec<ProtocolStep>,
+    /// Number of times to run the full step sequence for replication (default 1, max 10).
+    ///
+    /// Use > 1 to get defensible statistics (mean ± SD across replicates).
+    /// Each replicate re-runs all steps in order; include a vessel-reset step
+    /// (aspirate back to 0) at the start when the vessel must start clean.
+    #[serde(default = "default_replicate_count")]
+    pub replicate_count: u32,
+    /// Optional canonical protocol template ID for reproducibility tracking.
+    #[serde(default)]
+    pub template_id: Option<String>,
 }
+
+fn default_replicate_count() -> u32 { 1 }
 
 impl ProtocolPlan {
     /// Validate the plan. Returns `Err` with a human-readable reason on failure.
@@ -74,6 +91,12 @@ impl ProtocolPlan {
                 "protocol has {} steps; maximum is {}",
                 self.steps.len(),
                 MAX_PROTOCOL_STEPS
+            ));
+        }
+        if self.replicate_count < 1 || self.replicate_count > 10 {
+            return Err(format!(
+                "replicate_count must be between 1 and 10, got {}",
+                self.replicate_count
             ));
         }
         for (i, step) in self.steps.iter().enumerate() {
@@ -106,6 +129,8 @@ impl ProtocolPlan {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64,
+            replicate_count: self.replicate_count,
+            template_id: self.template_id,
         }
     }
 }
@@ -116,6 +141,7 @@ impl ProtocolPlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepOutcome {
     pub step_index: usize,
+    pub replicate_index: usize,
     pub tool: String,
     pub description: String,
     /// `true` if the 5-stage pipeline allowed the action and the tool succeeded.
@@ -124,6 +150,31 @@ pub struct StepOutcome {
     pub result: Option<serde_json::Value>,
     /// Human-readable rejection reason, present when not allowed.
     pub rejection_reason: Option<String>,
+}
+
+/// Per-replicate and aggregate statistics for multi-replicate protocol runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicateAggregate {
+    /// Steps succeeded per replicate (same order as replicate index).
+    pub steps_succeeded_counts: Vec<usize>,
+    pub mean_steps_succeeded: f64,
+    pub sd_steps_succeeded: f64,
+}
+
+impl ReplicateAggregate {
+    pub fn from_counts(counts: &[usize]) -> Self {
+        let n = counts.len() as f64;
+        let mean = counts.iter().sum::<usize>() as f64 / n.max(1.0);
+        let variance = counts.iter()
+            .map(|&c| (c as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n.max(1.0);
+        Self {
+            steps_succeeded_counts: counts.to_vec(),
+            mean_steps_succeeded: mean,
+            sd_steps_succeeded: variance.sqrt(),
+        }
+    }
 }
 
 /// The complete result of running a protocol.
@@ -137,6 +188,10 @@ pub struct ProtocolRunResult {
     /// The LLM's scientific conclusion after observing all step results.
     pub conclusion: String,
     pub step_results: Vec<StepOutcome>,
+    /// Number of replicates executed.
+    pub replicate_count: u32,
+    /// Aggregate statistics across replicates; `None` for single-replicate runs.
+    pub aggregate: Option<ReplicateAggregate>,
 }
 
 // ── JSON schema for propose_protocol ─────────────────────────────────────────
@@ -178,6 +233,17 @@ pub fn propose_protocol_schema() -> serde_json::Value {
                     },
                     "required": ["tool", "params", "description"]
                 }
+            },
+            "replicate_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10,
+                "default": 1,
+                "description": "Number of times to run the full step sequence. Use >1 for defensible statistics (mean ± SD). Include a vessel-reset step when needed."
+            },
+            "template_id": {
+                "type": "string",
+                "description": "Optional: reference a canonical protocol template by ID (e.g. 'beer-lambert-scan-v1') for reproducibility tracking. Leave null for fully custom protocols."
             }
         },
         "required": ["name", "hypothesis", "steps"]
@@ -199,6 +265,8 @@ mod tests {
                 params: serde_json::json!({"pump_id": "beaker_A", "volume_ul": 100.0}),
                 description: "Dispense 100 µL into beaker A".into(),
             }],
+            replicate_count: 1,
+            template_id: None,
         }
     }
 
@@ -250,5 +318,50 @@ mod tests {
         assert!(!proto.id.to_string().is_empty());
         assert!(proto.created_at_utc > 0);
         assert_eq!(proto.steps.len(), 1);
+        assert_eq!(proto.replicate_count, 1);
+        assert!(proto.template_id.is_none());
+    }
+
+    #[test]
+    fn replicate_count_zero_rejected() {
+        let mut p = minimal_plan();
+        p.replicate_count = 0;
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn replicate_count_eleven_rejected() {
+        let mut p = minimal_plan();
+        p.replicate_count = 11;
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn replicate_count_ten_accepted() {
+        let mut p = minimal_plan();
+        p.replicate_count = 10;
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn replicate_aggregate_uniform_counts() {
+        let agg = ReplicateAggregate::from_counts(&[2, 2, 2]);
+        assert!((agg.mean_steps_succeeded - 2.0).abs() < 1e-9);
+        assert!(agg.sd_steps_succeeded.abs() < 1e-9);
+    }
+
+    #[test]
+    fn replicate_aggregate_varied_counts() {
+        let agg = ReplicateAggregate::from_counts(&[1, 3]);
+        assert!((agg.mean_steps_succeeded - 2.0).abs() < 1e-9);
+        assert!(agg.sd_steps_succeeded > 0.0);
+    }
+
+    #[test]
+    fn template_id_round_trips() {
+        let mut p = minimal_plan();
+        p.template_id = Some("beer-lambert-scan-v1".into());
+        let proto = p.into_protocol();
+        assert_eq!(proto.template_id.as_deref(), Some("beer-lambert-scan-v1"));
     }
 }

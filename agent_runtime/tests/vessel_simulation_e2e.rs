@@ -71,6 +71,7 @@ fn register_lab_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>) {
             name: "dispense".into(),
             description: "Dispense liquid via SiLA 2 LiquidHandler".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -89,6 +90,7 @@ fn register_lab_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>) {
             name: "aspirate".into(),
             description: "Aspirate liquid via SiLA 2 LiquidHandler".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -107,6 +109,7 @@ fn register_lab_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>) {
             name: "read_absorbance".into(),
             description: "Read spectrophotometer via SiLA 2".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();

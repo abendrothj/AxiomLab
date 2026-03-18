@@ -53,6 +53,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "dispense".into(),
             description: "Dispense liquid via SiLA 2 LiquidHandler".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -71,6 +72,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "aspirate".into(),
             description: "Aspirate liquid via SiLA 2 LiquidHandler".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -89,6 +91,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "move_arm".into(),
             description: "Move robotic arm via SiLA 2".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -108,6 +111,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "read_absorbance".into(),
             description: "Read spectrophotometer via SiLA 2".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -126,6 +130,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "set_temperature".into(),
             description: "Set incubator temperature via SiLA 2".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -143,6 +148,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "spin_centrifuge".into(),
             description: "Spin centrifuge via SiLA 2".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -162,6 +168,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "calibrate_ph".into(),
             description: "Calibrate pH meter via SiLA 2".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();
@@ -180,6 +187,7 @@ fn register_sila2_tools(registry: &mut ToolRegistry, clients: Arc<SiLA2Clients>)
             name: "read_ph".into(),
             description: "Read pH via SiLA 2".into(),
             parameters_schema: serde_json::json!({}),
+            ..Default::default()
         },
         Box::new(move |params| {
             let c = c.clone();

@@ -233,6 +233,7 @@ fn sila2_tool_registry(clients: Arc<SiLA2Clients>) -> ToolRegistry {
                     name: $name.into(),
                     description: $desc.into(),
                     parameters_schema: $schema,
+                    ..Default::default()
                 },
                 Box::new(move |p| {
                     let c = c.clone();

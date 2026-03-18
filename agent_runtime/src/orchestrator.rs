@@ -7,6 +7,7 @@
 //! 4. Validate actions against sandbox → approval → capability → proof policy.
 //! 5. Execute tool calls and advance the experiment lifecycle.
 
+use crate::approval_queue::{ApprovalContext, PendingApprovalQueue, ProtocolStepInfo};
 use crate::audit::{
     AuditEvent, AuditSigner, emit_jsonl, emit_protocol_conclusion, emit_protocol_step,
     emit_remote_with_retry, trace_id,
@@ -87,6 +88,29 @@ pub struct OrchestratorConfig {
     /// after each significant action. All methods are synchronous and must not
     /// block the orchestrator loop.
     pub event_sink: Option<Arc<dyn EventSink>>,
+
+    /// Shared interactive approval queue.
+    ///
+    /// When `Some`, high-risk actions with no pre-signed bundle are placed into
+    /// this queue and the tool call blocks until an operator approves or denies
+    /// via `POST /api/approvals/submit`, or until `approval_timeout_secs` elapses.
+    ///
+    /// When `None`, the original instant-deny behaviour applies.
+    pub approval_queue: Option<Arc<PendingApprovalQueue>>,
+
+    /// Seconds to wait for operator approval before auto-denying.
+    /// Default: 300 (5 minutes). Only meaningful when `approval_queue` is `Some`.
+    pub approval_timeout_secs: u64,
+
+    /// Pre-formatted discovery journal summary injected into every approval
+    /// context this experiment produces.  Set by the server layer from the
+    /// persisted journal before each experiment; not touched by the LLM.
+    pub journal_summary: String,
+
+    /// Number of confirmed findings in the journal at the start of this
+    /// experiment.  Lets the operator compare "before" vs "current" to judge
+    /// whether the agent has made progress.
+    pub findings_at_start: u32,
 }
 
 impl Default for OrchestratorConfig {
@@ -104,6 +128,10 @@ impl Default for OrchestratorConfig {
             audit_signer: AuditSigner::from_env(),
             revocation_list: RevocationList::from_env(),
             event_sink: None,
+            approval_queue: None,
+            approval_timeout_secs: 300,
+            journal_summary: String::new(),
+            findings_at_start: 0,
         }
     }
 }
@@ -211,9 +239,18 @@ impl<L: LlmBackend> Orchestrator<L> {
             .specs()
             .iter()
             .map(|t| {
+                let units_note = if t.parameter_units.is_empty() {
+                    String::new()
+                } else {
+                    let pairs: Vec<String> = t.parameter_units
+                        .iter()
+                        .map(|(k, v)| format!("{k} [{v}]"))
+                        .collect();
+                    format!("\n  units: {}", pairs.join(", "))
+                };
                 format!(
-                    "- **{}**: {}\n  params: {}",
-                    t.name, t.description, t.parameters_schema
+                    "- **{}**: {}{}\n  params: {}",
+                    t.name, t.description, units_note, t.parameters_schema
                 )
             })
             .collect();
@@ -255,6 +292,9 @@ impl<L: LlmBackend> Orchestrator<L> {
         ];
 
         let mut consecutive_parse_failures: u32 = 0;
+        // Verified record of tool calls dispatched this experiment — used to
+        // give scientists trustworthy context when approving high-risk actions.
+        let mut recent_actions: Vec<(String, serde_json::Value)> = Vec::new();
 
         for iteration in 0..self.config.max_iterations {
             info!(iteration, stage = ?experiment.stage, "orchestrator step");
@@ -296,8 +336,31 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
 
             // Try to parse as a tool call.
-            if let Some(tool_result) = self.try_tool_call(&response).await {
+            let approval_ctx = ApprovalContext {
+                hypothesis:                 experiment.hypothesis.clone(),
+                experiment_id:              experiment.id.clone(),
+                iteration,
+                risk_class:                 None, // filled in by try_tool_call from the manifest
+                recent_actions:             recent_actions.iter().rev().take(5).cloned().collect::<Vec<_>>()
+                                                .into_iter().rev().collect(),
+                journal_summary:            self.config.journal_summary.clone(),
+                protocol_step:              None, // not in a structured protocol
+                findings_before_experiment: self.config.findings_at_start,
+            };
+            if let Some(tool_result) = self.try_tool_call(&response, Some(approval_ctx)).await {
                 consecutive_parse_failures = 0;
+                // Record this dispatch in recent_actions (capped at 20).
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response) {
+                    if let (Some(tool), Some(params)) = (
+                        parsed.get("tool").and_then(|v| v.as_str()),
+                        parsed.get("params"),
+                    ) {
+                        if recent_actions.len() >= 20 {
+                            recent_actions.remove(0);
+                        }
+                        recent_actions.push((tool.to_owned(), params.clone()));
+                    }
+                }
                 // Advance to Executing on the first real tool call.
                 if experiment.stage == Stage::Proposed {
                     let prev = experiment.stage;
@@ -403,17 +466,21 @@ impl<L: LlmBackend> Orchestrator<L> {
     /// → proof policy → dispatch) without JSON parsing.  Used by [`run_protocol`]
     /// to execute individual protocol steps.
     ///
+    /// `approval_ctx` is forwarded to `try_tool_call` so that interactive
+    /// approval requests carry accurate protocol-step context.
+    ///
     /// Returns a [`ToolResult`] regardless of whether the action was allowed —
     /// `ToolResult.success` indicates the outcome.
     pub async fn execute_tool_direct(
         &self,
         tool_name: &str,
         params: serde_json::Value,
+        approval_ctx: Option<ApprovalContext>,
     ) -> ToolResult {
         // Synthesise a JSON string and route through try_tool_call so all
         // validation logic stays in one place.
         let json = serde_json::json!({ "tool": tool_name, "params": params });
-        match self.try_tool_call(&json.to_string()).await {
+        match self.try_tool_call(&json.to_string(), approval_ctx).await {
             Some(result) => result,
             None => ToolResult {
                 name: tool_name.to_owned(),
@@ -421,6 +488,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                     "tool call schema rejected (internal error)".into(),
                 ),
                 success: false,
+            metadata: None,
             },
         }
     }
@@ -451,8 +519,9 @@ impl<L: LlmBackend> Orchestrator<L> {
             })
             .unwrap_or_else(|| "no-manifest".into());
 
-        let mut step_results: Vec<StepOutcome> = Vec::new();
-        let mut steps_succeeded = 0usize;
+        let total_replicates = protocol.replicate_count.max(1) as usize;
+        let mut all_step_results: Vec<StepOutcome> = Vec::new();
+        let mut replicate_succeeded_counts: Vec<usize> = Vec::new();
 
         // Build a conversation for the LLM to observe step results.
         let mut messages = vec![ChatMessage {
@@ -466,87 +535,155 @@ impl<L: LlmBackend> Orchestrator<L> {
             ),
         }];
 
-        for (i, step) in protocol.steps.iter().enumerate() {
-            info!(step = i, tool = %step.tool, "executing protocol step");
+        let step_count = protocol.steps.len();
 
-            let result = self.execute_tool_direct(&step.tool, step.params.clone()).await;
-            let allowed = result.success;
-            let rejection_reason = if !allowed {
-                result.output.as_str().map(|s| s.to_owned())
-            } else {
-                None
-            };
-
-            // Write to audit chain.
-            if let Some(path) = &self.config.audit_log_path {
-                let _ = emit_protocol_step(
-                    path,
-                    protocol.id,
-                    run_id,
-                    i,
-                    &step.tool,
-                    &step.description,
-                    allowed,
-                    rejection_reason.as_deref(),
-                    &manifest_hash,
-                    self.config.audit_signer.as_ref(),
-                );
-            }
-
-            // Emit event to visualizer.
-            if let Some(sink) = &self.config.event_sink {
-                sink.on_protocol_step(ProtocolStepEvent {
-                    protocol_id: protocol.id.to_string(),
-                    run_id: run_id.to_string(),
-                    step_index: i,
-                    tool: step.tool.clone(),
-                    description: step.description.clone(),
-                    allowed,
-                    timestamp_ms: unix_ms(),
+        for rep in 0..total_replicates {
+            if total_replicates > 1 {
+                messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: format!("--- Replicate {}/{} ---", rep + 1, total_replicates),
                 });
             }
 
-            // Feed result back to LLM as an observation.
-            let obs = if allowed {
-                format!(
-                    "Step {i} ({} — {}): SUCCESS. Result: {}",
-                    step.tool,
-                    step.description,
-                    serde_json::to_string(&result.output).unwrap_or_default()
-                )
-            } else {
-                format!(
-                    "Step {i} ({} — {}): REJECTED. Reason: {}",
-                    step.tool,
-                    step.description,
-                    rejection_reason.as_deref().unwrap_or("unknown")
-                )
-            };
-            messages.push(ChatMessage { role: "user".into(), content: obs });
+            let mut rep_succeeded = 0usize;
 
-            if allowed {
-                steps_succeeded += 1;
+            for (i, step) in protocol.steps.iter().enumerate() {
+                info!(step = i, replicate = rep, tool = %step.tool, "executing protocol step");
+
+                let step_actx = ApprovalContext {
+                    hypothesis:                 protocol.hypothesis.clone(),
+                    experiment_id:              protocol.id.to_string(),
+                    iteration:                  (rep * step_count + i) as u32,
+                    risk_class:                 None,
+                    recent_actions:             Vec::new(),
+                    journal_summary:            self.config.journal_summary.clone(),
+                    protocol_step:              Some(ProtocolStepInfo {
+                        protocol_name: protocol.name.clone(),
+                        step_index:    i,
+                        step_count,
+                        description:   step.description.clone(),
+                    }),
+                    findings_before_experiment: self.config.findings_at_start,
+                };
+                let result = self.execute_tool_direct(
+                    &step.tool,
+                    step.params.clone(),
+                    Some(step_actx),
+                ).await;
+                let allowed = result.success;
+                let rejection_reason = if !allowed {
+                    result.output.as_str().map(|s| s.to_owned())
+                } else {
+                    None
+                };
+
+                // Extract vessel snapshot embedded by dispense/aspirate handlers.
+                let vessel_snapshot = result.output.get("_vessel_snapshot").cloned();
+
+                // Write to audit chain.
+                if let Some(path) = &self.config.audit_log_path {
+                    let _ = emit_protocol_step(
+                        path,
+                        protocol.id,
+                        run_id,
+                        i,
+                        &step.tool,
+                        &step.description,
+                        allowed,
+                        rejection_reason.as_deref(),
+                        &manifest_hash,
+                        vessel_snapshot.as_ref(),
+                        self.config.audit_signer.as_ref(),
+                    );
+                }
+
+                // Emit event to visualizer.
+                if let Some(sink) = &self.config.event_sink {
+                    sink.on_protocol_step(ProtocolStepEvent {
+                        protocol_id: protocol.id.to_string(),
+                        run_id: run_id.to_string(),
+                        step_index: i,
+                        tool: step.tool.clone(),
+                        description: step.description.clone(),
+                        allowed,
+                        timestamp_ms: unix_ms(),
+                    });
+                }
+
+                // Feed result back to LLM as an observation (strip internal snapshot key).
+                let llm_output = if allowed {
+                    let mut out = result.output.clone();
+                    if let Some(obj) = out.as_object_mut() {
+                        obj.remove("_vessel_snapshot");
+                    }
+                    out
+                } else {
+                    result.output.clone()
+                };
+                let obs = if allowed {
+                    format!(
+                        "Step {i} ({} — {}): SUCCESS. Result: {}",
+                        step.tool,
+                        step.description,
+                        serde_json::to_string(&llm_output).unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "Step {i} ({} — {}): REJECTED. Reason: {}",
+                        step.tool,
+                        step.description,
+                        rejection_reason.as_deref().unwrap_or("unknown")
+                    )
+                };
+                messages.push(ChatMessage { role: "user".into(), content: obs });
+
+                if allowed {
+                    rep_succeeded += 1;
+                }
+
+                all_step_results.push(StepOutcome {
+                    step_index: i,
+                    replicate_index: rep,
+                    tool: step.tool.clone(),
+                    description: step.description.clone(),
+                    allowed,
+                    result: if allowed { Some(llm_output) } else { None },
+                    rejection_reason,
+                });
             }
 
-            step_results.push(StepOutcome {
-                step_index: i,
-                tool: step.tool.clone(),
-                description: step.description.clone(),
-                allowed,
-                result: if allowed { Some(result.output) } else { None },
-                rejection_reason,
-            });
+            replicate_succeeded_counts.push(rep_succeeded);
         }
 
+        let steps_succeeded: usize = replicate_succeeded_counts.iter().sum();
+        let step_results = all_step_results;
+
+        // Compute replication aggregate (None for single-replicate runs).
+        let aggregate = if total_replicates > 1 {
+            Some(crate::protocol::ReplicateAggregate::from_counts(&replicate_succeeded_counts))
+        } else {
+            None
+        };
+
         // Ask the LLM for its scientific conclusion.
-        messages.push(ChatMessage {
-            role: "user".into(),
-            content: format!(
+        let conclusion_prompt = if let Some(ref agg) = aggregate {
+            format!(
+                "Protocol complete ({total_replicates} replicates). \
+                 Steps succeeded: {steps_succeeded}/{} total. \
+                 Mean steps per replicate: {:.2} ± {:.2} SD. \
+                 Write your scientific conclusion based on these observations.",
+                protocol.steps.len() * total_replicates,
+                agg.mean_steps_succeeded,
+                agg.sd_steps_succeeded,
+            )
+        } else {
+            format!(
                 "Protocol complete. {steps_succeeded}/{} steps succeeded. \
                  Write your scientific conclusion based on these observations.",
                 protocol.steps.len()
-            ),
-        });
+            )
+        };
+        messages.push(ChatMessage { role: "user".into(), content: conclusion_prompt });
 
         let conclusion = match self.llm.chat(&messages, self.config.reasoning_temperature).await {
             Ok(text) => sanitize_llm_response(&text),
@@ -578,6 +715,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                 &conclusion,
                 protocol.steps.len(),
                 steps_succeeded,
+                protocol.template_id.as_deref(),
                 self.config.audit_signer.as_ref(),
             );
 
@@ -645,13 +783,15 @@ impl<L: LlmBackend> Orchestrator<L> {
             steps_succeeded,
             conclusion,
             step_results,
+            replicate_count: protocol.replicate_count,
+            aggregate,
         }
     }
 
     /// Attempt to parse a tool call from the LLM response, validate it
     /// against the sandbox, approval policy, capability bounds, and proof
     /// artifacts, then dispatch it.
-    async fn try_tool_call(&self, response: &str) -> Option<ToolResult> {
+    async fn try_tool_call(&self, response: &str, approval_ctx: Option<ApprovalContext>) -> Option<ToolResult> {
         let parsed: serde_json::Value = serde_json::from_str(response).ok()?;
 
         // Schema validation: the JSON must have "tool" (string) and "params" (object).
@@ -672,6 +812,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(e.to_string()),
                 success: false,
+            metadata: None,
             });
         }
 
@@ -679,51 +820,185 @@ impl<L: LlmBackend> Orchestrator<L> {
 
         // ── Stage 1: Two-person approval ──────────────────────────────────
         if let (Some(policy), Some(ctx)) = (&self.config.approval_policy, &self.policy_context) {
-            match policy.validate_action(
-                tool_name,
-                risk_class.clone(),
-                ctx,
-                &params,
-                self.config.session_nonce.as_deref(),
-            ) {
-                Ok(approval_ids) => {
-                    // Check revocation on all approval IDs.
-                    for aid in &approval_ids {
-                        if self.config.revocation_list.is_approval_revoked(aid) {
-                            let msg = format!("approval {aid} has been revoked");
+            let needs_approval = crate::approvals::requires_two_person_approval(risk_class.clone());
+            let has_bundle = params
+                .get("approval_bundle")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+
+            if needs_approval && !has_bundle {
+                if let Some(queue) = &self.config.approval_queue {
+                    // ── Interactive approval path ──────────────────────────
+                    let mut actx = approval_ctx.unwrap_or_default();
+                    actx.risk_class = risk_class.as_ref().map(|r| format!("{r:?}"));
+                    let (pending_id, rx) = queue.enqueue(
+                        tool_name,
+                        params.clone(),
+                        self.config.session_nonce.clone(),
+                        actx,
+                    );
+                    info!(
+                        %pending_id,
+                        tool = tool_name,
+                        timeout_secs = self.config.approval_timeout_secs,
+                        "high-risk action queued — waiting for operator approval"
+                    );
+
+                    let bundle_result = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(self.config.approval_timeout_secs),
+                        rx,
+                    )
+                    .await;
+
+                    // Always remove from queue after waking, regardless of outcome.
+                    queue.remove(&pending_id);
+
+                    // Determine the augmented params (with bundle injected) or deny.
+                    let augmented = match bundle_result {
+                        Err(_elapsed) => {
+                            let msg = format!(
+                                "approval timeout: '{tool_name}' waited {}s with no operator response",
+                                self.config.approval_timeout_secs
+                            );
+                            warn!(%pending_id, %msg);
                             self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                            self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
                                 output: serde_json::Value::String(msg),
                                 success: false,
-                            });
+                            metadata: None,
+            });
+                        }
+                        Ok(Err(_recv_err)) => {
+                            let msg = "approval cancelled: server shutting down";
+                            self.audit_decision(tool_name, "deny", msg, false, None).await;
+                            return Some(ToolResult {
+                                name: tool_name.to_owned(),
+                                output: serde_json::Value::String(msg.into()),
+                                success: false,
+                            metadata: None,
+            });
+                        }
+                        Ok(Ok(None)) => {
+                            let msg = format!("operator denied action '{tool_name}'");
+                            warn!(%pending_id, %msg);
+                            self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                            self.emit_tool_event(tool_name, &params, "rejected", &msg);
+                            return Some(ToolResult {
+                                name: tool_name.to_owned(),
+                                output: serde_json::Value::String(msg),
+                                success: false,
+                            metadata: None,
+            });
+                        }
+                        Ok(Ok(Some(bundle))) => {
+                            let mut p = params.clone();
+                            p["approval_bundle"] = serde_json::to_value(&bundle)
+                                .unwrap_or(serde_json::Value::Array(vec![]));
+                            p
+                        }
+                    };
+
+                    // Validate the submitted bundle with the full policy.
+                    match policy.validate_action(
+                        tool_name,
+                        risk_class.clone(),
+                        ctx,
+                        &augmented,
+                        self.config.session_nonce.as_deref(),
+                    ) {
+                        Ok(approval_ids) => {
+                            for aid in &approval_ids {
+                                if self.config.revocation_list.is_approval_revoked(aid) {
+                                    let msg = format!("approval {aid} has been revoked");
+                                    self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                                    return Some(ToolResult {
+                                        name: tool_name.to_owned(),
+                                        output: serde_json::Value::String(msg),
+                                        success: false,
+                                    metadata: None,
+            });
+                                }
+                            }
+                            let reason = format!(
+                                "interactive approval satisfied (pending_id={pending_id}, \
+                                 approval_ids={})",
+                                approval_ids.join(",")
+                            );
+                            self.audit_decision(tool_name, "allow", &reason, true, Some(approval_ids)).await;
+                            // Fall through to Stage 2 with original params (no bundle injected).
+                        }
+                        Err(e) => {
+                            self.audit_decision(tool_name, "deny", &e, false, None).await;
+                            self.emit_tool_event(tool_name, &params, "rejected", &e);
+                            return Some(ToolResult {
+                                name: tool_name.to_owned(),
+                                output: serde_json::Value::String(e),
+                                success: false,
+                            metadata: None,
+            });
                         }
                     }
-                    if !approval_ids.is_empty() {
-                        let reason = format!(
-                            "two-person approval satisfied for high-risk action (approval_ids={})",
-                            approval_ids.join(",")
-                        );
-                        self.audit_decision(
-                            tool_name,
-                            "allow",
-                            &reason,
-                            true,
-                            Some(approval_ids),
-                        )
-                        .await;
-                    }
-                }
-                Err(e) => {
+                } else {
+                    // ── No queue configured: instant deny ─────────────────
+                    let e = format!(
+                        "approval violation: '{tool_name}' requires signed approvals \
+                         (no interactive approval queue configured)"
+                    );
                     self.audit_decision(tool_name, "deny", &e, false, None).await;
                     self.emit_tool_event(tool_name, &params, "rejected", &e);
                     return Some(ToolResult {
                         name: tool_name.to_owned(),
                         output: serde_json::Value::String(e),
                         success: false,
-                    });
+                    metadata: None,
+            });
+                }
+            } else if has_bundle {
+                // ── Pre-signed bundle path (unchanged) ────────────────────
+                match policy.validate_action(
+                    tool_name,
+                    risk_class.clone(),
+                    ctx,
+                    &params,
+                    self.config.session_nonce.as_deref(),
+                ) {
+                    Ok(approval_ids) => {
+                        for aid in &approval_ids {
+                            if self.config.revocation_list.is_approval_revoked(aid) {
+                                let msg = format!("approval {aid} has been revoked");
+                                self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                                return Some(ToolResult {
+                                    name: tool_name.to_owned(),
+                                    output: serde_json::Value::String(msg),
+                                    success: false,
+                                metadata: None,
+            });
+                            }
+                        }
+                        if !approval_ids.is_empty() {
+                            let reason = format!(
+                                "two-person approval satisfied (approval_ids={})",
+                                approval_ids.join(",")
+                            );
+                            self.audit_decision(tool_name, "allow", &reason, true, Some(approval_ids)).await;
+                        }
+                    }
+                    Err(e) => {
+                        self.audit_decision(tool_name, "deny", &e, false, None).await;
+                        self.emit_tool_event(tool_name, &params, "rejected", &e);
+                        return Some(ToolResult {
+                            name: tool_name.to_owned(),
+                            output: serde_json::Value::String(e),
+                            success: false,
+                        metadata: None,
+            });
+                    }
                 }
             }
+            // !needs_approval → fall through to Stage 2.
         }
 
         // ── Stage 2: Capability bounds ────────────────────────────────────
@@ -735,7 +1010,8 @@ impl<L: LlmBackend> Orchestrator<L> {
                     name: tool_name.to_owned(),
                     output: serde_json::Value::String(e),
                     success: false,
-                });
+                metadata: None,
+            });
             }
         }
 
@@ -749,6 +1025,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                 name: tool_name.to_owned(),
                 output: serde_json::Value::String(msg.into()),
                 success: false,
+            metadata: None,
             });
         }
 
@@ -768,6 +1045,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         "artifacts_checked": report.artifacts_checked
                     }),
                     success: false,
+                    metadata: None,
                 });
             }
         }

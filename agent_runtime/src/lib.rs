@@ -17,6 +17,7 @@ pub mod audit;
 pub mod rekor;
 pub mod capabilities;
 pub mod approvals;
+pub mod approval_queue;
 pub mod revocation;
 pub mod attestation;
 pub mod events;

@@ -14,7 +14,12 @@ struct ApprovalVerificationReport {
 }
 
 fn usage() -> String {
-    "Usage:\n  approvalctl verify --bundle <bundle.json> --action <name> --risk-class <ReadOnly|LiquidHandling|Actuation|Destructive> --git-commit <sha> --binary-hash <hash> --out <report.json>".into()
+    "Usage:\n  \
+     approvalctl verify --bundle <bundle.json> --action <name> \
+       --risk-class <ReadOnly|LiquidHandling|Actuation|Destructive> \
+       --git-commit <sha> --binary-hash <hash> --out <report.json>\n  \
+     approvalctl submit --pending-id <uuid> --bundle <bundle.json> [--server <url>]\n  \
+     approvalctl submit --pending-id <uuid> --deny [--server <url>]".into()
 }
 
 fn parse_flag(args: &[String], name: &str) -> Option<String> {
@@ -130,6 +135,63 @@ fn main() {
                     "approval verification FAILED: {}",
                     report.error.as_deref().unwrap_or("unknown error")
                 );
+                std::process::exit(1);
+            }
+        }
+        "submit" => {
+            let Some(pending_id) = parse_flag(&args[2..], "--pending-id") else {
+                eprintln!("missing --pending-id\n{}", usage());
+                std::process::exit(2);
+            };
+            let server = parse_flag(&args[2..], "--server")
+                .unwrap_or_else(|| "http://127.0.0.1:3000".into());
+            let deny = args.iter().any(|a| a == "--deny");
+
+            let bundle: Option<Vec<SignedApproval>> = if deny {
+                None
+            } else {
+                let Some(bundle_path) = parse_flag(&args[2..], "--bundle") else {
+                    eprintln!("missing --bundle (or use --deny to reject)\n{}", usage());
+                    std::process::exit(2);
+                };
+                let raw = fs::read_to_string(&bundle_path).unwrap_or_else(|e| {
+                    eprintln!("failed to read bundle {bundle_path}: {e}");
+                    std::process::exit(1);
+                });
+                let parsed: Vec<SignedApproval> = serde_json::from_str(&raw).unwrap_or_else(|e| {
+                    eprintln!("failed to parse bundle: {e}");
+                    std::process::exit(1);
+                });
+                Some(parsed)
+            };
+
+            let body = serde_json::json!({
+                "pending_id": pending_id,
+                "bundle": bundle,
+            });
+
+            let url = format!("{server}/api/approvals/submit");
+            let client = reqwest::blocking::Client::new();
+            let resp = client
+                .post(&url)
+                .json(&body)
+                .send()
+                .unwrap_or_else(|e| {
+                    eprintln!("request to {url} failed: {e}");
+                    std::process::exit(1);
+                });
+
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+
+            if status.is_success() {
+                if deny {
+                    println!("Denial submitted for pending_id={pending_id}");
+                } else {
+                    println!("Approval submitted for pending_id={pending_id}");
+                }
+            } else {
+                eprintln!("Server returned {status}: {text}");
                 std::process::exit(1);
             }
         }

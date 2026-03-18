@@ -1,3 +1,5 @@
+mod approvals;
+mod audit_query;
 mod discovery;
 mod simulator;
 mod ws_sink;
@@ -8,9 +10,10 @@ use axum::{
         State,
     },
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Router,
 };
+use agent_runtime::approval_queue::PendingApprovalQueue;
 use agent_runtime::audit::{
     anchor_chain_tip_to_rekor, audit_log_path, emit_session_start, rotate_if_needed, AuditSigner,
 };
@@ -29,14 +32,16 @@ use ws_sink::{EventBuffer, ExplorationLog};
 // ── App state ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct AppState {
-    tx:        broadcast::Sender<String>,
-    running:   Arc<AtomicBool>,
-    iteration: Arc<AtomicU32>,
-    notebook:  Arc<Mutex<Vec<serde_json::Value>>>,
-    log:       Arc<Mutex<ExplorationLog>>,
-    events:    EventBuffer,
-    journal:   Arc<Mutex<DiscoveryJournal>>,
+pub(crate) struct AppState {
+    tx:             broadcast::Sender<String>,
+    running:        Arc<AtomicBool>,
+    iteration:      Arc<AtomicU32>,
+    notebook:       Arc<Mutex<Vec<serde_json::Value>>>,
+    log:            Arc<Mutex<ExplorationLog>>,
+    events:         EventBuffer,
+    journal:        Arc<Mutex<DiscoveryJournal>>,
+    approval_queue: Arc<PendingApprovalQueue>,
+    audit_log_path: String,
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -64,6 +69,33 @@ async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
 async fn journal_handler(State(s): State<AppState>) -> impl IntoResponse {
     let journal = s.journal.lock().unwrap().clone();
     axum::Json(journal)
+}
+
+/// `GET /api/journal/findings` — return only the findings array.
+async fn findings_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let findings = s.journal.lock().unwrap().findings.clone();
+    axum::Json(findings)
+}
+
+/// Warn about (and remove) stale approval sidecar files left by a previous crash.
+///
+/// Any `.json` file in `.artifacts/approvals/` at startup indicates an approval
+/// that was queued but never resolved — the operator should be notified.
+fn scan_stale_approvals() {
+    let dir = agent_runtime::audit::data_dir().join("approvals");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "Stale approval sidecar found — was the server interrupted mid-approval? \
+             The pending action was never resolved. Removing sidecar."
+        );
+        std::fs::remove_file(&path).ok();
+    }
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -187,14 +219,21 @@ async fn main() {
         );
     }
 
+    let approval_queue = PendingApprovalQueue::new();
+
+    // Scan for stale approval sidecars from a previous (crashed) run.
+    scan_stale_approvals();
+
     let state = AppState {
         tx,
-        running:   Arc::new(AtomicBool::new(false)),
-        iteration: Arc::new(AtomicU32::new(0)),
-        notebook:  Arc::new(Mutex::new(Vec::new())),
-        log:       Arc::new(Mutex::new(ExplorationLog::from_journal(&journal.lock().unwrap()))),
-        events:    events.clone(),
-        journal:   Arc::clone(&journal),
+        running:        Arc::new(AtomicBool::new(false)),
+        iteration:      Arc::new(AtomicU32::new(0)),
+        notebook:       Arc::new(Mutex::new(Vec::new())),
+        log:            Arc::new(Mutex::new(ExplorationLog::from_journal(&journal.lock().unwrap()))),
+        events:         events.clone(),
+        journal:        Arc::clone(&journal),
+        approval_queue: Arc::clone(&approval_queue),
+        audit_log_path: audit_path_str.clone(),
     };
 
     // Auto-start the exploration loop immediately on server launch.
@@ -210,7 +249,7 @@ async fn main() {
         let running   = Arc::clone(&state.running);
         let iteration = Arc::clone(&state.iteration);
         tokio::spawn(async move {
-            simulator::run_loop(sink, running.clone(), iteration).await;
+            simulator::run_loop(sink, running.clone(), iteration, approval_queue).await;
             running.store(false, Ordering::SeqCst);
         });
     }
@@ -219,11 +258,20 @@ async fn main() {
     let static_files = ServeDir::new("../visualizer/dist")
         .append_index_html_on_directories(true);
 
+    let approvals_router = Router::new()
+        .route("/api/approvals/pending", get(approvals::pending_handler))
+        .route("/api/approvals/submit",  post(approvals::submit_handler))
+        .with_state(Arc::clone(&state.approval_queue));
+
     let app = Router::new()
-        .route("/ws",            get(ws_handler))
-        .route("/api/status",    get(status_handler))
-        .route("/api/history",   get(history_handler))
-        .route("/api/journal",   get(journal_handler))
+        .route("/ws",                    get(ws_handler))
+        .route("/api/status",            get(status_handler))
+        .route("/api/history",           get(history_handler))
+        .route("/api/journal",           get(journal_handler))
+        .route("/api/journal/findings",  get(findings_handler))
+        .route("/api/audit",             get(audit_query::audit_query_handler))
+        .route("/api/audit/verify",      get(audit_query::audit_verify_handler))
+        .merge(approvals_router)
         .fallback_service(static_files)
         .layer(CorsLayer::permissive())
         .with_state(state);

@@ -202,6 +202,7 @@ pub fn emit_protocol_step(
     allowed: bool,
     rejection_reason: Option<&str>,
     proof_artifact_hash: &str,
+    vessel_snapshot: Option<&serde_json::Value>,
     signer: Option<&AuditSigner>,
 ) -> Result<String, std::io::Error> {
     let details = serde_json::json!({
@@ -212,6 +213,7 @@ pub fn emit_protocol_step(
         "description": description,
         "proof_artifact_hash": proof_artifact_hash,
         "rejection_reason": rejection_reason,
+        "vessel_snapshot": vessel_snapshot,
     });
     let event = AuditEvent {
         unix_secs: unix_secs_now(),
@@ -240,6 +242,7 @@ pub fn emit_protocol_conclusion(
     conclusion: &str,
     steps_total: usize,
     steps_succeeded: usize,
+    template_id: Option<&str>,
     signer: Option<&AuditSigner>,
 ) -> Result<String, std::io::Error> {
     // Conclusion-specific signature: sign (run_id || "\n" || conclusion).
@@ -255,6 +258,7 @@ pub fn emit_protocol_conclusion(
         "steps_total": steps_total,
         "steps_succeeded": steps_succeeded,
         "conclusion_sig_b64": conclusion_sig,
+        "template_id": template_id,
     });
     let event = AuditEvent {
         unix_secs: unix_secs_now(),
@@ -279,12 +283,16 @@ pub fn emit_journal_finding(
     finding_id: &str,
     statement: &str,
     evidence: &str,
+    measurements_json: &str,
+    source: &str,
     signer: Option<&AuditSigner>,
 ) -> Result<String, std::io::Error> {
     let details = serde_json::json!({
         "finding_id": finding_id,
         "statement": statement,
         "evidence": evidence,
+        "measurements": measurements_json,
+        "source": source,
     });
     let event = AuditEvent {
         unix_secs: unix_secs_now(),
@@ -319,6 +327,37 @@ pub fn emit_journal_hypothesis(
         unix_secs: unix_secs_now(),
         trace_id: format!("journal_hypothesis-{hypothesis_id}"),
         action: "journal_hypothesis".into(),
+        decision: "allow".into(),
+        reason: details.to_string(),
+        success: true,
+        approval_ids: None,
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Emit a calibration record into the audit chain.
+///
+/// Called when `calibrate_ph` (or any instrument calibration tool) succeeds.
+/// The calibration ID, instrument, standard, and offset are hashed into the
+/// chain so any post-hoc modification of calibration records is detectable.
+pub fn emit_calibration(
+    path: &str,
+    calibration_id: &str,
+    instrument: &str,
+    standard: &str,
+    offset: f64,
+    signer: Option<&AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "calibration_id": calibration_id,
+        "instrument": instrument,
+        "standard": standard,
+        "offset": offset,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("calibration-{calibration_id}"),
+        action: "calibration".into(),
         decision: "allow".into(),
         reason: details.to_string(),
         success: true,

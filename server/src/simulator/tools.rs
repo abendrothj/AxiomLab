@@ -1,19 +1,23 @@
-use crate::discovery::{journal_path, DiscoveryJournal, HypothesisStatus};
+use crate::discovery::{journal_path, DiscoveryJournal, HypothesisStatus, Measurement, ParameterProbe};
 use rand::Rng;
 use scientific_compute::fitting::{
     hill_equation_fit, linear_regression, michaelis_menten_fit, model_select_aic, PreferredModel,
 };
 use agent_runtime::{
-    audit::{audit_log_path, emit_journal_finding, emit_journal_hypothesis},
+    audit::{audit_log_path, emit_calibration, emit_journal_finding, emit_journal_hypothesis},
     hardware::SiLA2Clients,
     protocol::propose_protocol_schema,
     sandbox::{ResourceLimits, Sandbox},
     tools::{ToolRegistry, ToolSpec},
 };
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+
+/// R² threshold above which `analyze_series` auto-records a system finding.
+const AUTO_FINDING_R2_THRESHOLD: f64 = 0.80;
 
 pub(crate) fn make_sandbox() -> Sandbox {
     Sandbox::new(
@@ -42,6 +46,7 @@ pub(crate) fn make_sila2_tools(
             name: "dispense".into(),
             description: "Dispense liquid into a vessel (volume_ul, pump_id).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"pump_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["pump_id","volume_ul"]}),
+            parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let vessel = p["pump_id"].as_str().ok_or("missing pump_id")?;
@@ -56,6 +61,7 @@ pub(crate) fn make_sila2_tools(
             name: "aspirate".into(),
             description: "Aspirate liquid from a vessel (source_vessel, volume_ul).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"source_vessel":{"type":"string"},"volume_ul":{"type":"number"}},"required":["source_vessel","volume_ul"]}),
+            parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let vessel = p["source_vessel"].as_str().ok_or("missing source_vessel")?;
@@ -70,6 +76,7 @@ pub(crate) fn make_sila2_tools(
             name: "move_arm".into(),
             description: "Move the robotic arm to (x, y, z) in mm.".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}),
+            parameter_units: [("x".into(), "mm".into()), ("y".into(), "mm".into()), ("z".into(), "mm".into())].into_iter().collect(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let x = p["x"].as_f64().ok_or("missing x")?;
@@ -85,6 +92,7 @@ pub(crate) fn make_sila2_tools(
             name: "read_absorbance".into(),
             description: "Read UV/Vis absorbance (vessel_id, wavelength_nm).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
+            parameter_units: HashMap::new(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let vessel = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
@@ -99,6 +107,7 @@ pub(crate) fn make_sila2_tools(
             name: "set_temperature".into(),
             description: "Set incubator temperature (temperature_celsius).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"temperature_celsius":{"type":"number"}},"required":["temperature_celsius"]}),
+            parameter_units: [("temperature_celsius".into(), "°C".into())].into_iter().collect(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let temp = p["temperature_celsius"].as_f64().ok_or("missing temperature_celsius")?;
@@ -112,6 +121,7 @@ pub(crate) fn make_sila2_tools(
             name: "read_temperature".into(),
             description: "Read current incubator temperature.".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{}}),
+            parameter_units: HashMap::new(),
         },
         Box::new(move |_p| { let c = c.clone(); Box::pin(async move { c.read_temperature().await })}),
     );
@@ -122,6 +132,7 @@ pub(crate) fn make_sila2_tools(
             name: "spin_centrifuge".into(),
             description: "Spin centrifuge (rcf, duration_seconds, temperature_celsius).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"rcf":{"type":"number"},"duration_seconds":{"type":"number"},"temperature_celsius":{"type":"number"}},"required":["rcf","duration_seconds","temperature_celsius"]}),
+            parameter_units: [("rcf".into(), "× g".into()), ("duration_seconds".into(), "s".into())].into_iter().collect(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let rcf  = p["rcf"].as_f64().ok_or("missing rcf")?;
@@ -137,6 +148,7 @@ pub(crate) fn make_sila2_tools(
             name: "calibrate_ph".into(),
             description: "Calibrate pH meter with two buffer solutions (buffer_ph1, buffer_ph2).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"buffer_ph1":{"type":"number"},"buffer_ph2":{"type":"number"}},"required":["buffer_ph1","buffer_ph2"]}),
+            parameter_units: HashMap::new(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let b1 = p["buffer_ph1"].as_f64().ok_or("missing buffer_ph1")?;
@@ -151,6 +163,7 @@ pub(crate) fn make_sila2_tools(
             name: "read_ph".into(),
             description: "Read pH value (sample_id).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"sample_id":{"type":"string"}},"required":["sample_id"]}),
+            parameter_units: HashMap::new(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let sample = p["sample_id"].as_str().ok_or("missing sample_id")?;
@@ -163,6 +176,7 @@ pub(crate) fn make_sila2_tools(
             name: "read_sensor".into(),
             description: "Read a named sensor value.".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"sensor_id":{"type":"string"}},"required":["sensor_id"]}),
+            parameter_units: HashMap::new(),
         },
         Box::new(|p| Box::pin(async move {
             let id = p["sensor_id"].as_str().ok_or("missing sensor_id")?;
@@ -176,6 +190,7 @@ pub(crate) fn make_sila2_tools(
             name: "incubate".into(),
             description: "Incubate for a specified duration (duration_minutes).".into(),
             parameters_schema: serde_json::json!({"type":"object","properties":{"duration_minutes":{"type":"number"}},"required":["duration_minutes"]}),
+            parameter_units: HashMap::new(),
         },
         Box::new(move |p| { let c = c.clone(); Box::pin(async move {
             let dur = p["duration_minutes"].as_f64().ok_or("missing duration_minutes")?;
@@ -192,13 +207,14 @@ pub(crate) fn make_sila2_tools(
                 Use this for any experiment with 2+ steps. The runtime executes each \
                 step through the full safety pipeline and returns a signed audit record.".into(),
             parameters_schema: propose_protocol_schema(),
+            parameter_units: HashMap::new(),
         },
         Box::new(|_p| Box::pin(async move {
             Err("propose_protocol is handled by the orchestrator".into())
         })),
     );
 
-    register_analyze_series_tool(&mut r);
+    register_analyze_series_tool(&mut r, journal.clone());
     register_journal_tool(&mut r, journal);
     r
 }
@@ -287,6 +303,21 @@ impl SimVesselState {
     }
 }
 
+/// Snapshot all vessel volumes into a JSON object for audit chain embedding.
+fn snap_vessels(state: &SimVesselState) -> serde_json::Value {
+    state.vessels.iter()
+        .map(|(id, p)| (id.clone(), serde_json::json!({"volume_ul": p.volume_ul, "max_volume_ul": p.max_volume_ul})))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 /// Fallback tool registry when no SiLA 2 server is available.
 ///
 /// Uses the same Beer-Lambert physics model as the Python SiLA 2 mock so that
@@ -297,6 +328,7 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
 
     // Shared vessel state — dispense/aspirate/read_absorbance all operate on it.
     let vessel_state = Arc::new(Mutex::new(SimVesselState::new()));
+    let jpath = journal_path();
 
     // ── dispense ──────────────────────────────────────────────────────────────
     {
@@ -306,15 +338,21 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
                 name: "dispense".into(),
                 description: "Dispense liquid into a vessel (vessel_id, volume_ul).".into(),
                 parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+                parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
             },
             Box::new(move |p| {
                 let vs = Arc::clone(&vs);
                 Box::pin(async move {
                     let id  = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
                     let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
-                    let new_vol = vs.lock().unwrap().dispense(id, vol).map_err(|e| e)?;
-                    Ok(serde_json::json!({"status": "dispensed", "vessel_id": id,
-                                          "volume_ul": vol, "current_volume_ul": new_vol}))
+                    let mut state = vs.lock().unwrap();
+                    let snapshot = snap_vessels(&state);
+                    let new_vol = state.dispense(id, vol).map_err(|e| e)?;
+                    Ok(serde_json::json!({
+                        "status": "dispensed", "vessel_id": id,
+                        "volume_ul": vol, "current_volume_ul": new_vol,
+                        "_vessel_snapshot": snapshot
+                    }))
                 })
             }),
         );
@@ -328,15 +366,21 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
                 name: "aspirate".into(),
                 description: "Aspirate liquid from a vessel (vessel_id, volume_ul).".into(),
                 parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+                parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
             },
             Box::new(move |p| {
                 let vs = Arc::clone(&vs);
                 Box::pin(async move {
                     let id  = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
                     let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
-                    let remaining = vs.lock().unwrap().aspirate(id, vol).map_err(|e| e)?;
-                    Ok(serde_json::json!({"status": "aspirated", "vessel_id": id,
-                                          "volume_ul": vol, "current_volume_ul": remaining}))
+                    let mut state = vs.lock().unwrap();
+                    let snapshot = snap_vessels(&state);
+                    let remaining = state.aspirate(id, vol).map_err(|e| e)?;
+                    Ok(serde_json::json!({
+                        "status": "aspirated", "vessel_id": id,
+                        "volume_ul": vol, "current_volume_ul": remaining,
+                        "_vessel_snapshot": snapshot
+                    }))
                 })
             }),
         );
@@ -344,7 +388,8 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
 
     // ── read_absorbance (Beer-Lambert physics) ────────────────────────────────
     {
-        let vs = Arc::clone(&vessel_state);
+        let vs  = Arc::clone(&vessel_state);
+        let jab = Arc::clone(&journal);
         r.register(
             ToolSpec {
                 name: "read_absorbance".into(),
@@ -352,9 +397,11 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
                     Uses Beer-Lambert physics: A = ε × fill_fraction × path_length × \
                     Gaussian(λ, peak=500 nm, σ=150 nm) + 2% noise.".into(),
                 parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["vessel_id","wavelength_nm"]}),
+                parameter_units: HashMap::new(),
             },
             Box::new(move |p| {
-                let vs = Arc::clone(&vs);
+                let vs  = Arc::clone(&vs);
+                let jab = Arc::clone(&jab);
                 Box::pin(async move {
                     let id = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
                     let wl = p["wavelength_nm"].as_f64().ok_or("missing wavelength_nm")?;
@@ -362,7 +409,56 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
                         return Err(format!("wavelength {wl:.0} nm out of range [200, 1000]"));
                     }
                     let absorbance = vs.lock().unwrap().read_absorbance(id, wl);
+                    // Record wavelength probe for parameter-space coverage tracking.
+                    if let Ok(mut j) = jab.lock() {
+                        j.record_coverage(ParameterProbe {
+                            tool: "read_absorbance".into(),
+                            parameter: "wavelength_nm".into(),
+                            value: wl,
+                            experiment_id: String::new(),
+                            observed_at_secs: unix_now_secs(),
+                        });
+                    }
                     Ok(serde_json::json!({"absorbance": absorbance, "wavelength_nm": wl, "unit": "AU", "source": "mock-physics"}))
+                })
+            }),
+        );
+    }
+
+    // ── calibrate_ph (full closure with journal + audit) ─────────────────────
+    {
+        let jcal      = Arc::clone(&journal);
+        let jpath_cal = jpath.clone();
+        r.register(
+            ToolSpec {
+                name: "calibrate_ph".into(),
+                description: "Calibrate pH meter with two buffer solutions (buffer_ph1, buffer_ph2).".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"buffer_ph1":{"type":"number"},"buffer_ph2":{"type":"number"}},"required":["buffer_ph1","buffer_ph2"]}),
+                parameter_units: HashMap::new(),
+            },
+            Box::new(move |p| {
+                let jcal      = Arc::clone(&jcal);
+                let jpath_cal = jpath_cal.clone();
+                Box::pin(async move {
+                    let b1 = p["buffer_ph1"].as_f64().ok_or("missing buffer_ph1")?;
+                    let b2 = p["buffer_ph2"].as_f64().ok_or("missing buffer_ph2")?;
+                    let standard = format!("pH{b1:.1}+pH{b2:.1}");
+                    // Two-point span as the calibration offset proxy.
+                    let offset = b2 - b1;
+                    let cal_id = jcal.lock()
+                        .map_err(|_| "journal lock poisoned")?
+                        .record_calibration("ph_meter", &standard, offset);
+                    jcal.lock().map_err(|_| "journal lock poisoned")?.save(&jpath_cal).ok();
+                    let audit_path = audit_log_path().to_string_lossy().into_owned();
+                    emit_calibration(&audit_path, &cal_id, "ph_meter", &standard, offset, None).ok();
+                    Ok(serde_json::json!({
+                        "status": "calibrated",
+                        "calibration_id": cal_id,
+                        "instrument": "ph_meter",
+                        "standard": standard,
+                        "offset": offset,
+                        "source": "mock"
+                    }))
                 })
             }),
         );
@@ -376,15 +472,6 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
         ("read_temperature", "Read current incubator temperature.",
             serde_json::json!({"type":"object","properties":{}}),
             serde_json::json!({"temperature_mk":298150,"unit":"mK","source":"mock"})),
-        ("set_temperature", "Set target temperature (temperature_celsius).",
-            serde_json::json!({"type":"object","properties":{"temperature_celsius":{"type":"number"}},"required":["temperature_celsius"]}),
-            serde_json::json!({"status":"temperature_set","source":"mock"})),
-        ("spin_centrifuge", "Spin centrifuge (rcf, duration_seconds, temperature_celsius).",
-            serde_json::json!({"type":"object","properties":{"rcf":{"type":"number"},"duration_seconds":{"type":"number"},"temperature_celsius":{"type":"number"}},"required":["rcf","duration_seconds","temperature_celsius"]}),
-            serde_json::json!({"status":"centrifuged","source":"mock"})),
-        ("calibrate_ph", "Calibrate pH meter (buffer_ph1, buffer_ph2).",
-            serde_json::json!({"type":"object","properties":{"buffer_ph1":{"type":"number"},"buffer_ph2":{"type":"number"}},"required":["buffer_ph1","buffer_ph2"]}),
-            serde_json::json!({"status":"calibrated","source":"mock"})),
         ("incubate", "Incubate for duration (duration_minutes).",
             serde_json::json!({"type":"object","properties":{"duration_minutes":{"type":"number"}},"required":["duration_minutes"]}),
             serde_json::json!({"status":"incubated","source":"mock"})),
@@ -393,10 +480,37 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
     for (name, desc, schema, result) in static_extras {
         let result = result.clone();
         r.register(
-            ToolSpec { name: (*name).into(), description: (*desc).into(), parameters_schema: schema.clone() },
+            ToolSpec {
+                name: (*name).into(),
+                description: (*desc).into(),
+                parameters_schema: schema.clone(),
+                parameter_units: HashMap::new(),
+            },
             Box::new(move |_| { let r = result.clone(); Box::pin(async move { Ok(r) }) }),
         );
     }
+
+    // ── set_temperature with unit metadata ───────────────────────────────────
+    r.register(
+        ToolSpec {
+            name: "set_temperature".into(),
+            description: "Set target temperature (temperature_celsius).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"temperature_celsius":{"type":"number"}},"required":["temperature_celsius"]}),
+            parameter_units: [("temperature_celsius".into(), "°C".into())].into_iter().collect(),
+        },
+        Box::new(|_| Box::pin(async { Ok(serde_json::json!({"status":"temperature_set","source":"mock"})) })),
+    );
+
+    // ── spin_centrifuge with unit metadata ───────────────────────────────────
+    r.register(
+        ToolSpec {
+            name: "spin_centrifuge".into(),
+            description: "Spin centrifuge (rcf, duration_seconds, temperature_celsius).".into(),
+            parameters_schema: serde_json::json!({"type":"object","properties":{"rcf":{"type":"number"},"duration_seconds":{"type":"number"},"temperature_celsius":{"type":"number"}},"required":["rcf","duration_seconds","temperature_celsius"]}),
+            parameter_units: [("rcf".into(), "× g".into()), ("duration_seconds".into(), "s".into())].into_iter().collect(),
+        },
+        Box::new(|_| Box::pin(async { Ok(serde_json::json!({"status":"centrifuged","source":"mock"})) })),
+    );
 
     r.register(
         ToolSpec {
@@ -405,19 +519,28 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>) -> ToolRegis
                 Use this for any experiment with 2+ steps. The runtime executes each \
                 step through the full safety pipeline and returns a signed audit record.".into(),
             parameters_schema: propose_protocol_schema(),
+            parameter_units: HashMap::new(),
         },
         Box::new(|_p| Box::pin(async move {
             Err("propose_protocol is handled by the orchestrator".into())
         })),
     );
 
-    register_analyze_series_tool(&mut r);
+    register_analyze_series_tool(&mut r, journal.clone());
     register_journal_tool(&mut r, journal);
     r
 }
 
 /// Register the `analyze_series` tool: fit OLS / Hill / Michaelis-Menten to (x,y) data.
-fn register_analyze_series_tool(registry: &mut ToolRegistry) {
+///
+/// When a fit clears [`AUTO_FINDING_R2_THRESHOLD`], a structured finding with typed
+/// [`Measurement`] values is automatically written to the discovery journal (source =
+/// "system") and the audit chain — no LLM mediation required for quantitative results.
+fn register_analyze_series_tool(
+    registry: &mut ToolRegistry,
+    journal: Arc<Mutex<DiscoveryJournal>>,
+) {
+    let jpath = journal_path();
     registry.register(
         ToolSpec {
             name: "analyze_series".into(),
@@ -450,69 +573,133 @@ fn register_analyze_series_tool(registry: &mut ToolRegistry) {
                 },
                 "required": ["data"]
             }),
+            parameter_units: HashMap::new(),
         },
-        Box::new(|p| Box::pin(async move {
-            let data = p["data"].as_array().ok_or("missing data array")?;
-            if data.is_empty() {
-                return Err("data array is empty".into());
-            }
+        Box::new(move |p| {
+            let journal = Arc::clone(&journal);
+            let jpath   = jpath.clone();
+            Box::pin(async move {
+                let data = p["data"].as_array().ok_or("missing data array")?;
+                if data.is_empty() {
+                    return Err("data array is empty".into());
+                }
 
-            let xs: Vec<f64> = data.iter().map(|d| d["x"].as_f64().unwrap_or(0.0)).collect();
-            let ys: Vec<f64> = data.iter().map(|d| d["y"].as_f64().unwrap_or(0.0)).collect();
+                let xs: Vec<f64> = data.iter().map(|d| d["x"].as_f64().unwrap_or(0.0)).collect();
+                let ys: Vec<f64> = data.iter().map(|d| d["y"].as_f64().unwrap_or(0.0)).collect();
 
-            let model   = p["model"].as_str().unwrap_or("auto");
-            let x_label = p["x_label"].as_str().unwrap_or("x");
-            let y_label = p["y_label"].as_str().unwrap_or("y");
+                let model   = p["model"].as_str().unwrap_or("auto");
+                let x_label = p["x_label"].as_str().unwrap_or("x").to_owned();
+                let y_label = p["y_label"].as_str().unwrap_or("y").to_owned();
 
-            let mut result = serde_json::json!({
-                "n_points": xs.len(),
-                "x_label":  x_label,
-                "y_label":  y_label,
-            });
-
-            let linear_fit = linear_regression(&xs, &ys);
-            if let Some(ref lf) = linear_fit {
-                result["linear"] = serde_json::json!({
-                    "slope":           lf.slope,
-                    "intercept":       lf.intercept,
-                    "r_squared":       lf.r_squared,
-                    "slope_std_error": lf.slope_std_error,
-                    "aic":             lf.aic(),
+                let mut result = serde_json::json!({
+                    "n_points": xs.len(),
+                    "x_label":  x_label,
+                    "y_label":  y_label,
                 });
-            }
 
-            if model == "auto" || model == "hill" {
-                if let Some(hf) = hill_equation_fit(&xs, &ys) {
-                    result["hill"] = serde_json::json!({
-                        "e_max":  hf.e_max,
-                        "ec50":   hf.ec50,
-                        "hill_n": hf.hill_n,
-                        "aic":    hf.aic(),
+                let linear_fit = linear_regression(&xs, &ys);
+                if let Some(ref lf) = linear_fit {
+                    result["linear"] = serde_json::json!({
+                        "slope":           lf.slope,
+                        "intercept":       lf.intercept,
+                        "r_squared":       lf.r_squared,
+                        "slope_std_error": lf.slope_std_error,
+                        "aic":             lf.aic(),
                     });
-                    if let Some(ref lf) = linear_fit {
-                        result["recommended_model"] = serde_json::json!(
-                            match model_select_aic(lf.aic(), hf.aic()) {
-                                PreferredModel::Linear            => "linear",
-                                PreferredModel::Nonlinear         => "hill",
-                                PreferredModel::Indistinguishable => "indistinguishable",
-                            }
-                        );
+                }
+
+                let mut hill_fit_result = None;
+                if model == "auto" || model == "hill" {
+                    if let Some(hf) = hill_equation_fit(&xs, &ys) {
+                        result["hill"] = serde_json::json!({
+                            "e_max":  hf.e_max,
+                            "ec50":   hf.ec50,
+                            "hill_n": hf.hill_n,
+                            "aic":    hf.aic(),
+                        });
+                        if let Some(ref lf) = linear_fit {
+                            result["recommended_model"] = serde_json::json!(
+                                match model_select_aic(lf.aic(), hf.aic()) {
+                                    PreferredModel::Linear            => "linear",
+                                    PreferredModel::Nonlinear         => "hill",
+                                    PreferredModel::Indistinguishable => "indistinguishable",
+                                }
+                            );
+                        }
+                        hill_fit_result = Some(hf);
                     }
                 }
-            }
 
-            if model == "auto" || model == "michaelis_menten" {
-                if let Some(mmf) = michaelis_menten_fit(&xs, &ys) {
-                    result["michaelis_menten"] = serde_json::json!({
-                        "v_max": mmf.v_max,
-                        "km":    mmf.km,
-                        "aic":   mmf.aic(),
-                    });
+                if model == "auto" || model == "michaelis_menten" {
+                    if let Some(mmf) = michaelis_menten_fit(&xs, &ys) {
+                        result["michaelis_menten"] = serde_json::json!({
+                            "v_max": mmf.v_max,
+                            "km":    mmf.km,
+                            "aic":   mmf.aic(),
+                        });
+                    }
                 }
-            }
 
-            Ok(result)
-        })),
+                // ── Auto-record system findings when fit quality clears threshold ──
+                let audit_path = audit_log_path().to_string_lossy().into_owned();
+                let now = unix_now_secs();
+
+                if let Ok(mut j) = journal.lock() {
+                    // Record x-values as parameter-space coverage probes.
+                    for &x in &xs {
+                        j.record_coverage(ParameterProbe {
+                            tool: "analyze_series".into(),
+                            parameter: x_label.clone(),
+                            value: x,
+                            experiment_id: String::new(),
+                            observed_at_secs: now,
+                        });
+                    }
+
+                    // Linear finding.
+                    if let Some(ref lf) = linear_fit {
+                        if lf.r_squared >= AUTO_FINDING_R2_THRESHOLD {
+                            let measurements = vec![
+                                Measurement { parameter: "slope".into(),     value: lf.slope,           unit: format!("{y_label}/{x_label}"), uncertainty: Some(lf.slope_std_error) },
+                                Measurement { parameter: "intercept".into(), value: lf.intercept,        unit: y_label.clone(),                uncertainty: None },
+                                Measurement { parameter: "r_squared".into(), value: lf.r_squared,        unit: String::new(),                  uncertainty: None },
+                            ];
+                            let stmt = format!(
+                                "Linear fit ({y_label} vs {x_label}): slope={:.4}, R²={:.4}",
+                                lf.slope, lf.r_squared
+                            );
+                            let evidence = vec![format!("n={} data points", xs.len())];
+                            let measurements_json = serde_json::to_string(&measurements).unwrap_or_default();
+                            let id = j.add_finding(stmt.clone(), evidence, measurements, None, "system");
+                            j.save(&jpath).ok();
+                            emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                        }
+                    }
+
+                    // Hill finding.
+                    if let Some(hf) = hill_fit_result {
+                        if hf.ec50 > 0.0 && hf.e_max > 0.0 {
+                            let measurements = vec![
+                                Measurement { parameter: "ec50".into(),   value: hf.ec50,   unit: x_label.clone(), uncertainty: None },
+                                Measurement { parameter: "e_max".into(),  value: hf.e_max,  unit: y_label.clone(), uncertainty: None },
+                                Measurement { parameter: "hill_n".into(), value: hf.hill_n, unit: String::new(),   uncertainty: None },
+                            ];
+                            let stmt = format!(
+                                "Hill fit ({y_label} vs {x_label}): EC50={:.4}, E_max={:.4}, hill_n={:.4}",
+                                hf.ec50, hf.e_max, hf.hill_n
+                            );
+                            let evidence = vec![format!("n={} data points, AIC={:.2}", xs.len(), hf.aic())];
+                            let measurements_json = serde_json::to_string(&measurements).unwrap_or_default();
+                            let id = j.add_finding(stmt.clone(), evidence, measurements, None, "system");
+                            j.save(&jpath).ok();
+                            emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                        }
+                    }
+                }
+
+                Ok(result)
+            })
+        }),
     );
 }
 
@@ -535,6 +722,20 @@ fn register_journal_tool(registry: &mut ToolRegistry, journal: Arc<Mutex<Discove
                     },
                     "statement":      {"type": "string"},
                     "evidence":       {"type": "string"},
+                    "measurements": {
+                        "type": "array",
+                        "description": "Optional structured numeric measurements supporting this finding",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "parameter":   {"type": "string"},
+                                "value":       {"type": "number"},
+                                "unit":        {"type": "string"},
+                                "uncertainty": {"type": "number"}
+                            },
+                            "required": ["parameter", "value", "unit"]
+                        }
+                    },
                     "hypothesis_id":  {"type": "string"},
                     "status": {
                         "type": "string",
@@ -543,6 +744,7 @@ fn register_journal_tool(registry: &mut ToolRegistry, journal: Arc<Mutex<Discove
                 },
                 "required": ["action"]
             }),
+            parameter_units: HashMap::new(),
         },
         Box::new(move |p| {
             let journal    = Arc::clone(&journal);
@@ -556,9 +758,14 @@ fn register_journal_tool(registry: &mut ToolRegistry, journal: Arc<Mutex<Discove
                         let stmt     = p["statement"].as_str().ok_or("missing statement")?.to_string();
                         let ev       = p["evidence"].as_str().unwrap_or("").to_string();
                         let evidence = if ev.is_empty() { vec![] } else { vec![ev.clone()] };
-                        let id       = j.add_finding(stmt.clone(), evidence);
+                        // Parse optional structured measurements from the LLM.
+                        let measurements: Vec<Measurement> = p.get("measurements")
+                            .and_then(|m| serde_json::from_value(m.clone()).ok())
+                            .unwrap_or_default();
+                        let measurements_json = serde_json::to_string(&measurements).unwrap_or_default();
+                        let id = j.add_finding(stmt.clone(), evidence, measurements, None, "llm");
                         j.save(&jpath).ok();
-                        emit_journal_finding(&audit_path, &id, &stmt, &ev, None).ok();
+                        emit_journal_finding(&audit_path, &id, &stmt, &ev, &measurements_json, "llm", None).ok();
                         Ok(serde_json::json!({"recorded": "finding", "id": id, "statement": stmt}))
                     }
                     "add_hypothesis" => {

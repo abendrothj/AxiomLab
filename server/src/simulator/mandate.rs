@@ -1,4 +1,5 @@
 use crate::discovery::DiscoveryJournal;
+use crate::simulator::protocol_library;
 use crate::ws_sink::ExplorationLog;
 use agent_runtime::capabilities::CapabilityPolicy;
 
@@ -124,6 +125,34 @@ pub(crate) fn build_mandate(
         m.push_str("\n## Confirmed working tools: ");
         m.push_str(&unique.join(", "));
         m.push('\n');
+    }
+
+    // ── Parameter-space coverage summary ────────────────────────────────────
+    let coverage = journal.coverage_summary_for_llm();
+    if !coverage.is_empty() {
+        m.push_str("\n## Parameter space explored so far:\n");
+        m.push_str(&coverage);
+        m.push('\n');
+    }
+
+    // ── Calibration status ───────────────────────────────────────────────────
+    if let Some(cal) = journal.last_calibration_for("ph_meter") {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let age_secs = now_secs - cal.performed_at_secs;
+        m.push_str(&format!(
+            "\n⚗️  pH meter last calibrated {age_secs} s ago (standard: {}, offset: {:.3}). \
+             Recalibrate if >1 h has elapsed.\n",
+            cal.standard, cal.offset
+        ));
+    }
+
+    // ── Protocol template registry ───────────────────────────────────────────
+    m.push_str("\n## Canonical protocol templates (set `template_id` for reproducibility)\n");
+    for t in protocol_library::TEMPLATES {
+        m.push_str(&format!("  {} v{} — {}\n", t.id, t.version, t.description));
     }
 
     m.push_str(&format!("\nIteration {iteration}. Build on what came before.\n"));

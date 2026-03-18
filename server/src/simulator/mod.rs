@@ -1,10 +1,12 @@
 mod manifest;
 mod mandate;
+pub mod protocol_library;
 mod tools;
 
 use crate::discovery::HypothesisStatus;
 use crate::ws_sink::WebSocketSink;
 use agent_runtime::{
+    approval_queue::PendingApprovalQueue,
     capabilities::CapabilityPolicy,
     events::EventSink,
     experiment::Experiment,
@@ -22,6 +24,7 @@ pub async fn run_loop(
     sink: Arc<WebSocketSink>,
     running: Arc<AtomicBool>,
     iteration_counter: Arc<AtomicU32>,
+    approval_queue: Arc<PendingApprovalQueue>,
 ) {
     let policy = CapabilityPolicy::default_lab();
 
@@ -79,10 +82,13 @@ pub async fn run_loop(
             tracing::info!(hypothesis = %stmt, "Guided mode: testing active hypothesis");
         }
 
-        let mandate = {
+        let (mandate, journal_summary, findings_at_start) = {
             let log     = sink.log.lock().unwrap();
             let journal = sink.journal.lock().unwrap();
-            mandate::build_mandate(iteration, &log, &journal, &policy, active_hypothesis.as_ref())
+            let m = mandate::build_mandate(iteration, &log, &journal, &policy, active_hypothesis.as_ref());
+            let s = journal.summary_for_llm();
+            let f = journal.findings.len() as u32;
+            (m, s, f)
         };
 
         let config = OrchestratorConfig {
@@ -92,6 +98,10 @@ pub async fn run_loop(
             capability_policy: Some(policy.clone()),
             revocation_list: RevocationList::default(),
             event_sink: Some(Arc::clone(&sink) as Arc<dyn EventSink>),
+            approval_queue: Some(Arc::clone(&approval_queue)),
+            approval_timeout_secs: 300,
+            journal_summary,
+            findings_at_start,
             ..OrchestratorConfig::default()
         };
 
