@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AxiomLab — Pending Approvals</title>
+<style>
+  body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 0; padding: 1.5rem; }
+  h1 { color: #58a6ff; font-size: 1.1rem; margin-bottom: 0.25rem; }
+  .subtitle { color: #8b949e; font-size: 0.8rem; margin-bottom: 1.5rem; }
+  .empty { color: #8b949e; font-style: italic; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; margin-bottom: 1rem; padding: 1rem; }
+  .card-header { display: flex; justify-content: space-between; align-items: flex-start; }
+  .tool-name { color: #ff7b72; font-weight: bold; font-size: 1rem; }
+  .risk { font-size: 0.75rem; background: #3d1c1c; color: #ff7b72; padding: 2px 6px; border-radius: 4px; }
+  .risk.medium { background: #3d2c1c; color: #e3b341; }
+  .risk.low { background: #1c2d1c; color: #3fb950; }
+  .section-label { color: #8b949e; font-size: 0.75rem; margin-top: 0.75rem; margin-bottom: 0.25rem; }
+  .value { background: #0d1117; border: 1px solid #21262d; border-radius: 4px; padding: 0.4rem; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; }
+  .actions { margin-top: 1rem; display: flex; gap: 0.5rem; }
+  button { font-family: monospace; font-size: 0.85rem; padding: 0.4rem 1rem; border-radius: 4px; cursor: pointer; border: none; }
+  .btn-deny { background: #21262d; color: #f85149; border: 1px solid #f85149; }
+  .btn-deny:hover { background: #3d1c1c; }
+  .btn-approve { background: #21262d; color: #3fb950; border: 1px solid #3fb950; }
+  .btn-approve:hover { background: #1c2d1c; }
+  .dialog-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); z-index:10; align-items:center; justify-content:center; }
+  .dialog-overlay.open { display:flex; }
+  .dialog { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; width: 560px; max-width: 95vw; }
+  .dialog h2 { margin:0 0 0.75rem; color:#58a6ff; font-size:0.95rem; }
+  .dialog p { font-size:0.8rem; color:#8b949e; margin:0 0 0.75rem; }
+  .dialog textarea { width:100%; box-sizing:border-box; height:140px; background:#0d1117; color:#c9d1d9; border:1px solid #30363d; border-radius:4px; font-family:monospace; font-size:0.75rem; padding:0.5rem; resize:vertical; }
+  .dialog-actions { margin-top:1rem; display:flex; justify-content:flex-end; gap:0.5rem; }
+  .toast { position:fixed; bottom:1.5rem; right:1.5rem; background:#161b22; border:1px solid #30363d; border-radius:6px; padding:0.75rem 1.25rem; font-size:0.8rem; display:none; }
+  .toast.ok { border-color:#3fb950; color:#3fb950; }
+  .toast.err { border-color:#f85149; color:#f85149; }
+  .age { color:#8b949e; font-size:0.75rem; }
+  .refresh-note { color:#8b949e; font-size:0.75rem; margin-bottom:1rem; }
+</style>
+</head>
+<body>
+<h1>AxiomLab — Pending Approvals</h1>
+<div class="subtitle">High-risk actions queued for operator review. Auto-refreshes every 5 s.</div>
+<div class="refresh-note" id="last-refresh">Loading…</div>
+<div id="list"></div>
+
+<div class="dialog-overlay" id="approve-dialog">
+  <div class="dialog">
+    <h2>Submit Approval Bundle</h2>
+    <p>Run <code>approvalctl sign --pending-id &lt;id&gt;</code> in your terminal, then paste the resulting JSON bundle below.</p>
+    <textarea id="bundle-input" placeholder='[{"approver_id":"alice","role":"operator","signature":"...","expires_at":...}]'></textarea>
+    <div class="dialog-actions">
+      <button class="btn-deny" onclick="closeApproveDialog()">Cancel</button>
+      <button class="btn-approve" onclick="submitApproval()">Submit</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let pendingApproveId = null;
+
+function riskClass(rc) {
+  if (!rc) return '';
+  const r = rc.toLowerCase();
+  if (r.includes('actuation') || r.includes('destructive')) return '';
+  if (r.includes('liquid')) return 'medium';
+  return 'low';
+}
+
+function ago(secs) {
+  const d = Math.floor(Date.now() / 1000) - secs;
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d/60)}m ago`;
+  return `${Math.floor(d/3600)}h ago`;
+}
+
+function toast(msg, ok) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + (ok ? 'ok' : 'err');
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/approvals/pending');
+    const data = await r.json();
+    const list = document.getElementById('list');
+    document.getElementById('last-refresh').textContent =
+      `Last refresh: ${new Date().toLocaleTimeString()} — ${data.length} pending`;
+    if (!data.length) {
+      list.innerHTML = '<div class="empty">No pending approvals.</div>';
+      return;
+    }
+    list.innerHTML = data.map(item => `
+      <div class="card">
+        <div class="card-header">
+          <span class="tool-name">${item.tool_name}</span>
+          <span class="risk ${riskClass(item.risk_class)}">${item.risk_class || 'unknown risk'}</span>
+        </div>
+        <div class="age">${ago(item.queued_at)} &nbsp;·&nbsp; ID: ${item.pending_id}</div>
+        <div class="section-label">Hypothesis</div>
+        <div class="value">${item.hypothesis || '(none)'}</div>
+        <div class="section-label">Parameters</div>
+        <div class="value">${JSON.stringify(item.params, null, 2)}</div>
+        ${item.recent_actions && item.recent_actions.length ? `
+        <div class="section-label">Recent actions (last ${item.recent_actions.length})</div>
+        <div class="value">${item.recent_actions.map(([t,p]) => t + ': ' + JSON.stringify(p)).join('\n')}</div>` : ''}
+        <div class="actions">
+          <button class="btn-deny" onclick="deny('${item.pending_id}')">Deny</button>
+          <button class="btn-approve" onclick="openApproveDialog('${item.pending_id}')">Approve…</button>
+        </div>
+      </div>
+    `).join('');
+  } catch(e) {
+    document.getElementById('last-refresh').textContent = 'Error fetching approvals: ' + e.message;
+  }
+}
+
+async function deny(pendingId) {
+  if (!confirm(`Deny action ${pendingId}?`)) return;
+  try {
+    const r = await fetch('/api/approvals/submit', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ pending_id: pendingId, bundle: null }),
+    });
+    toast(r.ok ? 'Action denied.' : 'Error: ' + await r.text(), r.ok);
+    load();
+  } catch(e) { toast('Network error: ' + e.message, false); }
+}
+
+function openApproveDialog(pendingId) {
+  pendingApproveId = pendingId;
+  document.getElementById('bundle-input').value = '';
+  document.getElementById('approve-dialog').classList.add('open');
+}
+
+function closeApproveDialog() {
+  document.getElementById('approve-dialog').classList.remove('open');
+  pendingApproveId = null;
+}
+
+async function submitApproval() {
+  const raw = document.getElementById('bundle-input').value.trim();
+  let bundle;
+  try { bundle = JSON.parse(raw); } catch(e) { toast('Invalid JSON bundle', false); return; }
+  try {
+    const r = await fetch('/api/approvals/submit', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ pending_id: pendingApproveId, bundle }),
+    });
+    closeApproveDialog();
+    toast(r.ok ? 'Approval submitted.' : 'Error: ' + await r.text(), r.ok);
+    load();
+  } catch(e) { toast('Network error: ' + e.message, false); }
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

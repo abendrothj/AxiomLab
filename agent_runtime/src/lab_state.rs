@@ -42,6 +42,9 @@ pub struct Reagent {
     pub ghs_hazard_codes: Vec<String>,
     /// Link to a `ReferenceMaterial` record, if this is a certified standard.
     pub reference_material_id: Option<String>,
+    /// Nominal pH of the reagent in aqueous solution.  Used by the pH simulator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nominal_ph: Option<f64>,
 }
 
 impl Reagent {
@@ -209,6 +212,7 @@ mod tests {
             expiry_secs: None,
             ghs_hazard_codes: vec![],
             reference_material_id: None,
+            nominal_ph: None,
         }
     }
 

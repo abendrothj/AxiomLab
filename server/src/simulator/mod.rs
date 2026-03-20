@@ -11,10 +11,12 @@ use agent_runtime::{
     capabilities::CapabilityPolicy,
     events::EventSink,
     experiment::Experiment,
+    lab_state::LabState,
     llm::OpenAiClient,
     orchestrator::{Orchestrator, OrchestratorConfig},
     revocation::RevocationList,
 };
+use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
@@ -38,6 +40,7 @@ struct ExperimentTask {
     exec_ctx:       proof_artifacts::policy::ExecutionContext,
     db:             Arc<crate::db::Db>,
     approval_queue: Arc<PendingApprovalQueue>,
+    lab_state:      Arc<Mutex<LabState>>,
 }
 
 /// Result returned from a completed experiment task.
@@ -62,10 +65,12 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
             Arc::clone(clients),
             Arc::clone(&task.sink.journal),
             Arc::clone(&task.db),
+            Arc::clone(&task.lab_state),
         ),
         None => tools::make_sim_tools(
             Arc::clone(&task.sink.journal),
             Arc::clone(&task.db),
+            Arc::clone(&task.lab_state),
         ),
     };
 
@@ -77,10 +82,14 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
         tracing::error!("Slot {} experiment {} error: {e}", task.slot, task.experiment_id);
     }
 
-    // Convergence check — all hypotheses settled + at least one finding.
+    // Convergence check — all hypotheses settled + at least one system-generated finding.
+    // A "system" finding is auto-recorded by `analyze_series` (R² ≥ 0.80); the LLM
+    // cannot fake convergence by calling `confirm_hypothesis` without measured data.
     let converged = {
         let j = task.sink.journal.lock().unwrap();
-        !j.findings.is_empty()
+        let has_system_finding = j.findings.iter()
+            .any(|f| f.source == "system");
+        has_system_finding
             && !j.hypotheses.is_empty()
             && j.hypotheses.iter().all(|h| {
                 h.status == HypothesisStatus::Confirmed
@@ -101,6 +110,7 @@ pub async fn run_loop(
     approval_queue:     Arc<PendingApprovalQueue>,
     db:                 Arc<crate::db::Db>,
     sila_clients:       Option<Arc<agent_runtime::hardware::SiLA2Clients>>,
+    lab_state:          Arc<Mutex<LabState>>,
 ) {
     let policy     = CapabilityPolicy::default_lab();
     let scheduler  = LabScheduler::from_env();
@@ -241,6 +251,7 @@ pub async fn run_loop(
                 exec_ctx:       exec_ctx.clone(),
                 db:             Arc::clone(&db),
                 approval_queue: Arc::clone(&approval_queue),
+                lab_state:      Arc::clone(&lab_state),
             };
 
             tracing::info!(

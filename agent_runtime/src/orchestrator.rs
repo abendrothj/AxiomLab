@@ -798,6 +798,8 @@ impl<L: LlmBackend> Orchestrator<L> {
         let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
 
         let uncertainty_budgets = self.build_uncertainty_budgets(&step_results);
+        let doe_anova = protocol.doe_design_json.as_deref()
+            .and_then(|json| self.run_doe_anova(json, &step_results));
 
         ProtocolRunResult {
             protocol_id: protocol.id,
@@ -812,6 +814,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             rekor_status,
             zk_proof_status,
             uncertainty_budgets,
+            doe_anova,
         }
     }
 
@@ -1002,6 +1005,8 @@ impl<L: LlmBackend> Orchestrator<L> {
         let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
 
         let uncertainty_budgets = self.build_uncertainty_budgets(&all_step_results);
+        let doe_anova = protocol.doe_design_json.as_deref()
+            .and_then(|json| self.run_doe_anova(json, &all_step_results));
 
         ProtocolRunResult {
             protocol_id: protocol.id,
@@ -1016,7 +1021,67 @@ impl<L: LlmBackend> Orchestrator<L> {
             rekor_status,
             zk_proof_status,
             uncertainty_budgets,
+            doe_anova,
         }
+    }
+
+    /// Run one-way ANOVA on protocol step responses grouped by the first DoE factor level.
+    ///
+    /// Parses `doe_design_json` as a `DoeDesign`, pairs each run row with the
+    /// corresponding allowed step result (in order), groups the numeric response
+    /// values by the first factor's level bracket (low ≤ mid vs high > mid),
+    /// then calls `anova_one_way`.  Returns `None` if the design cannot be parsed,
+    /// there are insufficient data points, or ANOVA fails for any reason.
+    fn run_doe_anova(
+        &self,
+        doe_design_json: &str,
+        step_results: &[crate::protocol::StepOutcome],
+    ) -> Option<crate::protocol::DoeAnovaResult> {
+        use scientific_compute::doe::DoeDesign;
+        use scientific_compute::stats::anova_one_way;
+
+        let design: DoeDesign = serde_json::from_str(doe_design_json).ok()?;
+        if design.factors.is_empty() || design.runs.is_empty() {
+            return None;
+        }
+
+        // Collect numeric responses from allowed steps, in order.
+        let responses: Vec<f64> = step_results.iter()
+            .filter(|s| s.allowed)
+            .filter_map(|s| {
+                let result = s.result.as_ref()?;
+                result.as_object()?.iter()
+                    .filter(|(k, _)| !k.starts_with('_'))
+                    .find_map(|(_, v)| v.as_f64())
+            })
+            .collect();
+
+        // Pair responses with DoE run rows (zip stops at the shorter).
+        let first_factor = &design.factors[0];
+        let mid = (first_factor.low + first_factor.high) / 2.0;
+
+        // Group responses by first factor level (low ≤ mid → group 0, else group 1).
+        let n_groups = 2usize;
+        let mut groups: Vec<Vec<f64>> = vec![Vec::new(); n_groups];
+        for (run, response) in design.runs.iter().zip(responses.iter()) {
+            let level = run.get(&first_factor.name).copied().unwrap_or(first_factor.low);
+            let group_idx = if level <= mid { 0 } else { 1 };
+            groups[group_idx].push(*response);
+        }
+
+        // Need ≥2 observations per group.
+        if groups.iter().any(|g| g.len() < 2) {
+            return None;
+        }
+
+        let result = anova_one_way(&groups).ok()?;
+        let n_total: usize = groups.iter().map(|g| g.len()).sum();
+        Some(crate::protocol::DoeAnovaResult {
+            f_statistic: result.f_statistic,
+            p_value:     result.p_value,
+            n_groups,
+            n_total,
+        })
     }
 
     /// Build GUM-compliant uncertainty budgets from step outcomes.
@@ -1077,7 +1142,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         // ── Stage 0: Sandbox allowlist ────────────────────────────────────
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
-            self.audit_decision(tool_name, "deny", &e.to_string(), false, None, None).await;
+            self.audit_decision(tool_name, "deny", &e.to_string(), false, None, reasoning_text.clone()).await;
             self.emit_tool_event(tool_name, &params, "rejected", &e.to_string());
             return Some(ToolResult {
                 name: tool_name.to_owned(),
@@ -1102,7 +1167,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                     // Calibrated but expired → warn, continue.
                     let msg = format!("calibration for '{tool_name}' has expired — readings may be inaccurate");
                     warn!(%msg);
-                    self.audit_decision(tool_name, "allow", &msg, false, None, None).await;
+                    self.audit_decision(tool_name, "allow", &msg, false, None, reasoning_text.clone()).await;
                 }
                 None | Some((false, _)) if QUANTITATIVE_TOOLS.contains(&tool_name) => {
                     // No calibration at all for quantitative tool → deny.
@@ -1111,7 +1176,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                          Run calibrate_ph / calibrate_spectrophotometer before taking readings."
                     );
                     warn!(%msg);
-                    self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
+                    self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                     self.emit_tool_event(tool_name, &params, "rejected", &msg);
                     return Some(ToolResult {
                         name: tool_name.to_owned(),
@@ -1135,7 +1200,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                                 .collect::<Vec<_>>()
                                 .join("; ");
                             warn!(tool = tool_name, %msg, "params failed schema validation");
-                            self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
+                            self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
@@ -1271,7 +1336,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                                 self.config.approval_timeout_secs
                             );
                             warn!(%pending_id, %msg);
-                            self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
+                            self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
@@ -1283,7 +1348,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         }
                         Ok(Err(_recv_err)) => {
                             let msg = "approval cancelled: server shutting down";
-                            self.audit_decision(tool_name, "deny", msg, false, None, None).await;
+                            self.audit_decision(tool_name, "deny", msg, false, None, reasoning_text.clone()).await;
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
@@ -1295,7 +1360,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         Ok(Ok(None)) => {
                             let msg = format!("operator denied action '{tool_name}'");
                             warn!(%pending_id, %msg);
-                            self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
+                            self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
@@ -1325,7 +1390,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                             for aid in &approval_ids {
                                 if self.config.revocation_list.is_approval_revoked(aid) {
                                     let msg = format!("approval {aid} has been revoked");
-                                    self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
+                                    self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                                     queue.purge_sidecar(&pending_id);
                                     return Some(ToolResult {
                                         name: tool_name.to_owned(),
@@ -1344,7 +1409,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                             // Fall through to Stage 2 with original params (no bundle injected).
                         }
                         Err(e) => {
-                            self.audit_decision(tool_name, "deny", &e, false, None, None).await;
+                            self.audit_decision(tool_name, "deny", &e, false, None, reasoning_text.clone()).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &e);
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
@@ -1361,7 +1426,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         "approval violation: '{tool_name}' requires signed approvals \
                          (no interactive approval queue configured)"
                     );
-                    self.audit_decision(tool_name, "deny", &e, false, None, None).await;
+                    self.audit_decision(tool_name, "deny", &e, false, None, reasoning_text.clone()).await;
                     self.emit_tool_event(tool_name, &params, "rejected", &e);
                     return Some(ToolResult {
                         name: tool_name.to_owned(),
@@ -1383,7 +1448,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         for aid in &approval_ids {
                             if self.config.revocation_list.is_approval_revoked(aid) {
                                 let msg = format!("approval {aid} has been revoked");
-                                self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
+                                self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                                 return Some(ToolResult {
                                     name: tool_name.to_owned(),
                                     output: serde_json::Value::String(msg),
@@ -1401,7 +1466,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         }
                     }
                     Err(e) => {
-                        self.audit_decision(tool_name, "deny", &e, false, None, None).await;
+                        self.audit_decision(tool_name, "deny", &e, false, None, reasoning_text.clone()).await;
                         self.emit_tool_event(tool_name, &params, "rejected", &e);
                         return Some(ToolResult {
                             name: tool_name.to_owned(),
@@ -1419,7 +1484,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let Some(capability) = &self.config.capability_policy {
             let param_units = self.tools.spec_for(tool_name).map(|s| &s.parameter_units);
             if let Err(e) = capability.validate(tool_name, &params, param_units) {
-                self.audit_decision(tool_name, "deny", &e, false, None, None).await;
+                self.audit_decision(tool_name, "deny", &e, false, None, reasoning_text.clone()).await;
                 self.emit_tool_event(tool_name, &params, "rejected", &e);
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
@@ -1434,7 +1499,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         let high_risk = matches!(risk_class, Some(RiskClass::Actuation | RiskClass::Destructive));
         if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
             let msg = "high-risk action denied: runtime proof policy is not configured";
-            self.audit_decision(tool_name, "deny", msg, false, None, None).await;
+            self.audit_decision(tool_name, "deny", msg, false, None, reasoning_text.clone()).await;
             self.emit_tool_event(tool_name, &params, "rejected", msg);
             return Some(ToolResult {
                 name: tool_name.to_owned(),
@@ -1448,7 +1513,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
-                self.audit_decision(tool_name, "deny", &report.reason, false, None, None).await;
+                self.audit_decision(tool_name, "deny", &report.reason, false, None, reasoning_text.clone()).await;
                 self.emit_tool_event(tool_name, &params, "rejected", &report.reason);
                 return Some(ToolResult {
                     name: tool_name.to_owned(),

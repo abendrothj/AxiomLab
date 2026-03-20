@@ -38,6 +38,12 @@ When you start testing a hypothesis, mark it 'testing'. After analysis, mark it 
 'confirmed' or 'rejected'. When ALL active hypotheses are settled and you have a \
 coherent model, conclude with {\"done\": true, \"summary\": \"<your constraint map>\"}.\n\
 \n\
+## Convergence requirement\n\
+Convergence requires at least one quantitative finding auto-recorded by `analyze_series` \
+(R² ≥ 0.80). Confirming a hypothesis without fitting measured data is not accepted — \
+collect a series of readings, call `analyze_series`, then confirm or reject based on \
+the fitted parameters.\n\
+\n\
 Instrument your exploration: after each significant result, call `update_journal` to \
 record findings (add_finding) or new hypotheses (add_hypothesis). The journal persists \
 across runs — your accumulated knowledge is always at the top of each session.";

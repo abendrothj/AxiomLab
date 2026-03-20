@@ -1,4 +1,5 @@
 mod approvals;
+mod approvals_ui;
 mod audit_query;
 mod auth;
 mod db;
@@ -666,8 +667,10 @@ async fn main() {
         });
     } else {
         tracing::warn!(
-            "No AXIOMLAB_AUDIT_SIGNING_KEY set — audit entries will be unsigned \
-             and Rekor checkpointing is disabled. Set the key for production use."
+            "Could not initialize audit signing key — entries will be unsigned \
+             and Rekor checkpointing is disabled. \
+             Set AXIOMLAB_AUDIT_SIGNING_KEY or AXIOMLAB_AUDIT_SIGNING_KEY_PATH, \
+             or ensure ~/.config/axiomlab/ is writable."
         );
     }
 
@@ -776,13 +779,14 @@ async fn main() {
             db:       Arc::clone(&sqlite_db),
         });
         state.running.store(true, Ordering::SeqCst);
-        let running   = Arc::clone(&state.running);
-        let stalled   = Arc::clone(&state.stalled);
-        let iteration = Arc::clone(&state.iteration);
-        let db_for_loop = Arc::clone(&sqlite_db);
-        let sila_for_loop = sila_clients.clone();
+        let running         = Arc::clone(&state.running);
+        let stalled         = Arc::clone(&state.stalled);
+        let iteration       = Arc::clone(&state.iteration);
+        let db_for_loop     = Arc::clone(&sqlite_db);
+        let sila_for_loop   = sila_clients.clone();
+        let lab_for_loop    = Arc::clone(&state.lab_state);
         tokio::spawn(async move {
-            simulator::run_loop(sink, running.clone(), stalled, iteration, approval_queue, db_for_loop, sila_for_loop).await;
+            simulator::run_loop(sink, running.clone(), stalled, iteration, approval_queue, db_for_loop, sila_for_loop, lab_for_loop).await;
             running.store(false, Ordering::SeqCst);
         });
     }
@@ -832,6 +836,7 @@ async fn main() {
         .with_state(state.clone());
 
     let app = Router::new()
+        .route("/approvals",                       get(approvals_ui::approvals_ui_handler))
         .route("/ws",                              get(ws_handler))
         .route("/api/status",                      get(status_handler))
         .route("/api/history",                     get(history_handler))

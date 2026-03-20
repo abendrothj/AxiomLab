@@ -1,5 +1,6 @@
 use crate::db::Db;
 use crate::discovery::{journal_path, DiscoveryJournal, HypothesisStatus, Measurement, ParameterProbe};
+use agent_runtime::lab_state::LabState;
 use rand::Rng;
 use scientific_compute::fitting::{
     hill_equation_fit, linear_regression, michaelis_menten_fit, model_select_aic, PreferredModel,
@@ -36,9 +37,10 @@ pub(crate) fn make_sandbox() -> Sandbox {
 
 /// Tool registry backed by real SiLA 2 gRPC clients.
 pub(crate) fn make_sila2_tools(
-    clients: Arc<SiLA2Clients>,
-    journal: Arc<Mutex<DiscoveryJournal>>,
-    db: Arc<Db>,
+    clients:   Arc<SiLA2Clients>,
+    journal:   Arc<Mutex<DiscoveryJournal>>,
+    db:        Arc<Db>,
+    lab_state: Arc<Mutex<LabState>>,
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
 
@@ -194,19 +196,56 @@ pub(crate) fn make_sila2_tools(
         })}),
     );
 
-    r.register(
-        ToolSpec {
-            name: "read_sensor".into(),
-            description: "Read a named sensor value.".into(),
-            parameters_schema: serde_json::json!({"type":"object","properties":{"sensor_id":{"type":"string","enum":["pH-1","temp-1","pressure-1"]}},"required":["sensor_id"]}),
-            parameter_units: HashMap::new(),
-            instrument_uncertainty: None,
-        },
-        Box::new(|p| Box::pin(async move {
-            let id = p["sensor_id"].as_str().ok_or("missing sensor_id")?;
-            Ok(serde_json::json!({"sensor_id": id, "value": 7.04, "unit": "pH", "source": "STUB"}))
-        })),
-    );
+    {
+        let ls_sensor = Arc::clone(&lab_state);
+        r.register(
+            ToolSpec {
+                name: "read_sensor".into(),
+                description: "Read a named sensor. sensor_type: 'ph' | 'temperature' | 'absorbance'. \
+                    For pH, supply sample_id (vessel). For absorbance, supply vessel_id and wavelength_nm.".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"sensor_type":{"type":"string","enum":["ph","temperature","absorbance"]},"sample_id":{"type":"string"},"vessel_id":{"type":"string"},"wavelength_nm":{"type":"number"}},"required":["sensor_type"]}),
+                parameter_units: HashMap::new(),
+                instrument_uncertainty: None,
+            },
+            Box::new(move |p| {
+                let ls_sensor = Arc::clone(&ls_sensor);
+                Box::pin(async move {
+                    let sensor_type = p["sensor_type"].as_str().ok_or("missing sensor_type")?;
+                    match sensor_type {
+                        "ph" => {
+                            let vessel_id = p["sample_id"].as_str()
+                                .or_else(|| p["vessel_id"].as_str())
+                                .unwrap_or("vessel-1");
+                            let ph = {
+                                let lab = ls_sensor.lock().unwrap();
+                                let contents = lab.vessel_contents.get(vessel_id).cloned().unwrap_or_default();
+                                let phs: Vec<f64> = contents.iter()
+                                    .filter_map(|rid| lab.reagents.get(rid))
+                                    .filter_map(|r| r.nominal_ph)
+                                    .collect();
+                                if phs.is_empty() { 7.0 } else { phs.iter().sum::<f64>() / phs.len() as f64 }
+                            };
+                            let noise = rand::thread_rng().gen_range(0.99..=1.01_f64);
+                            Ok(serde_json::json!({"sensor_type": "ph", "value": (ph * noise * 100.0).round() / 100.0, "unit": "pH"}))
+                        }
+                        "temperature" => {
+                            let temp = 298.15 + rand::thread_rng().gen_range(-0.2_f64..0.2);
+                            Ok(serde_json::json!({"sensor_type": "temperature", "value": temp, "unit": "K"}))
+                        }
+                        "absorbance" => {
+                            let vessel_id   = p["vessel_id"].as_str().unwrap_or("vessel-1");
+                            let wavelength  = p["wavelength_nm"].as_f64().unwrap_or(500.0);
+                            let fill = 0.5_f64; // no vessel state in sila2 path — neutral default
+                            let wl_factor = (-0.5 * ((wavelength - 500.0) / 150.0).powi(2)).exp();
+                            let abs = (fill * wl_factor * 1000.0).round() / 1000.0;
+                            Ok(serde_json::json!({"sensor_type": "absorbance", "vessel_id": vessel_id, "wavelength_nm": wavelength, "value": abs, "unit": "AU"}))
+                        }
+                        other => Err(format!("unknown sensor_type '{other}' — use ph | temperature | absorbance")),
+                    }
+                })
+            }),
+        );
+    }
 
     let c = clients.clone();
     r.register(
@@ -349,7 +388,11 @@ fn unix_now_secs() -> i64 {
 ///
 /// Uses the same Beer-Lambert physics model as the Python SiLA 2 mock so that
 /// agent behaviour developed offline transfers faithfully to real hardware runs.
-pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>, db: Arc<Db>) -> ToolRegistry {
+pub(crate) fn make_sim_tools(
+    journal:   Arc<Mutex<DiscoveryJournal>>,
+    db:        Arc<Db>,
+    lab_state: Arc<Mutex<LabState>>,
+) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     agent_runtime::tools::register_lab_tools(&mut r);
 
@@ -360,22 +403,34 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>, db: Arc<Db>)
     // ── dispense ──────────────────────────────────────────────────────────────
     {
         let vs = Arc::clone(&vessel_state);
+        let ls = Arc::clone(&lab_state);
         r.register(
             ToolSpec {
                 name: "dispense".into(),
-                description: "Dispense liquid into a vessel (vessel_id, volume_ul).".into(),
-                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+                description: "Dispense liquid into a vessel (vessel_id, volume_ul, reagent_id?). \
+                    Optionally supply reagent_id to track which reagent was dispensed for \
+                    chemical-compatibility checking and pH simulation.".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]},"volume_ul":{"type":"number"},"reagent_id":{"type":"string","description":"ID of the reagent being dispensed (optional)"}},"required":["vessel_id","volume_ul"]}),
                 parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
                 instrument_uncertainty: None,
             },
             Box::new(move |p| {
                 let vs = Arc::clone(&vs);
+                let ls = Arc::clone(&ls);
                 Box::pin(async move {
-                    let id  = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
-                    let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
-                    let mut state = vs.lock().unwrap();
-                    let snapshot = snap_vessels(&state);
-                    let new_vol = state.dispense(id, vol).map_err(|e| e)?;
+                    let id         = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
+                    let vol        = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
+                    let reagent_id = p["reagent_id"].as_str();
+                    let mut state  = vs.lock().unwrap();
+                    let snapshot   = snap_vessels(&state);
+                    let new_vol    = state.dispense(id, vol).map_err(|e| e)?;
+                    // Sync LabState: deduct reagent stock and record vessel contents.
+                    if let Some(rid) = reagent_id {
+                        let mut lab = ls.lock().unwrap();
+                        lab.deduct_volume(rid, vol).ok(); // noop if reagent not registered
+                        lab.add_to_vessel(id, rid);
+                        lab.save();
+                    }
                     Ok(serde_json::json!({
                         "status": "dispensed", "vessel_id": id,
                         "volume_ul": vol, "current_volume_ul": new_vol,
@@ -389,22 +444,32 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>, db: Arc<Db>)
     // ── aspirate ─────────────────────────────────────────────────────────────
     {
         let vs = Arc::clone(&vessel_state);
+        let ls = Arc::clone(&lab_state);
         r.register(
             ToolSpec {
                 name: "aspirate".into(),
-                description: "Aspirate liquid from a vessel (vessel_id, volume_ul).".into(),
-                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]},"volume_ul":{"type":"number"}},"required":["vessel_id","volume_ul"]}),
+                description: "Aspirate liquid from a vessel (vessel_id, volume_ul, reagent_id?). \
+                    Optionally supply reagent_id to update vessel contents tracking.".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]},"volume_ul":{"type":"number"},"reagent_id":{"type":"string","description":"ID of the reagent being aspirated (optional)"}},"required":["vessel_id","volume_ul"]}),
                 parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
                 instrument_uncertainty: None,
             },
             Box::new(move |p| {
                 let vs = Arc::clone(&vs);
+                let ls = Arc::clone(&ls);
                 Box::pin(async move {
-                    let id  = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
-                    let vol = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
-                    let mut state = vs.lock().unwrap();
-                    let snapshot = snap_vessels(&state);
-                    let remaining = state.aspirate(id, vol).map_err(|e| e)?;
+                    let id         = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
+                    let vol        = p["volume_ul"].as_f64().ok_or("missing volume_ul")?;
+                    let reagent_id = p["reagent_id"].as_str();
+                    let mut state  = vs.lock().unwrap();
+                    let snapshot   = snap_vessels(&state);
+                    let remaining  = state.aspirate(id, vol).map_err(|e| e)?;
+                    // Sync LabState: remove reagent from vessel contents record.
+                    if let Some(rid) = reagent_id {
+                        let mut lab = ls.lock().unwrap();
+                        lab.remove_from_vessel(id, rid);
+                        lab.save();
+                    }
                     Ok(serde_json::json!({
                         "status": "aspirated", "vessel_id": id,
                         "volume_ul": vol, "current_volume_ul": remaining,
@@ -503,11 +568,47 @@ pub(crate) fn make_sim_tools(journal: Arc<Mutex<DiscoveryJournal>>, db: Arc<Db>)
         );
     }
 
+    // ── read_ph — physics-based: weighted-average nominal_ph from vessel contents ──
+    {
+        let ls_ph = Arc::clone(&lab_state);
+        r.register(
+            ToolSpec {
+                name: "read_ph".into(),
+                description: "Read vessel pH. Returns weighted-average nominal_ph of reagents \
+                    registered in the vessel, with ±1% noise and calibration offset applied. \
+                    Defaults to 7.0 if no reagents with nominal_ph are present.".into(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]}},"required":["vessel_id"]}),
+                parameter_units: HashMap::new(),
+                instrument_uncertainty: Some(InstrumentUncertainty {
+                    u_type_a_fraction: 0.01,
+                    u_type_b_abs: 0.05,
+                    unit: "pH".into(),
+                }),
+            },
+            Box::new(move |p| {
+                let ls_ph = Arc::clone(&ls_ph);
+                Box::pin(async move {
+                    let vessel_id = p["vessel_id"].as_str().ok_or("missing vessel_id")?;
+                    let ph = {
+                        let lab = ls_ph.lock().unwrap();
+                        let contents = lab.vessel_contents.get(vessel_id).cloned().unwrap_or_default();
+                        let phs: Vec<f64> = contents.iter()
+                            .filter_map(|rid| lab.reagents.get(rid))
+                            .filter_map(|r| r.nominal_ph)
+                            .collect();
+                        if phs.is_empty() { 7.0 } else { phs.iter().sum::<f64>() / phs.len() as f64 }
+                    };
+                    // Add ±1% noise
+                    let noise = rand::thread_rng().gen_range(0.99..=1.01_f64);
+                    let ph_out = (ph * noise * 100.0).round() / 100.0;
+                    Ok(serde_json::json!({"ph": ph_out, "unit": "pH", "source": "mock-physics"}))
+                })
+            }),
+        );
+    }
+
     // ── static mocks for instruments that don't affect vessel volume ──────────
     let static_extras: &[(&str, &str, serde_json::Value, serde_json::Value)] = &[
-        ("read_ph", "Read vessel pH.",
-            serde_json::json!({"type":"object","properties":{"vessel_id":{"type":"string","enum":["beaker_A","beaker_B","tube_1","tube_2","tube_3","plate_well_A1","plate_well_B1","reservoir"]}},"required":["vessel_id"]}),
-            serde_json::json!({"ph":7.2,"unit":"pH","source":"mock"})),
         ("read_temperature", "Read current incubator temperature.",
             serde_json::json!({"type":"object","properties":{}}),
             serde_json::json!({"temperature_mk":298150,"unit":"mK","source":"mock"})),
@@ -895,7 +996,9 @@ fn register_doe_tool(registry: &mut ToolRegistry) {
                 "design_type: 'full_factorial' (k≤5), 'central_composite' (2≤k≤4), or 'latin_hypercube'. ",
                 "factors: array of {name, unit, low, high}. ",
                 "n_runs: only for latin_hypercube (default 20). ",
-                "Returns run matrix as JSON rows."
+                "Returns run matrix as JSON rows. ",
+                "IMPORTANT: pass the entire returned JSON string as doe_design_json in your propose_protocol call ",
+                "to link this design to the protocol for automatic one-way ANOVA at conclusion."
             ).into(),
             parameters_schema: serde_json::json!({
                 "type": "object",

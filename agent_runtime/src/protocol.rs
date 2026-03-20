@@ -46,6 +46,11 @@ pub struct Protocol {
     /// Optional canonical protocol template ID (e.g. "beer-lambert-scan-v1").
     /// `None` for fully custom, ad-hoc protocols.
     pub template_id: Option<String>,
+    /// Serialized DoE design JSON from `design_experiment`, if this protocol was
+    /// generated from a design-of-experiments run matrix.  Stored for audit linkage;
+    /// one-way ANOVA is auto-run at conclusion when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doe_design_json: Option<String>,
 }
 
 /// The JSON shape the LLM emits when calling `propose_protocol`.
@@ -70,6 +75,11 @@ pub struct ProtocolPlan {
     /// Optional canonical protocol template ID for reproducibility tracking.
     #[serde(default)]
     pub template_id: Option<String>,
+    /// DoE design JSON from `design_experiment`.  Pass the `design_json` field
+    /// returned by `design_experiment` here to link this protocol to the DoE
+    /// run matrix and trigger auto-ANOVA at conclusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doe_design_json: Option<String>,
 }
 
 fn default_replicate_count() -> u32 { 1 }
@@ -131,6 +141,7 @@ impl ProtocolPlan {
                 .as_secs() as i64,
             replicate_count: self.replicate_count,
             template_id: self.template_id,
+            doe_design_json: self.doe_design_json,
         }
     }
 }
@@ -349,6 +360,23 @@ pub struct ProtocolRunResult {
     /// One entry per unique measured parameter (e.g., "pH", "absorbance_600nm").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uncertainty_budgets: Vec<UncertaintyBudget>,
+    /// One-way ANOVA result computed at conclusion when `doe_design_json` was supplied.
+    /// `None` if no DoE design was linked or ANOVA could not be run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doe_anova: Option<DoeAnovaResult>,
+}
+
+/// Summary of a one-way ANOVA run on DoE response data at protocol conclusion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoeAnovaResult {
+    /// F-statistic from one-way ANOVA across factor levels.
+    pub f_statistic: f64,
+    /// p-value (two-tailed) for the F-test.
+    pub p_value: f64,
+    /// Number of groups (factor levels).
+    pub n_groups: usize,
+    /// Total observations.
+    pub n_total: usize,
 }
 
 // ── Protocol recovery types ───────────────────────────────────────────────────
@@ -432,6 +460,10 @@ pub fn propose_protocol_schema() -> serde_json::Value {
             "template_id": {
                 "type": "string",
                 "description": "Optional: reference a canonical protocol template by ID (e.g. 'beer-lambert-scan-v1') for reproducibility tracking. Leave null for fully custom protocols."
+            },
+            "doe_design_json": {
+                "type": "string",
+                "description": "Optional: paste the design_json string returned by design_experiment here to link this protocol to the DoE run matrix. The runtime will run one-way ANOVA automatically at conclusion."
             }
         },
         "required": ["name", "hypothesis", "steps"]
@@ -455,6 +487,7 @@ mod tests {
             }],
             replicate_count: 1,
             template_id: None,
+            doe_design_json: None,
         }
     }
 
