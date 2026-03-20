@@ -1,0 +1,43 @@
+<Feature xmlns="http://www.sila-standard.org" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Category="measurement" FeatureVersion="1.0" MaturityLevel="Draft" Originator="org.axiomlab" SiLA2Version="1.0" xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>Spectrophotometer</Identifier>
+  <DisplayName>Spectrophotometer</DisplayName>
+  <Description>UV/Vis absorbance measurement device.</Description>
+  <Command>
+    <Identifier>ReadAbsorbance</Identifier>
+    <DisplayName>Read Absorbance</DisplayName>
+    <Description>Measure optical absorbance at a given wavelength.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>VesselId</Identifier>
+      <DisplayName>Vessel ID</DisplayName>
+      <Description>ID of the vessel to measure.</Description>
+      <DataType>
+        <Basic>String</Basic>
+      </DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>WavelengthNm</Identifier>
+      <DisplayName>Wavelength (nm)</DisplayName>
+      <Description>Measurement wavelength in nanometres (200&#8211;1000).</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Parameter>
+    <Response>
+      <Identifier>Absorbance</Identifier>
+      <DisplayName>Absorbance (AU)</DisplayName>
+      <Description>Measured absorbance in Absorbance Units.</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Response>
+    <Response>
+      <Identifier>WavelengthNm</Identifier>
+      <DisplayName>Wavelength (nm)</DisplayName>
+      <Description>Wavelength at which measurement was taken.</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Response>
+  </Command>
+</Feature>

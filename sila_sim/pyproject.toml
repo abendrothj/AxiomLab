@@ -1,5 +1,5 @@
 [project]
-name = "axiomlab_mock"
+name = "axiomlab_sim"
 version = "0.0.0"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,10 +12,10 @@ requires = ["setuptools>=61.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["axiomlab_mock*"]
+include = ["axiomlab_sim*"]
 
 [tool.setuptools.package-data]
-"axiomlab_mock.generated" = [
+"axiomlab_sim.generated" = [
     "*/*.sila.xml",
     "*/*.proto",
 ]

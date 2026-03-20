@@ -24,5 +24,6 @@ pub mod events;
 pub mod chemistry;
 pub mod hardware;
 pub mod lab_state;
+pub mod reconciler;
 pub mod units;
 pub mod notifications;

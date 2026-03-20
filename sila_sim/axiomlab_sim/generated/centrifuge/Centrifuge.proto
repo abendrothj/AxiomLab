@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+import "SiLAFramework.proto";
+
+package sila2.org.axiomlab.separation.centrifuge.v1;
+
+/* Sample preparation device for separation, clarification, and pelleting. */
+service Centrifuge {
+  /* Spin samples at specified RCF for a duration. */
+  rpc Spin (sila2.org.axiomlab.separation.centrifuge.v1.Spin_Parameters) returns (sila2.org.axiomlab.separation.centrifuge.v1.Spin_Responses) {}
+  /* Get the current rotor temperature. */
+  rpc ReadTemperature (sila2.org.axiomlab.separation.centrifuge.v1.ReadTemperature_Parameters) returns (sila2.org.axiomlab.separation.centrifuge.v1.ReadTemperature_Responses) {}
+}
+
+/* Parameters for Spin */
+message Spin_Parameters {
+  sila2.org.silastandard.Real RCF = 1;  /* RCF in g (100–5000 g). */
+  sila2.org.silastandard.Real DurationSeconds = 2;  /* Spin duration in seconds. */
+  sila2.org.silastandard.Real TemperatureCelsius = 3;  /* Optional temperature control (4–40°C). 0 = room temperature. */
+}
+
+/* Responses of Spin */
+message Spin_Responses {
+  sila2.org.silastandard.Real ActualRCF = 1;  /* Actual RCF achieved. */
+  sila2.org.silastandard.Real ElapsedSeconds = 2;  /* Actual spin time in seconds. */
+}
+
+/* Parameters for ReadTemperature */
+message ReadTemperature_Parameters {
+}
+
+/* Responses of ReadTemperature */
+message ReadTemperature_Responses {
+  sila2.org.silastandard.Real CurrentTemperature = 1;  /* Current rotor temperature in Celsius. */
+}

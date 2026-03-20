@@ -11,7 +11,7 @@ reflects an actual SiLA 2 gRPC round-trip through the full server stack:
          → Beer-Lambert formula → gRPC response → assertion
 
 Run (inside Docker or any environment with sila2 installed):
-    cd sila_mock
+    cd sila_sim
     python -m pytest tests/test_vessel_simulation.py -v
   or:
     python -m unittest tests.test_vessel_simulation -v
@@ -24,8 +24,8 @@ import unittest
 # The entire module requires sila2.  Skip gracefully when it is not installed
 # (e.g. on a host machine without the Docker environment).
 try:
-    from axiomlab_mock.server import Server
-    from axiomlab_mock.generated.client import Client
+    from axiomlab_sim.server import Server
+    from axiomlab_sim.generated.client import Client
     _SILA2_AVAILABLE = True
 except ImportError:
     _SILA2_AVAILABLE = False

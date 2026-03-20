@@ -87,9 +87,20 @@ fn unwrap_string(o: &Option<SilaString>) -> String {
 
 // ── SiLA 2 Client Pool ───────────────────────────────────────────
 
+/// Volume snapshot returned by `query_vessel_volumes`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VesselVolume {
+    pub volume_ul:     f64,
+    pub max_volume_ul: f64,
+}
+
 /// Connection pool for all 6 SiLA 2 instrument services.
 /// All services share a single gRPC endpoint (the SiLA 2 server
 /// multiplexes features on one port).
+///
+/// `state_url` points to the companion HTTP vessel-state endpoint
+/// (`GET /vessel_state`) served by the Python mock on `grpc_port + 1`.
+/// Used by the reconciler to detect phantom commits after dropped responses.
 #[derive(Clone)]
 pub struct SiLA2Clients {
     pub liquid_handler: Arc<Mutex<lh::liquid_handler_client::LiquidHandlerClient<Channel>>>,
@@ -98,12 +109,32 @@ pub struct SiLA2Clients {
     pub incubator: Arc<Mutex<inc::incubator_client::IncubatorClient<Channel>>>,
     pub centrifuge: Arc<Mutex<cf::centrifuge_client::CentrifugeClient<Channel>>>,
     pub ph_meter: Arc<Mutex<ph::ph_meter_client::PhMeterClient<Channel>>>,
+    /// HTTP URL of the vessel-state sidecar endpoint, e.g. `http://127.0.0.1:50053/vessel_state`.
+    pub state_url: String,
 }
 
 impl SiLA2Clients {
     /// Connect to a SiLA 2 server (all features on one endpoint).
+    ///
+    /// The companion vessel-state HTTP endpoint is derived automatically:
+    /// the gRPC port is incremented by 1 (e.g. `50052` → `50053`).
+    /// Override by setting `SILA2_STATE_URL` in the environment.
     pub async fn connect(addr: &str) -> Result<Self, tonic::transport::Error> {
         let addr = addr.to_string();
+
+        // Derive HTTP state URL: increment the gRPC port by 1.
+        let state_url = std::env::var("SILA2_STATE_URL").unwrap_or_else(|_| {
+            // Parse the port from addr (format: "http://host:port")
+            addr.rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok())
+                .map(|port| {
+                    let base = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
+                    format!("{}:{}/vessel_state", base, port + 1)
+                })
+                .unwrap_or_else(|| format!("{}/vessel_state", addr.trim_end_matches('/')))
+        });
+
         Ok(SiLA2Clients {
             liquid_handler: Arc::new(Mutex::new(
                 lh::liquid_handler_client::LiquidHandlerClient::connect(addr.clone()).await?,
@@ -123,7 +154,39 @@ impl SiLA2Clients {
             ph_meter: Arc::new(Mutex::new(
                 ph::ph_meter_client::PhMeterClient::connect(addr.clone()).await?,
             )),
+            state_url,
         })
+    }
+
+    /// Query the Python mock's vessel-state HTTP endpoint.
+    ///
+    /// Returns `vessel_id → VesselVolume` for all vessels the mock knows about.
+    /// Fails if the endpoint is unreachable or returns malformed JSON.
+    ///
+    /// This is the read side of the reconciliation loop: called before every
+    /// tool dispatch in SiLA2 mode to detect phantom commits.
+    pub async fn query_vessel_volumes(
+        &self,
+    ) -> Result<std::collections::HashMap<String, VesselVolume>, String> {
+        let resp = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| format!("HTTP client build: {e}"))?
+            .get(&self.state_url)
+            .send()
+            .await
+            .map_err(|e| format!("vessel_state GET failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("vessel_state endpoint returned HTTP {}", resp.status()));
+        }
+
+        let map: std::collections::HashMap<String, VesselVolume> = resp
+            .json()
+            .await
+            .map_err(|e| format!("vessel_state JSON parse: {e}"))?;
+
+        Ok(map)
     }
 
     // ── LiquidHandler ─────────────────────────────────────────────

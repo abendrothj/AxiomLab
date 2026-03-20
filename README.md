@@ -301,7 +301,7 @@ cargo build
 cargo test --workspace --exclude zk_audit
 
 # Run integration tests (requires SiLA 2 mock server)
-cd sila_mock && python3 -m axiomlab_mock --insecure -p 50052 &
+cd sila_sim && python3 -m axiomlab_sim --insecure -p 50052 &
 cargo test -p agent_runtime --test vessel_simulation_e2e -- --ignored --test-threads=1
 
 # Generate a JWT for protected API calls
@@ -405,7 +405,7 @@ AxiomLab/
 ├── verus_proofs/               # Dual rustc/Verus compilation shim + specs
 ├── proof_synthesizer/          # LLM-driven Verus proof repair
 ├── physical_types/             # uom dimensional analysis
-├── sila_mock/                  # Python SiLA 2 server (6 instruments, vessel_physics via PyO3)
+├── sila_sim/                  # Python SiLA 2 server (6 instruments, vessel_physics via PyO3)
 ├── visualizer/                 # React + Vite web dashboard
 └── contracts/AuditVerifier.sol # On-chain audit verification (Base L2)
 ```

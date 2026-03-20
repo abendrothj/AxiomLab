@@ -308,7 +308,7 @@ struct SimVesselState {
 impl SimVesselState {
     fn new() -> Self {
         let mut v = std::collections::HashMap::new();
-        // Parameters match axiomlab_mock/_vessel_state_python.py exactly.
+        // Parameters match axiomlab_sim/_vessel_state_python.py exactly.
         for (id, max, eps, path, init) in [
             ("beaker_A",      50_000.0, 1.2, 1.0,       0.0),
             ("beaker_B",      50_000.0, 0.8, 1.0,       0.0),

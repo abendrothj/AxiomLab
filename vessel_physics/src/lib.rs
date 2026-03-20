@@ -98,7 +98,7 @@ impl VesselRegistry {
         let mut r = Self {
             vessels: HashMap::new(),
         };
-        // Pre-registered lab vessels — mirror sila_mock/axiomlab_mock/vessel_state.py
+        // Pre-registered lab vessels — mirror sila_sim/axiomlab_sim/vessel_state.py
         r.register("beaker_A",      50_000_000, 1.2, 1.0, 0);
         r.register("beaker_B",      50_000_000, 0.8, 1.0, 0);
         r.register("tube_1",         2_000_000, 1.5, 1.0, 0);

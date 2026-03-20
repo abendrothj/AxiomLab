@@ -1,0 +1,59 @@
+<Feature xmlns="http://www.sila-standard.org" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Category="motion" FeatureVersion="1.0" MaturityLevel="Draft" Originator="org.axiomlab" SiLA2Version="1.0" xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>RoboticArm</Identifier>
+  <DisplayName>Robotic Arm</DisplayName>
+  <Description>3-axis robotic arm for lab automation.</Description>
+  <Command>
+    <Identifier>MoveArm</Identifier>
+    <DisplayName>Move Arm</DisplayName>
+    <Description>Move the arm to an absolute XYZ position in mm.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>X</Identifier>
+      <DisplayName>X Position (mm)</DisplayName>
+      <Description>Target X coordinate in millimetres (0&#8211;300).</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>Y</Identifier>
+      <DisplayName>Y Position (mm)</DisplayName>
+      <Description>Target Y coordinate in millimetres (0&#8211;300).</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>Z</Identifier>
+      <DisplayName>Z Position (mm)</DisplayName>
+      <Description>Target Z coordinate in millimetres (0&#8211;250).</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Parameter>
+    <Response>
+      <Identifier>ReachedX</Identifier>
+      <DisplayName>Reached X (mm)</DisplayName>
+      <Description>Confirmed X position after move.</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Response>
+    <Response>
+      <Identifier>ReachedY</Identifier>
+      <DisplayName>Reached Y (mm)</DisplayName>
+      <Description>Confirmed Y position after move.</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Response>
+    <Response>
+      <Identifier>ReachedZ</Identifier>
+      <DisplayName>Reached Z (mm)</DisplayName>
+      <Description>Confirmed Z position after move.</Description>
+      <DataType>
+        <Basic>Real</Basic>
+      </DataType>
+    </Response>
+  </Command>
+</Feature>

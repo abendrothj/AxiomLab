@@ -42,16 +42,21 @@ try:
 
         def __init__(self) -> None:
             self._inner = _RustRegistry()
+            self._vessel_ids: set[str] = set()
 
         # ── liquid operations ──────────────────────────────────────────────
 
         def dispense(self, vessel_id: str, volume_ul: float) -> float:
             """Dispense volume_ul µL into vessel_id.  Raises ValueError on overflow."""
-            return self._inner.dispense(vessel_id, volume_ul)
+            result = self._inner.dispense(vessel_id, volume_ul)
+            self._vessel_ids.add(vessel_id)
+            return result
 
         def aspirate(self, vessel_id: str, volume_ul: float) -> float:
             """Aspirate volume_ul µL from vessel_id.  Raises ValueError on underflow."""
-            return self._inner.aspirate(vessel_id, volume_ul)
+            result = self._inner.aspirate(vessel_id, volume_ul)
+            self._vessel_ids.add(vessel_id)
+            return result
 
         # ── state accessors ────────────────────────────────────────────────
 
@@ -83,6 +88,20 @@ try:
                 path_length_cm,
                 initial_volume_ul,
             )
+            self._vessel_ids.add(vessel_id)
+
+        def all_volumes(self) -> dict:
+            """Return {vessel_id: {"volume_ul": float, "max_volume_ul": float}} for all vessels."""
+            result = {}
+            for vid in self._vessel_ids:
+                try:
+                    result[vid] = {
+                        "volume_ul": self._inner.get_volume_ul(vid),
+                        "max_volume_ul": self._inner.get_max_volume_ul(vid),
+                    }
+                except Exception:
+                    pass
+            return result
 
     BACKEND = "rust"
 

@@ -18,7 +18,7 @@
 //!  • Sequential dispenses produce strictly monotonic absorbance.
 //!
 //! Prerequisites: SiLA 2 mock must be running on :50052
-//!   cd sila_mock && python -m axiomlab_mock --insecure
+//!   cd sila_sim && python -m axiomlab_sim --insecure
 //!
 //! Run:
 //!   cargo test -p agent_runtime --test vessel_simulation_e2e -- --ignored --test-threads=1

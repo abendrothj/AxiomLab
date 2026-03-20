@@ -11,7 +11,7 @@
 //! This is what runs before shipping to a lab.
 //!
 //! Prerequisites: SiLA 2 mock on :50052
-//!   cd sila_mock && python -m axiomlab_mock --insecure
+//!   cd sila_sim && python -m axiomlab_sim --insecure
 //!
 //! Run: cargo test -p agent_runtime --test orchestrator_sila2 -- --ignored --test-threads=1
 

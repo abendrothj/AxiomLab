@@ -101,3 +101,11 @@ class VesselRegistry:
                 )
             v.volume_ul = round(v.volume_ul - volume_ul, 4)
             return volume_ul
+
+    def all_volumes(self) -> dict:
+        """Return {vessel_id: {"volume_ul": float, "max_volume_ul": float}} for all vessels."""
+        with self._lock:
+            return {
+                vid: {"volume_ul": vs.volume_ul, "max_volume_ul": vs.max_volume_ul}
+                for vid, vs in self._vessels.items()
+            }

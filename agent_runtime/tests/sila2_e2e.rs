@@ -5,7 +5,7 @@
 //! gRPC to Python SiLA 2 mock → hardware executes and returns result.
 //!
 //! Prerequisites: the SiLA 2 mock server must be running on :50052:
-//!   cd sila_mock && python -m axiomlab_mock
+//!   cd sila_sim && python -m axiomlab_sim
 //!
 //! Run: cargo test -p agent_runtime --test sila2_e2e -- --ignored
 
@@ -232,7 +232,7 @@ async fn run_pipeline(
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Tests — require SiLA 2 mock: cd sila_mock && python -m axiomlab_mock
+// Tests — require SiLA 2 mock: cd sila_sim && python -m axiomlab_sim
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]

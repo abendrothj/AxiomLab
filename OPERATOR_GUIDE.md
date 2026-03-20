@@ -346,7 +346,7 @@ cargo test -p scientific_compute
 cargo test -p zk_audit
 
 # Start SiLA 2 mock server
-cd sila_mock && python3 -m axiomlab_mock --insecure -p 50052 &
+cd sila_sim && python3 -m axiomlab_sim --insecure -p 50052 &
 
 # Run integration tests
 cargo test -p agent_runtime --test vessel_simulation_e2e -- --ignored --test-threads=1
@@ -500,7 +500,7 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 
 ### 9.3 Medium: Hardware is simulated
 
-- Code: [sila_mock/](sila_mock/)
+- Code: [sila_sim/](sila_sim/)
 - Issue: All SiLA 2 responses are simulated. Validation pipeline is tested against the mock, not real instruments.
 - Mitigation: Hardware-in-the-loop tests behind a `--feature hardware` gate when connecting real instruments.
 
