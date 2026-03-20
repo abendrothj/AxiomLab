@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+use crate::db::Db;
 use crate::discovery::{journal_path, DiscoveryJournal};
 
 // ── Exploration log ───────────────────────────────────────────────────────────
@@ -79,13 +80,15 @@ impl EventBuffer {
 
 /// Broadcasts all orchestrator events to every connected WebSocket client,
 /// buffers them in memory for /api/history, and persists protocol conclusions
-/// to the discovery journal.
+/// to the discovery journal (JSON + SQLite).
 pub struct WebSocketSink {
     pub tx:       broadcast::Sender<String>,
     pub log:      Arc<Mutex<ExplorationLog>>,
     pub notebook: Arc<Mutex<Vec<serde_json::Value>>>,
     pub events:   EventBuffer,
     pub journal:  Arc<Mutex<DiscoveryJournal>>,
+    /// SQLite dual-write target.
+    pub db:       Arc<Db>,
 }
 
 impl WebSocketSink {
@@ -137,7 +140,7 @@ impl EventSink for WebSocketSink {
     }
 
     fn on_protocol_conclusion(&self, event: ProtocolConclusionEvent) {
-        // Persist to discovery journal.
+        // Persist to discovery journal (JSON + SQLite).
         {
             let mut journal = self.journal.lock().unwrap();
             journal.record_run(
@@ -150,6 +153,10 @@ impl EventSink for WebSocketSink {
                 event.steps_succeeded,
                 event.steps_total,
             );
+            // Dual-write: SQLite row for the run just recorded.
+            if let Some(run) = journal.runs.last() {
+                self.db.insert_run(run);
+            }
             let path = journal_path();
             if let Err(e) = journal.save(&path) {
                 tracing::warn!("Failed to save discovery journal: {e}");

@@ -25,6 +25,39 @@ pub struct AuditSummary {
     pub last_unix_secs: u64,
 }
 
+/// Identifies the intended use case for the ZK proof.
+///
+/// The ZK proof does NOT replace Rekor (which provides public timestamping).
+/// It adds *content confidentiality* — you can prove audit chain properties
+/// (event count, violation count, chain validity) without revealing what any
+/// individual event contained.
+///
+/// # Use cases
+///
+/// * [`ZkUseCase::ConfidentialRegulatory`] — prove chain integrity to regulators
+///   without disclosing proprietary experiment details.  Useful when sharing with
+///   external audit bodies under NDA or in patent-pending research.
+///
+/// * [`ZkUseCase::ConfidentialAudit`] — prove compliance to a contract research
+///   sponsor without granting full log access.  The sponsor verifies the proof
+///   receipt on-chain; the raw log stays confidential.
+///
+/// # Distinction from Rekor
+/// Rekor checkpointing (via `anchor_chain_tip_to_rekor`) provides an immutable
+/// public timestamp for the chain tip.  The ZK proof adds the ability to make
+/// quantitative claims about the chain *contents* (e.g. "0 violations in 127
+/// events") without any content disclosure.  Both mechanisms complement each other.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZkUseCase {
+    /// Prove chain integrity to regulators without revealing experiment details.
+    /// Use case: IP protection during collaborative research or patent review.
+    ConfidentialRegulatory,
+    /// Prove chain integrity to a counter-party without sharing the log.
+    /// Use case: contract research org proving compliance to sponsor.
+    ConfidentialAudit,
+}
+
 /// Environment variables that enable ZK anchoring.
 pub struct ZkConfig {
     /// Base L2 RPC endpoint (e.g. Alchemy or Infura Base endpoint).
@@ -36,6 +69,9 @@ pub struct ZkConfig {
     /// Hex-encoded private key for submitting transactions (funded with ETH on Base).
     /// Required env var: `AXIOMLAB_BASE_WALLET_KEY`
     pub wallet_key: String,
+    /// Intended use case — determines how the proof receipt is presented to
+    /// verifiers.  Defaults to `ConfidentialAudit` when not explicitly set.
+    pub use_case: ZkUseCase,
 }
 
 impl ZkConfig {
@@ -44,6 +80,13 @@ impl ZkConfig {
         let base_rpc_url  = std::env::var("AXIOMLAB_BASE_RPC_URL").ok()?;
         let contract_addr = std::env::var("AXIOMLAB_BASE_CONTRACT_ADDR").ok()?;
         let wallet_key    = std::env::var("AXIOMLAB_BASE_WALLET_KEY").ok()?;
-        Some(Self { base_rpc_url, contract_addr, wallet_key })
+        let use_case = std::env::var("AXIOMLAB_ZK_USE_CASE").ok()
+            .and_then(|v| match v.as_str() {
+                "confidential_regulatory" => Some(ZkUseCase::ConfidentialRegulatory),
+                "confidential_audit"      => Some(ZkUseCase::ConfidentialAudit),
+                _                         => None,
+            })
+            .unwrap_or(ZkUseCase::ConfidentialAudit);
+        Some(Self { base_rpc_url, contract_addr, wallet_key, use_case })
     }
 }

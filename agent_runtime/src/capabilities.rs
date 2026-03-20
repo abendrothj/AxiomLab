@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::collections::HashMap;
+use crate::units;
 
 #[derive(Debug, Clone)]
 pub struct NumericRange {
@@ -77,15 +78,42 @@ impl CapabilityPolicy {
         self.actions.get(action)?.numeric_limits.get(param).map(|r| r.max)
     }
 
-    pub fn validate(&self, action: &str, params: &Value) -> Result<(), String> {
+    /// Validate `params` for `action` against the configured capability limits.
+    ///
+    /// `parameter_units` (from [`crate::tools::ToolSpec::parameter_units`]) declares what
+    /// unit each parameter value is expressed in.  When a unit is declared, the value is
+    /// converted to the canonical base unit (µL for volumes, mm for lengths) before being
+    /// compared against the stored bounds — so a limit of `[0.5, 1000] µL` correctly
+    /// rejects `{"volume_ul": 2.0}` when the tool declares `"volume_ul": "mL"` (2 mL =
+    /// 2000 µL, which exceeds the 1000 µL maximum).
+    pub fn validate(
+        &self,
+        action: &str,
+        params: &Value,
+        parameter_units: Option<&HashMap<String, String>>,
+    ) -> Result<(), String> {
         let Some(cap) = self.actions.get(action) else {
             return Ok(());
         };
 
         for (key, range) in &cap.numeric_limits {
-            let Some(v) = params.get(key).and_then(|x| x.as_f64()) else {
-                return Err(format!("capability violation: missing numeric parameter '{key}' for action '{action}'"));
+            let Some(raw) = params.get(key).and_then(|x| x.as_f64()) else {
+                return Err(format!(
+                    "capability violation: missing numeric parameter '{key}' for action '{action}'"
+                ));
             };
+
+            // Convert to canonical base unit when a unit declaration is available.
+            let v = if let Some(unit_map) = parameter_units {
+                if let Some(declared_unit) = unit_map.get(key) {
+                    units::to_canonical(raw, declared_unit, key)
+                } else {
+                    raw
+                }
+            } else {
+                raw
+            };
+
             if v < range.min || v > range.max {
                 return Err(format!(
                     "capability violation: action '{}' parameter '{}'={} outside [{}, {}]",
@@ -106,13 +134,32 @@ mod tests {
     fn default_policy_denies_out_of_bounds_move_arm() {
         let p = CapabilityPolicy::default_lab();
         let bad = serde_json::json!({"x": 999.0, "y": 10.0, "z": 10.0});
-        assert!(p.validate("move_arm", &bad).is_err());
+        assert!(p.validate("move_arm", &bad, None).is_err());
     }
 
     #[test]
     fn default_policy_allows_in_bounds_move_arm() {
         let p = CapabilityPolicy::default_lab();
         let ok = serde_json::json!({"x": 100.0, "y": 120.0, "z": 80.0});
-        assert!(p.validate("move_arm", &ok).is_ok());
+        assert!(p.validate("move_arm", &ok, None).is_ok());
+    }
+
+    #[test]
+    fn unit_aware_volume_conversion_denies_over_limit() {
+        // Policy: volume_ul ∈ [0.5, 1000] µL.
+        // LLM passes 2.0 with unit "mL" → 2000 µL → exceeds 1000 µL limit.
+        let p = CapabilityPolicy::default_lab();
+        let params = serde_json::json!({"volume_ul": 2.0});
+        let units = HashMap::from([("volume_ul".to_string(), "mL".to_string())]);
+        assert!(p.validate("dispense", &params, Some(&units)).is_err());
+    }
+
+    #[test]
+    fn unit_aware_volume_conversion_allows_in_range() {
+        // 0.5 mL = 500 µL — within [0.5, 1000] µL.
+        let p = CapabilityPolicy::default_lab();
+        let params = serde_json::json!({"volume_ul": 0.5});
+        let units = HashMap::from([("volume_ul".to_string(), "mL".to_string())]);
+        assert!(p.validate("dispense", &params, Some(&units)).is_ok());
     }
 }

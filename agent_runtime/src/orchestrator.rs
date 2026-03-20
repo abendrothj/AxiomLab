@@ -111,6 +111,12 @@ pub struct OrchestratorConfig {
     /// experiment.  Lets the operator compare "before" vs "current" to judge
     /// whether the agent has made progress.
     pub findings_at_start: u32,
+
+    /// Per-instrument calibration validity at the start of this experiment.
+    /// `tool_name → (is_calibrated, is_valid_now)`.
+    /// Computed by the server from `DiscoveryJournal.last_calibration_for()`.
+    /// Empty map means no calibration checking (graceful degradation).
+    pub calibration_status: std::collections::HashMap<String, (bool, bool)>,
 }
 
 impl Default for OrchestratorConfig {
@@ -132,6 +138,7 @@ impl Default for OrchestratorConfig {
             approval_timeout_secs: 300,
             journal_summary: String::new(),
             findings_at_start: 0,
+            calibration_status: std::collections::HashMap::new(),
         }
     }
 }
@@ -357,7 +364,8 @@ impl<L: LlmBackend> Orchestrator<L> {
                 protocol_step:              None, // not in a structured protocol
                 findings_before_experiment: self.config.findings_at_start,
             };
-            if let Some(tool_result) = self.try_tool_call(&response, Some(approval_ctx)).await {
+            let cot = extract_reasoning(&response);
+            if let Some(tool_result) = self.try_tool_call(&response, Some(approval_ctx), cot).await {
                 consecutive_parse_failures = 0;
                 // Record this dispatch in recent_actions (capped at 20).
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response) {
@@ -490,7 +498,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         // Synthesise a JSON string and route through try_tool_call so all
         // validation logic stays in one place.
         let json = serde_json::json!({ "tool": tool_name, "params": params });
-        match self.try_tool_call(&json.to_string(), approval_ctx).await {
+        match self.try_tool_call(&json.to_string(), approval_ctx, None).await {
             Some(result) => result,
             None => ToolResult {
                 name: tool_name.to_owned(),
@@ -789,6 +797,8 @@ impl<L: LlmBackend> Orchestrator<L> {
         // Spawn background ZK proof task — does not block protocol completion.
         let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
 
+        let uncertainty_budgets = self.build_uncertainty_budgets(&step_results);
+
         ProtocolRunResult {
             protocol_id: protocol.id,
             run_id,
@@ -801,6 +811,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             aggregate,
             rekor_status,
             zk_proof_status,
+            uncertainty_budgets,
         }
     }
 
@@ -990,6 +1001,8 @@ impl<L: LlmBackend> Orchestrator<L> {
         // Spawn background ZK proof task.
         let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
 
+        let uncertainty_budgets = self.build_uncertainty_budgets(&all_step_results);
+
         ProtocolRunResult {
             protocol_id: protocol.id,
             run_id,
@@ -1002,13 +1015,54 @@ impl<L: LlmBackend> Orchestrator<L> {
             aggregate: None,
             rekor_status,
             zk_proof_status,
+            uncertainty_budgets,
         }
+    }
+
+    /// Build GUM-compliant uncertainty budgets from step outcomes.
+    ///
+    /// Iterates over allowed steps that have a registered `InstrumentUncertainty`
+    /// and extracts the primary numeric reading from the tool result JSON.
+    /// Returns one budget per unique (tool, parameter) pair.
+    fn build_uncertainty_budgets(&self, step_results: &[crate::protocol::StepOutcome]) -> Vec<crate::protocol::UncertaintyBudget> {
+        use crate::protocol::UncertaintyBudget;
+
+        let mut budgets: Vec<UncertaintyBudget> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for step in step_results {
+            if !step.allowed { continue; }
+            let Some(result) = &step.result else { continue; };
+            let Some(spec) = self.tools.spec_for(&step.tool) else { continue; };
+            let Some(unc) = &spec.instrument_uncertainty else { continue; };
+
+            // Extract the first numeric value from the result object.
+            // Prefer keys that don't start with `_` (which are metadata).
+            let Some(reading) = result.as_object().and_then(|obj| {
+                obj.iter()
+                    .filter(|(k, _)| !k.starts_with('_'))
+                    .find_map(|(_, v)| v.as_f64())
+            }) else { continue; };
+
+            let key = format!("{}:{}", step.tool, unc.unit);
+            if seen.contains(&key) { continue; }
+            seen.insert(key);
+
+            budgets.push(UncertaintyBudget::from_instrument_uncertainty(
+                step.tool.replace('_', " "),
+                unc.unit.clone(),
+                reading,
+                unc.u_type_a_fraction,
+                unc.u_type_b_abs,
+            ));
+        }
+        budgets
     }
 
     /// Attempt to parse a tool call from the LLM response, validate it
     /// against the sandbox, approval policy, capability bounds, and proof
     /// artifacts, then dispatch it.
-    async fn try_tool_call(&self, response: &str, approval_ctx: Option<ApprovalContext>) -> Option<ToolResult> {
+    async fn try_tool_call(&self, response: &str, approval_ctx: Option<ApprovalContext>, reasoning_text: Option<String>) -> Option<ToolResult> {
         let parsed: serde_json::Value = serde_json::from_str(response).ok()?;
 
         // Schema validation: the JSON must have "tool" (string) and "params" (object).
@@ -1023,7 +1077,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         // ── Stage 0: Sandbox allowlist ────────────────────────────────────
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
-            self.audit_decision(tool_name, "deny", &e.to_string(), false, None).await;
+            self.audit_decision(tool_name, "deny", &e.to_string(), false, None, None).await;
             self.emit_tool_event(tool_name, &params, "rejected", &e.to_string());
             return Some(ToolResult {
                 name: tool_name.to_owned(),
@@ -1031,6 +1085,43 @@ impl<L: LlmBackend> Orchestrator<L> {
                 success: false,
             metadata: None,
             });
+        }
+
+        // ── Stage 0.1: Calibration check ─────────────────────────────────
+        // Only active when calibration_status is populated by the server.
+        // Quantitative sensor tools without any calibration record are denied.
+        // Expired calibrations emit a warning but do not block execution.
+        const QUANTITATIVE_TOOLS: &[&str] = &["read_ph", "read_absorbance"];
+        const CALIBRATION_TOOLS:   &[&str] = &["read_ph", "read_absorbance", "read_temperature", "read_sensor"];
+
+        if !self.config.calibration_status.is_empty()
+            && CALIBRATION_TOOLS.contains(&tool_name)
+        {
+            match self.config.calibration_status.get(tool_name) {
+                Some((true, false)) => {
+                    // Calibrated but expired → warn, continue.
+                    let msg = format!("calibration for '{tool_name}' has expired — readings may be inaccurate");
+                    warn!(%msg);
+                    self.audit_decision(tool_name, "allow", &msg, false, None, None).await;
+                }
+                None | Some((false, _)) if QUANTITATIVE_TOOLS.contains(&tool_name) => {
+                    // No calibration at all for quantitative tool → deny.
+                    let msg = format!(
+                        "calibration_required: '{tool_name}' has no calibration record. \
+                         Run calibrate_ph / calibrate_spectrophotometer before taking readings."
+                    );
+                    warn!(%msg);
+                    self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
+                    self.emit_tool_event(tool_name, &params, "rejected", &msg);
+                    return Some(ToolResult {
+                        name: tool_name.to_owned(),
+                        output: serde_json::Value::String(msg),
+                        success: false,
+                        metadata: None,
+                    });
+                }
+                _ => {} // Valid calibration or non-quantitative tool — proceed.
+            }
         }
 
         // ── Stage 0.5: Tool parameter schema validation ───────────────────
@@ -1044,7 +1135,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                                 .collect::<Vec<_>>()
                                 .join("; ");
                             warn!(tool = tool_name, %msg, "params failed schema validation");
-                            self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                            self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
@@ -1064,6 +1155,68 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
 
         let risk_class = risk_class_for_action(tool_name, &self.action_risk_index);
+
+        // ── Stage 0.25: Chemical compatibility ────────────────────────────
+        // Only active for liquid-handling tools.  Checks the explicit reagent
+        // parameter(s) in the call against the GHS/NFPA 704 incompatibility
+        // table.  Vessel-contents cross-check is a no-op until Phase 2B
+        // (LabState) populates it.
+        if matches!(tool_name, "dispense" | "aspirate") {
+            let reagent = params
+                .get("reagent")
+                .or_else(|| params.get("reagent_id"))
+                .or_else(|| params.get("pump_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let target = params
+                .get("vessel_id")
+                .or_else(|| params.get("target_vessel"))
+                .or_else(|| params.get("source_vessel"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // Check the reagent name against itself and any explicit vessel contents
+            // supplied in the params (Phase 2B will inject vessel_contents here).
+            if let Some(existing_contents) = params
+                .get("vessel_contents")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                })
+            {
+                let compat = crate::chemistry::global();
+                if let Err(e) = compat.check_vessel_addition(&existing_contents, reagent) {
+                    let msg = format!("chemical_compatibility_violation: {e}");
+                    self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
+                    self.emit_tool_event(tool_name, &params, "rejected", &msg);
+                    return Some(ToolResult {
+                        name: tool_name.to_owned(),
+                        output: serde_json::Value::String(msg),
+                        success: false,
+                        metadata: None,
+                    });
+                }
+            } else if !reagent.is_empty() && !target.is_empty() {
+                // No vessel contents provided — at minimum check the reagent
+                // against the target identifier (catches obvious self-mixes).
+                let compat = crate::chemistry::global();
+                if let Err(e) = compat.check(reagent, target) {
+                    let msg = format!("chemical_compatibility_violation: {e}");
+                    self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
+                    self.emit_tool_event(tool_name, &params, "rejected", &msg);
+                    return Some(ToolResult {
+                        name: tool_name.to_owned(),
+                        output: serde_json::Value::String(msg),
+                        success: false,
+                        metadata: None,
+                    });
+                }
+            }
+        }
 
         // Tracks the approval queue ID when an operator approves an interactive
         // action.  Set in the approval path below; consumed at stage 5 to emit
@@ -1118,7 +1271,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                                 self.config.approval_timeout_secs
                             );
                             warn!(%pending_id, %msg);
-                            self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                            self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
@@ -1130,7 +1283,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         }
                         Ok(Err(_recv_err)) => {
                             let msg = "approval cancelled: server shutting down";
-                            self.audit_decision(tool_name, "deny", msg, false, None).await;
+                            self.audit_decision(tool_name, "deny", msg, false, None, None).await;
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
                                 name: tool_name.to_owned(),
@@ -1142,7 +1295,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         Ok(Ok(None)) => {
                             let msg = format!("operator denied action '{tool_name}'");
                             warn!(%pending_id, %msg);
-                            self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                            self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
@@ -1172,7 +1325,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                             for aid in &approval_ids {
                                 if self.config.revocation_list.is_approval_revoked(aid) {
                                     let msg = format!("approval {aid} has been revoked");
-                                    self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                                    self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
                                     queue.purge_sidecar(&pending_id);
                                     return Some(ToolResult {
                                         name: tool_name.to_owned(),
@@ -1187,11 +1340,11 @@ impl<L: LlmBackend> Orchestrator<L> {
                                  approval_ids={})",
                                 approval_ids.join(",")
                             );
-                            self.audit_decision(tool_name, "allow", &reason, true, Some(approval_ids)).await;
+                            self.audit_decision(tool_name, "allow", &reason, true, Some(approval_ids), None).await;
                             // Fall through to Stage 2 with original params (no bundle injected).
                         }
                         Err(e) => {
-                            self.audit_decision(tool_name, "deny", &e, false, None).await;
+                            self.audit_decision(tool_name, "deny", &e, false, None, None).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &e);
                             queue.purge_sidecar(&pending_id);
                             return Some(ToolResult {
@@ -1208,7 +1361,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         "approval violation: '{tool_name}' requires signed approvals \
                          (no interactive approval queue configured)"
                     );
-                    self.audit_decision(tool_name, "deny", &e, false, None).await;
+                    self.audit_decision(tool_name, "deny", &e, false, None, None).await;
                     self.emit_tool_event(tool_name, &params, "rejected", &e);
                     return Some(ToolResult {
                         name: tool_name.to_owned(),
@@ -1230,7 +1383,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                         for aid in &approval_ids {
                             if self.config.revocation_list.is_approval_revoked(aid) {
                                 let msg = format!("approval {aid} has been revoked");
-                                self.audit_decision(tool_name, "deny", &msg, false, None).await;
+                                self.audit_decision(tool_name, "deny", &msg, false, None, None).await;
                                 return Some(ToolResult {
                                     name: tool_name.to_owned(),
                                     output: serde_json::Value::String(msg),
@@ -1244,11 +1397,11 @@ impl<L: LlmBackend> Orchestrator<L> {
                                 "two-person approval satisfied (approval_ids={})",
                                 approval_ids.join(",")
                             );
-                            self.audit_decision(tool_name, "allow", &reason, true, Some(approval_ids)).await;
+                            self.audit_decision(tool_name, "allow", &reason, true, Some(approval_ids), None).await;
                         }
                     }
                     Err(e) => {
-                        self.audit_decision(tool_name, "deny", &e, false, None).await;
+                        self.audit_decision(tool_name, "deny", &e, false, None, None).await;
                         self.emit_tool_event(tool_name, &params, "rejected", &e);
                         return Some(ToolResult {
                             name: tool_name.to_owned(),
@@ -1264,8 +1417,9 @@ impl<L: LlmBackend> Orchestrator<L> {
 
         // ── Stage 2: Capability bounds ────────────────────────────────────
         if let Some(capability) = &self.config.capability_policy {
-            if let Err(e) = capability.validate(tool_name, &params) {
-                self.audit_decision(tool_name, "deny", &e, false, None).await;
+            let param_units = self.tools.spec_for(tool_name).map(|s| &s.parameter_units);
+            if let Err(e) = capability.validate(tool_name, &params, param_units) {
+                self.audit_decision(tool_name, "deny", &e, false, None, None).await;
                 self.emit_tool_event(tool_name, &params, "rejected", &e);
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
@@ -1280,7 +1434,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         let high_risk = matches!(risk_class, Some(RiskClass::Actuation | RiskClass::Destructive));
         if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
             let msg = "high-risk action denied: runtime proof policy is not configured";
-            self.audit_decision(tool_name, "deny", msg, false, None).await;
+            self.audit_decision(tool_name, "deny", msg, false, None, None).await;
             self.emit_tool_event(tool_name, &params, "rejected", msg);
             return Some(ToolResult {
                 name: tool_name.to_owned(),
@@ -1294,7 +1448,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
-                self.audit_decision(tool_name, "deny", &report.reason, false, None).await;
+                self.audit_decision(tool_name, "deny", &report.reason, false, None, None).await;
                 self.emit_tool_event(tool_name, &params, "rejected", &report.reason);
                 return Some(ToolResult {
                     name: tool_name.to_owned(),
@@ -1318,6 +1472,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             "policy and sandbox checks passed",
             true,
             None,
+            reasoning_text,
         )
         .await;
 
@@ -1405,6 +1560,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         reason: &str,
         success: bool,
         approval_ids: Option<Vec<String>>,
+        reasoning_text: Option<String>,
     ) {
         let event = AuditEvent {
             unix_secs: std::time::SystemTime::now()
@@ -1417,6 +1573,7 @@ impl<L: LlmBackend> Orchestrator<L> {
             reason: reason.to_owned(),
             success,
             approval_ids,
+            reasoning_text,
         };
 
         let mut payload_line = serde_json::to_string(&event).unwrap_or_default();
@@ -1469,6 +1626,32 @@ fn primary_cap_limit(policy: &CapabilityPolicy, tool_name: &str) -> Option<f64> 
         "dispense" => policy.max_for("dispense", "volume_ul"),
         "move_arm" => policy.max_for("move_arm", "x"),
         _ => None,
+    }
+}
+
+/// Extract the LLM chain-of-thought that precedes the JSON tool call.
+///
+/// The LLM sometimes emits prose reasoning before the JSON object, e.g.:
+/// ```text
+/// I need to check the pH before dispensing. {"tool": "read_ph", ...}
+/// ```
+/// This function returns the trimmed text before the first `{`, or `None` if
+/// the response starts directly with JSON or the prefix is whitespace-only.
+///
+/// The extracted text is stored in the audit log so every decision has a
+/// cryptographically bound rationale — it cannot be swapped after the fact.
+fn extract_reasoning(response: &str) -> Option<String> {
+    let brace_pos = response.find('{')?;
+    if brace_pos == 0 {
+        return None;
+    }
+    let prefix = response[..brace_pos].trim();
+    if prefix.is_empty() {
+        None
+    } else {
+        // Truncate to 2 KiB to keep audit entries reasonable.
+        let truncated: String = prefix.chars().take(2048).collect();
+        Some(truncated)
     }
 }
 

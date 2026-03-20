@@ -21,4 +21,8 @@ pub mod approval_queue;
 pub mod revocation;
 pub mod attestation;
 pub mod events;
+pub mod chemistry;
 pub mod hardware;
+pub mod lab_state;
+pub mod units;
+pub mod notifications;

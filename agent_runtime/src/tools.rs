@@ -65,6 +65,22 @@ pub type ToolHandler = Box<
         + Sync,
 >;
 
+/// Instrument uncertainty specification — used to build GUM-compliant uncertainty budgets.
+///
+/// Type A uncertainty is estimated from repeated measurements (repeatability, σ/reading).
+/// Type B uncertainty is systematic (e.g., calibration certificate, manufacturer spec).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstrumentUncertainty {
+    /// Type A: relative standard deviation of repeatability (σ / mean_reading).
+    /// Example: 0.01 means 1% RSD from repeated measurements.
+    pub u_type_a_fraction: f64,
+    /// Type B: absolute systematic uncertainty (e.g., calibration uncertainty).
+    /// In the same unit as the measured quantity.
+    pub u_type_b_abs: f64,
+    /// Physical unit of the measured quantity (e.g., "pH", "AU", "°C", "µL").
+    pub unit: String,
+}
+
 /// Description of a tool for inclusion in LLM prompts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {
@@ -76,6 +92,10 @@ pub struct ToolSpec {
     /// each numeric argument.  Empty map means no unit annotations.
     #[serde(default)]
     pub parameter_units: HashMap<String, String>,
+    /// Instrument uncertainty specification for sensor-reading tools.
+    /// `None` for action tools (dispense, move) that don't produce sensor readings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument_uncertainty: Option<InstrumentUncertainty>,
 }
 
 impl Default for ToolSpec {
@@ -85,6 +105,7 @@ impl Default for ToolSpec {
             description: String::new(),
             parameters_schema: serde_json::Value::Null,
             parameter_units: HashMap::new(),
+            instrument_uncertainty: None,
         }
     }
 }
@@ -122,6 +143,11 @@ impl ToolRegistry {
             .iter()
             .find(|s| s.name == tool_name)
             .map(|s| &s.parameters_schema)
+    }
+
+    /// Return the full [`ToolSpec`] for the named tool, if registered.
+    pub fn spec_for(&self, tool_name: &str) -> Option<&ToolSpec> {
+        self.specs.iter().find(|s| s.name == tool_name)
     }
 
     /// Dispatch a tool call.
@@ -180,6 +206,7 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
                 ("y".into(), "mm".into()),
                 ("z".into(), "mm".into()),
             ].into_iter().collect(),
+            instrument_uncertainty: None,
         },
         Box::new(|params| {
             Box::pin(async move {
@@ -205,6 +232,7 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
                 "required": ["sensor_id"]
             }),
             parameter_units: HashMap::new(),
+            instrument_uncertainty: None,
         },
         Box::new(|params| {
             Box::pin(async move {
@@ -242,6 +270,7 @@ pub fn register_lab_tools(registry: &mut ToolRegistry) {
                 "required": ["pump_id", "volume_ul"]
             }),
             parameter_units: [("volume_ul".into(), "µL".into())].into_iter().collect(),
+            instrument_uncertainty: None,
         },
         Box::new(|params| {
             Box::pin(async move {

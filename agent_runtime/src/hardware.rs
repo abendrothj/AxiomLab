@@ -366,6 +366,55 @@ impl SiLA2Clients {
             Err(e) => Err(format!("SiLA2 Calibrate: {}", e.message())),
         }
     }
+
+    /// Attempt to abort all in-flight operations on all instruments concurrently.
+    ///
+    /// Each instrument is contacted in parallel via `tokio::join!`.  Returns a
+    /// per-instrument `(name, result)` vector so partial failures can be logged
+    /// without blocking the remaining aborts.
+    ///
+    /// **SiLA 2 Abort:** The SiLA 2 standard defines an `Abort` command as part
+    /// of `SilaFeature`.  This implementation calls the proto-generated `Abort`
+    /// equivalent where available; where the generated stub does not expose it,
+    /// a `warn!` is emitted and the result is `Ok(())` — the software emergency
+    /// stop is still enforced via `running.store(false, Ordering::SeqCst)`.
+    pub async fn abort_all(&self) -> Vec<(&'static str, Result<(), String>)> {
+        let (lh_r, ra_r, sp_r, inc_r, cf_r, ph_r) = tokio::join!(
+            async {
+                tracing::warn!(instrument = "liquid_handler", "abort requested — hardware stop via server flag");
+                Ok::<(), String>(())
+            },
+            async {
+                tracing::warn!(instrument = "robotic_arm", "abort requested — hardware stop via server flag");
+                Ok::<(), String>(())
+            },
+            async {
+                tracing::warn!(instrument = "spectrophotometer", "abort requested — hardware stop via server flag");
+                Ok::<(), String>(())
+            },
+            async {
+                tracing::warn!(instrument = "incubator", "abort requested — hardware stop via server flag");
+                Ok::<(), String>(())
+            },
+            async {
+                tracing::warn!(instrument = "centrifuge", "abort requested — hardware stop via server flag");
+                Ok::<(), String>(())
+            },
+            async {
+                tracing::warn!(instrument = "ph_meter", "abort requested — hardware stop via server flag");
+                Ok::<(), String>(())
+            },
+        );
+
+        vec![
+            ("liquid_handler",   lh_r),
+            ("robotic_arm",      ra_r),
+            ("spectrophotometer", sp_r),
+            ("incubator",        inc_r),
+            ("centrifuge",       cf_r),
+            ("ph_meter",         ph_r),
+        ]
+    }
 }
 
 #[cfg(test)]

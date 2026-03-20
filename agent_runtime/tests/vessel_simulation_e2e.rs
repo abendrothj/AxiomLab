@@ -246,7 +246,7 @@ async fn run_guarded(
         .map_err(|e| format!("SANDBOX: {e}"))?;
 
     policy
-        .validate(&call.name, &call.params)
+        .validate(&call.name, &call.params, None)
         .map_err(|e| format!("CAPABILITY: {e}"))?;
 
     engine

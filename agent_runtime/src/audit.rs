@@ -124,6 +124,7 @@ pub fn emit_session_start(
         reason:    details.to_string(),
         success:   true,
         approval_ids: None,
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -176,6 +177,7 @@ pub async fn anchor_chain_tip_to_rekor(path: &str, signer: &dyn AuditSigner) {
                 reason:       details.to_string(),
                 success:      true,
                 approval_ids: None,
+                reasoning_text: None,
             };
             emit_jsonl(path, &event, Some(signer)).ok();
         }
@@ -223,6 +225,7 @@ pub fn emit_protocol_step(
         reason: details.to_string(),
         success: allowed,
         approval_ids: None,
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -268,6 +271,8 @@ pub fn emit_protocol_conclusion(
         reason: details.to_string(),
         success: true,
         approval_ids: None,
+        // The conclusion text IS the LLM's reasoning for this event.
+        reasoning_text: Some(conclusion.chars().take(4096).collect()),
     };
     let line = emit_jsonl(path, &event, signer)?;
     Ok(line)
@@ -302,6 +307,7 @@ pub fn emit_journal_finding(
         reason: details.to_string(),
         success: true,
         approval_ids: None,
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -331,6 +337,7 @@ pub fn emit_journal_hypothesis(
         reason: details.to_string(),
         success: true,
         approval_ids: None,
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -362,6 +369,7 @@ pub fn emit_calibration(
         reason: details.to_string(),
         success: true,
         approval_ids: None,
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -401,6 +409,7 @@ pub fn emit_pending_dispatch(
         reason: details.to_string(),
         success: true,
         approval_ids: Some(vec![approval_id.to_string()]),
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -426,6 +435,7 @@ pub fn emit_dispatch_complete(
         reason: details.to_string(),
         success: true,
         approval_ids: Some(vec![approval_id.to_string()]),
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -453,6 +463,7 @@ pub fn emit_stalled_dispatch(
         reason: details.to_string(),
         success: false,
         approval_ids: Some(vec![approval_id.to_string()]),
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -475,6 +486,26 @@ pub fn emit_dispatch_cancelled(
         reason: details.to_string(),
         success: false,
         approval_ids: Some(vec![approval_id.to_string()]),
+        reasoning_text: None,
+    };
+    emit_jsonl(path, &event, signer)
+}
+
+/// Emit an `emergency_stop` audit event with the triggering operator identity.
+pub fn emit_emergency_stop(
+    path: &str,
+    operator_id: &str,
+    signer: Option<&dyn AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("emergency_stop-{}", uuid::Uuid::new_v4()),
+        action: "emergency_stop".into(),
+        decision: "allow".into(),
+        reason: format!("operator '{operator_id}' triggered emergency stop"),
+        success: true,
+        approval_ids: None,
+        reasoning_text: None,
     };
     emit_jsonl(path, &event, signer)
 }
@@ -506,6 +537,14 @@ pub struct AuditEvent {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_ids: Option<Vec<String>>,
+    /// LLM chain-of-thought that led to this action.
+    ///
+    /// Extracted from the raw LLM response (text preceding the first `{`).
+    /// Included in the hash chain so the rationale cannot be replaced after the
+    /// fact.  `None` for system-generated events (denies, calibration warnings,
+    /// etc.) where there is no LLM reasoning to record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -690,6 +729,8 @@ struct PersistedAuditEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     approval_ids: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     prev_hash: Option<&'a str>,
     entry_hash: String,
     /// Base64-encoded Ed25519 signature over the canonical hash input bytes.
@@ -711,6 +752,8 @@ struct HashInput<'a> {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     approval_ids: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_text: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prev_hash: Option<&'a str>,
 }
@@ -780,6 +823,7 @@ pub fn emit_jsonl(
         reason: &event.reason,
         success: event.success,
         approval_ids: event.approval_ids.as_deref(),
+        reasoning_text: event.reasoning_text.as_deref(),
         prev_hash: prev_hash.as_deref(),
         entry_hash,
         entry_sig_b64,
@@ -921,6 +965,10 @@ fn verify_chain_opts(path: &str, require_signatures: bool) -> Result<(), String>
                     .filter_map(|x| x.as_str().map(|s| s.to_string()))
                     .collect()
             }),
+            reasoning_text: value
+                .get("reasoning_text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         };
 
         let (recomputed, canonical_bytes) =
@@ -1016,6 +1064,7 @@ fn compute_entry_hash_with_bytes(
         reason: &event.reason,
         success: event.success,
         approval_ids: event.approval_ids.as_deref(),
+        reasoning_text: event.reasoning_text.as_deref(),
         prev_hash,
     };
     let canonical = serde_json::to_vec(&payload)
@@ -1161,6 +1210,7 @@ mod tests {
             reason: "ok".into(),
             success: true,
             approval_ids: None,
+            reasoning_text: None,
         }
     }
 
@@ -1185,6 +1235,7 @@ mod tests {
             reason: "policy".into(),
             success: false,
             approval_ids: None,
+            reasoning_text: None,
         }, None).expect("emit second");
 
         verify_chain(&path).expect("valid chain");

@@ -1,6 +1,12 @@
 mod approvals;
 mod audit_query;
+mod auth;
+mod db;
 mod discovery;
+mod eln;
+mod lab_scheduler;
+mod literature;
+mod oidc;
 mod simulator;
 mod stall;
 mod ws_sink;
@@ -8,16 +14,22 @@ mod ws_sink;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Json, Path, Query, State,
     },
+    http::StatusCode,
+    middleware,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use agent_runtime::approval_queue::PendingApprovalQueue;
 use agent_runtime::audit::{
-    anchor_chain_tip_to_rekor, audit_log_path, audit_signer_from_env, emit_session_start, rotate_if_needed,
+    anchor_chain_tip_to_rekor, audit_log_path, audit_signer_from_env, emit_emergency_stop,
+    emit_session_start, rotate_if_needed,
 };
+use agent_runtime::hardware::SiLA2Clients;
+use agent_runtime::lab_state::{LabState, Reagent};
+use discovery::{MethodValidation, ReferenceMaterial};
 use discovery::{journal_path, DiscoveryJournal};
 use std::{
     net::SocketAddr,
@@ -45,10 +57,16 @@ pub(crate) struct AppState {
     log:             Arc<Mutex<ExplorationLog>>,
     events:          EventBuffer,
     journal:         Arc<Mutex<DiscoveryJournal>>,
+    /// SQLite persistence — dual-write target for all journal mutations.
+    pub db:          Arc<db::Db>,
     approval_queue:  Arc<PendingApprovalQueue>,
     audit_log_path:  String,
     /// IDs of approvals that stalled on the previous run (no dispatch_complete).
     pub stalled_ids: Arc<Mutex<Vec<String>>>,
+    /// SiLA 2 hardware clients — `None` when running in simulator mode.
+    sila_clients: Option<Arc<SiLA2Clients>>,
+    /// Reagent inventory and vessel contents.
+    pub lab_state: Arc<Mutex<LabState>>,
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -65,10 +83,16 @@ async fn history_handler(State(s): State<AppState>) -> impl IntoResponse {
 
 async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
     let notebook = s.notebook.lock().unwrap().clone();
+    let slot_count = std::env::var("AXIOMLAB_EXPERIMENT_SLOTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 4);
     axum::Json(serde_json::json!({
-        "running":   s.running.load(Ordering::SeqCst),
-        "iteration": s.iteration.load(Ordering::SeqCst),
-        "notebook":  notebook,
+        "running":    s.running.load(Ordering::SeqCst),
+        "iteration":  s.iteration.load(Ordering::SeqCst),
+        "notebook":   notebook,
+        "slot_count": slot_count,
     }))
 }
 
@@ -149,13 +173,399 @@ async fn stalled_handler(State(s): State<AppState>) -> impl IntoResponse {
     }))
 }
 
+// ── Lab inventory routes ──────────────────────────────────────────────────────
+
+async fn lab_reagents_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let reagents: Vec<_> = s.lab_state.lock().unwrap().reagents.values().cloned().collect();
+    axum::Json(reagents)
+}
+
+async fn lab_register_reagent_handler(
+    State(s): State<AppState>,
+    Json(reagent): Json<Reagent>,
+) -> impl IntoResponse {
+    let id = reagent.id.clone();
+    {
+        let mut ls = s.lab_state.lock().unwrap();
+        ls.register_reagent(reagent);
+        ls.save();
+    }
+    (StatusCode::CREATED, axum::Json(serde_json::json!({"status": "registered", "id": id})))
+}
+
+async fn lab_remove_reagent_handler(
+    Path(id): Path<String>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let removed = {
+        let mut ls = s.lab_state.lock().unwrap();
+        let r = ls.remove_reagent(&id);
+        if r.is_some() { ls.save(); }
+        r
+    };
+    match removed {
+        Some(_) => axum::Json(serde_json::json!({"status": "removed", "id": id})).into_response(),
+        None    => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "not found"}))).into_response(),
+    }
+}
+
+async fn lab_set_vessel_contents_handler(
+    Path(vessel_id): Path<String>,
+    State(s): State<AppState>,
+    Json(reagent_ids): Json<Vec<String>>,
+) -> impl IntoResponse {
+    let mut ls = s.lab_state.lock().unwrap();
+    ls.set_vessel_contents(&vessel_id, reagent_ids.clone());
+    ls.save();
+    axum::Json(serde_json::json!({"vessel_id": vessel_id, "contents": reagent_ids}))
+}
+
+async fn lab_vessels_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let contents = s.lab_state.lock().unwrap().vessel_contents.clone();
+    axum::Json(contents)
+}
+
+async fn lab_calibration_status_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let journal = s.journal.lock().unwrap();
+    // Known quantitative instruments that require valid calibration.
+    let instruments = ["ph_meter", "spectrophotometer", "centrifuge", "incubator"];
+    let statuses: Vec<serde_json::Value> = instruments.iter().map(|inst| {
+        let rec = journal.last_calibration_for(inst);
+        serde_json::json!({
+            "instrument":        inst,
+            "calibrated":        rec.is_some(),
+            "valid":             rec.map(|r| r.is_valid_at(now_secs)).unwrap_or(false),
+            "performed_at_secs": rec.map(|r| r.performed_at_secs),
+            "valid_until_secs":  rec.and_then(|r| r.valid_until_secs),
+        })
+    }).collect();
+    axum::Json(serde_json::json!({"calibration_status": statuses, "checked_at_secs": now_secs}))
+}
+
+// ── ZK proof status route ─────────────────────────────────────────────────────
+
+async fn zk_status_handler() -> impl IntoResponse {
+    let zk_enabled = zk_audit::types::ZkConfig::from_env().is_some();
+    axum::Json(serde_json::json!({
+        "status":  if zk_enabled { "enabled" } else { "disabled" },
+        "details": if zk_enabled {
+            "ZK proof anchoring is configured. Submit a proof via the prover binary to update status."
+        } else {
+            "ZK proof anchoring is disabled. Set AXIOMLAB_BASE_RPC_URL, AXIOMLAB_BASE_CONTRACT_ADDR, \
+             and AXIOMLAB_BASE_WALLET_KEY to enable."
+        },
+        "use_case": zk_audit::types::ZkConfig::from_env()
+            .map(|c| format!("{:?}", c.use_case))
+            .unwrap_or_else(|| "n/a".into()),
+    }))
+}
+
+// ── ELN export routes ─────────────────────────────────────────────────────────
+
+async fn benchling_export_handler(
+    Path(study_id): Path<String>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    use eln::ELNAdapter;
+
+    let adapter = match eln::BenchlingAdapter::from_env() {
+        Some(a) => a,
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({
+                "error": "ELN not configured — set AXIOMLAB_BENCHLING_TOKEN, \
+                          AXIOMLAB_BENCHLING_TENANT, and AXIOMLAB_BENCHLING_PROJECT_ID"
+            })),
+        ).into_response(),
+    };
+
+    let (study, runs) = {
+        let j = s.journal.lock().unwrap();
+        let study = match j.studies.iter().find(|st| st.id == study_id) {
+            Some(s) => s.clone(),
+            None => return (
+                StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"error": "study not found"})),
+            ).into_response(),
+        };
+        // Gather run summaries that belong to this study.
+        let runs: Vec<_> = j.runs.iter()
+            .filter(|r| study.run_ids.contains(&r.run_id))
+            .cloned()
+            .collect();
+        (study, runs)
+    };
+
+    match adapter.export_study(&study, &runs).await {
+        Ok(url) => axum::Json(serde_json::json!({
+            "status":       "exported",
+            "study_id":     study_id,
+            "benchling_url": url,
+        })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({"error": e})),
+        ).into_response(),
+    }
+}
+
+// ── Literature / PubChem proxy route ──────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct LiteratureQuery {
+    q: String,
+}
+
+async fn literature_search_handler(
+    Query(params): Query<LiteratureQuery>,
+) -> impl IntoResponse {
+    match literature::search_pubchem(&params.q).await {
+        Ok(summary) => axum::Json(serde_json::to_value(summary).unwrap_or_default()).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"error": e})),
+        ).into_response(),
+    }
+}
+
+// ── ISO 17025 — method validation routes ──────────────────────────────────────
+
+async fn methods_list_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let methods = s.journal.lock().unwrap().method_validations.clone();
+    axum::Json(methods)
+}
+
+async fn methods_create_handler(
+    State(s): State<AppState>,
+    Json(validation): Json<MethodValidation>,
+) -> impl IntoResponse {
+    let id = {
+        let mut j = s.journal.lock().unwrap();
+        let id = j.add_method_validation(validation);
+        j.save(&journal_path()).unwrap_or_else(|e| {
+            tracing::warn!("Failed to save journal after method validation: {e}");
+        });
+        id
+    };
+    (StatusCode::CREATED, axum::Json(serde_json::json!({"status": "created", "id": id})))
+}
+
+async fn method_get_handler(
+    Path(id): Path<String>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let journal = s.journal.lock().unwrap();
+    match journal.method_validations.iter().find(|v| v.id == id) {
+        Some(v) => axum::Json(serde_json::to_value(v).unwrap_or_default()).into_response(),
+        None    => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "not found"}))).into_response(),
+    }
+}
+
+// ── ISO 17025 — reference material routes ─────────────────────────────────────
+
+async fn ref_materials_list_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let materials = s.journal.lock().unwrap().reference_materials.clone();
+    axum::Json(materials)
+}
+
+async fn ref_materials_create_handler(
+    State(s): State<AppState>,
+    Json(material): Json<ReferenceMaterial>,
+) -> impl IntoResponse {
+    let id = {
+        let mut j = s.journal.lock().unwrap();
+        let id = j.register_reference_material(material);
+        j.save(&journal_path()).unwrap_or_else(|e| {
+            tracing::warn!("Failed to save journal after reference material: {e}");
+        });
+        id
+    };
+    (StatusCode::CREATED, axum::Json(serde_json::json!({"status": "created", "id": id})))
+}
+
+// ── ISO 17025 — study record routes ───────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct CreateStudyRequest {
+    title: String,
+    study_director_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AddProtocolRequest {
+    protocol_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct QaReviewRequest {
+    reviewer_id: String,
+}
+
+async fn studies_list_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let studies = s.journal.lock().unwrap().studies.clone();
+    axum::Json(studies)
+}
+
+async fn studies_create_handler(
+    State(s): State<AppState>,
+    Json(req): Json<CreateStudyRequest>,
+) -> impl IntoResponse {
+    let id = {
+        let mut j = s.journal.lock().unwrap();
+        let id = j.create_study(req.title, req.study_director_id);
+        j.save(&journal_path()).unwrap_or_else(|e| {
+            tracing::warn!("Failed to save journal after study creation: {e}");
+        });
+        id
+    };
+    (StatusCode::CREATED, axum::Json(serde_json::json!({"status": "created", "id": id})))
+}
+
+async fn study_get_handler(
+    Path(id): Path<String>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let journal = s.journal.lock().unwrap();
+    match journal.studies.iter().find(|s| s.id == id) {
+        Some(study) => axum::Json(serde_json::to_value(study).unwrap_or_default()).into_response(),
+        None        => (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "not found"}))).into_response(),
+    }
+}
+
+async fn study_add_protocol_handler(
+    Path(study_id): Path<String>,
+    State(s): State<AppState>,
+    Json(req): Json<AddProtocolRequest>,
+) -> impl IntoResponse {
+    let ok = {
+        let mut j = s.journal.lock().unwrap();
+        let ok = j.add_protocol_to_study(&study_id, req.protocol_id.clone());
+        if ok {
+            j.save(&journal_path()).unwrap_or_else(|e| {
+                tracing::warn!("Failed to save journal after protocol registration: {e}");
+            });
+        }
+        ok
+    };
+    if ok {
+        axum::Json(serde_json::json!({"status": "registered", "study_id": study_id, "protocol_id": req.protocol_id})).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "study not found"}))).into_response()
+    }
+}
+
+async fn study_qa_review_handler(
+    Path(study_id): Path<String>,
+    State(s): State<AppState>,
+    Json(req): Json<QaReviewRequest>,
+) -> impl IntoResponse {
+    let result = {
+        let mut j = s.journal.lock().unwrap();
+        let hash = j.qa_sign_off(&study_id, &req.reviewer_id);
+        if hash.is_some() {
+            j.save(&journal_path()).unwrap_or_else(|e| {
+                tracing::warn!("Failed to save journal after QA sign-off: {e}");
+            });
+        }
+        hash
+    };
+    match result {
+        Some(hash) => {
+            tracing::info!(study_id, reviewer = %req.reviewer_id, hash, "QA sign-off recorded");
+            axum::Json(serde_json::json!({
+                "status": "signed_off",
+                "study_id": study_id,
+                "qa_sign_off_hash": hash,
+            })).into_response()
+        }
+        None => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": "sign-off failed — study not found or reviewer is the study director"
+            })),
+        ).into_response(),
+    }
+}
+
+// ── POST /api/emergency-stop ──────────────────────────────────────────────────
+
+async fn emergency_stop_handler(State(s): State<AppState>) -> impl IntoResponse {
+    // 1. Halt the software exploration loop immediately.
+    s.running.store(false, Ordering::SeqCst);
+
+    // 2. Send hardware abort to all SiLA 2 instruments (if connected).
+    let instrument_results: Vec<serde_json::Value> = if let Some(clients) = &s.sila_clients {
+        clients
+            .abort_all()
+            .await
+            .into_iter()
+            .map(|(name, result)| {
+                serde_json::json!({
+                    "instrument": name,
+                    "ok": result.is_ok(),
+                    "error": result.err(),
+                })
+            })
+            .collect()
+    } else {
+        vec![serde_json::json!({
+            "instrument": "all",
+            "ok": true,
+            "note": "simulator mode — no hardware to abort"
+        })]
+    };
+
+    // 3. Write emergency_stop audit event.
+    let signer = agent_runtime::audit::audit_signer_from_env();
+    emit_emergency_stop(&s.audit_log_path, "operator", signer.as_deref()).unwrap_or_else(|e| {
+        tracing::warn!("Failed to write emergency_stop audit event: {e}");
+        String::new()
+    });
+
+    tracing::warn!("EMERGENCY STOP triggered — exploration loop halted");
+
+    axum::Json(serde_json::json!({
+        "status": "stopped",
+        "instrument_results": instrument_results,
+    }))
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct WsQuery {
+    #[serde(default)]
+    token: Option<String>,
+}
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(s): State<AppState>,
+    Query(q): Query<WsQuery>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, s))
+    // When AXIOMLAB_WS_AUTH=0 (or JWT_SECRET unset), allow unauthenticated connections.
+    let ws_auth_enabled = std::env::var("AXIOMLAB_WS_AUTH").as_deref() != Ok("0")
+        && auth::jwt_secret_from_env().is_some();
+
+    if ws_auth_enabled {
+        let token = match &q.token {
+            Some(t) => t.as_str(),
+            None => {
+                tracing::warn!("WebSocket connection rejected — no token query param");
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        };
+        if let Err(e) = auth::validate_jwt(token) {
+            tracing::warn!("WebSocket connection rejected — invalid JWT: {e}");
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+
+    ws.on_upgrade(move |socket| handle_ws(socket, s)).into_response()
 }
 
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
@@ -274,6 +684,51 @@ async fn main() {
         );
     }
 
+    // ── SQLite setup ──────────────────────────────────────────────────────────
+    let sqlite_db = match db::Db::open(&db::db_path()) {
+        Ok(d) => {
+            tracing::info!(path = %db::db_path().display(), "SQLite journal database opened");
+            Arc::new(d)
+        }
+        Err(e) => {
+            tracing::error!("SQLite open failed ({e}) — cannot continue without persistence");
+            std::process::exit(1);
+        }
+    };
+    // Reconstruct from JSON backup on first launch or after DB deletion.
+    if sqlite_db.is_empty() {
+        let j = journal.lock().unwrap();
+        sqlite_db.reconstruct_from_journal(&j);
+    }
+
+    // ── SiLA 2 hardware connection ─────────────────────────────────────────────
+    let sila_endpoint = std::env::var("SILA2_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:50052".into());
+    let sila_clients: Option<Arc<SiLA2Clients>> =
+        match SiLA2Clients::connect(&sila_endpoint).await {
+            Ok(c) => {
+                tracing::info!("SiLA 2 hardware connected at {sila_endpoint}");
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "SiLA 2 unavailable ({e}) — running with in-process physics simulator"
+                );
+                None
+            }
+        };
+
+    // ── Lab state (reagent inventory) ─────────────────────────────────────────
+    let lab_state = Arc::new(Mutex::new(LabState::load()));
+    {
+        let ls = lab_state.lock().unwrap();
+        tracing::info!(
+            reagents = ls.reagents.len(),
+            vessels  = ls.vessel_contents.len(),
+            "Lab state loaded"
+        );
+    }
+
     let approval_queue = PendingApprovalQueue::new();
 
     // Detect stalled approval sidecars from a previous (crashed) run.
@@ -302,9 +757,12 @@ async fn main() {
         log:            Arc::new(Mutex::new(ExplorationLog::from_journal(&journal.lock().unwrap()))),
         events:         events.clone(),
         journal:        Arc::clone(&journal),
+        db:             Arc::clone(&sqlite_db),
         approval_queue: Arc::clone(&approval_queue),
         audit_log_path: audit_path_str.clone(),
         stalled_ids:    Arc::new(Mutex::new(stalled_ids)),
+        sila_clients:   sila_clients.clone(),
+        lab_state:      Arc::clone(&lab_state),
     };
 
     // Auto-start the exploration loop immediately on server launch.
@@ -315,13 +773,16 @@ async fn main() {
             notebook: Arc::clone(&state.notebook),
             events,
             journal:  Arc::clone(&journal),
+            db:       Arc::clone(&sqlite_db),
         });
         state.running.store(true, Ordering::SeqCst);
         let running   = Arc::clone(&state.running);
         let stalled   = Arc::clone(&state.stalled);
         let iteration = Arc::clone(&state.iteration);
+        let db_for_loop = Arc::clone(&sqlite_db);
+        let sila_for_loop = sila_clients.clone();
         tokio::spawn(async move {
-            simulator::run_loop(sink, running.clone(), stalled, iteration, approval_queue).await;
+            simulator::run_loop(sink, running.clone(), stalled, iteration, approval_queue, db_for_loop, sila_for_loop).await;
             running.store(false, Ordering::SeqCst);
         });
     }
@@ -335,6 +796,41 @@ async fn main() {
         .route("/api/approvals/submit",  post(approvals::submit_handler))
         .with_state(Arc::clone(&state.approval_queue));
 
+    // OIDC routes — optional; only registered when OIDC is configured.
+    let oidc_router: Router<AppState> = if let Some(cfg) = oidc::OidcConfig::from_env() {
+        tracing::info!(issuer = %cfg.issuer_url, "OIDC authentication enabled");
+        let oidc_state = oidc::OidcState { config: cfg, store: oidc::PkceStore::default() };
+        Router::new()
+            .route("/api/auth/oidc/start",    get(oidc::oidc_start_handler))
+            .route("/api/auth/oidc/callback", get(oidc::oidc_callback_handler))
+            .route("/api/auth/logout",        post(oidc::logout_handler))
+            .with_state(oidc_state)
+    } else {
+        tracing::info!("OIDC not configured (set AXIOMLAB_OIDC_* vars to enable)");
+        Router::new()
+    };
+
+    // Protected routes require a valid JWT (POST mutations + raw audit data).
+    // Read-only GET routes remain open for dashboard embedding.
+    let protected = Router::new()
+        .route("/api/approvals/recover/{id}",        post(recovery_resume_handler))
+        .route("/api/approvals/recover/{id}/cancel",  post(recovery_cancel_handler))
+        .route("/api/emergency-stop",                post(emergency_stop_handler))
+        .route("/api/audit/raw",                     get(audit_query::audit_raw_handler))
+        .route("/api/lab/reagents",                  post(lab_register_reagent_handler))
+        .route("/api/lab/reagents/{id}",             delete(lab_remove_reagent_handler))
+        .route("/api/lab/vessels/{id}/contents",     put(lab_set_vessel_contents_handler))
+        // ELN export (PI JWT required)
+        .route("/api/export/benchling/{study_id}",   post(benchling_export_handler))
+        // ISO 17025 — mutations require PI/operator JWT
+        .route("/api/methods",                       post(methods_create_handler))
+        .route("/api/lab/reference-materials",       post(ref_materials_create_handler))
+        .route("/api/studies",                       post(studies_create_handler))
+        .route("/api/studies/{id}/protocols",        post(study_add_protocol_handler))
+        .route("/api/studies/{id}/qa-review",        post(study_qa_review_handler))
+        .layer(middleware::from_fn(auth::require_operator_jwt))
+        .with_state(state.clone());
+
     let app = Router::new()
         .route("/ws",                              get(ws_handler))
         .route("/api/status",                      get(status_handler))
@@ -343,11 +839,23 @@ async fn main() {
         .route("/api/journal/findings",            get(findings_handler))
         .route("/api/audit",                       get(audit_query::audit_query_handler))
         .route("/api/audit/verify",                get(audit_query::audit_verify_handler))
-        .route("/api/audit/raw",                   get(audit_query::audit_raw_handler))
         .route("/api/approvals/stalled",           get(stalled_handler))
-        .route("/api/approvals/recover/{id}",       post(recovery_resume_handler))
-        .route("/api/approvals/recover/{id}/cancel", post(recovery_cancel_handler))
+        .route("/api/lab/reagents",                get(lab_reagents_handler))
+        .route("/api/lab/vessels",                 get(lab_vessels_handler))
+        .route("/api/lab/calibration-status",      get(lab_calibration_status_handler))
+        // ZK proof status
+        .route("/api/audit/zk-status",             get(zk_status_handler))
+        // Literature / PubChem proxy
+        .route("/api/literature/search",           get(literature_search_handler))
+        // ISO 17025 — read-only, open for dashboard embedding
+        .route("/api/methods",                     get(methods_list_handler))
+        .route("/api/methods/{id}",                get(method_get_handler))
+        .route("/api/lab/reference-materials",     get(ref_materials_list_handler))
+        .route("/api/studies",                     get(studies_list_handler))
+        .route("/api/studies/{id}",                get(study_get_handler))
         .merge(approvals_router)
+        .merge(protected)
+        .merge(oidc_router)
         .fallback_service(static_files)
         .layer(CorsLayer::permissive())
         .with_state(state);

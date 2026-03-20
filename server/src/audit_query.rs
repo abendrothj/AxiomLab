@@ -2,16 +2,25 @@
 //!
 //! `GET /api/audit`        — filter events by action / decision / since / limit
 //! `GET /api/audit/verify` — verify the full hash chain, returning `{verified: true}` or an error
-//! `GET /api/audit/raw`    — return the full JSONL audit log as `text/plain`
+//! `GET /api/audit/raw`    — stream the full JSONL audit log as `text/plain`
+//!
+//! # Memory efficiency
+//! `audit_query_handler` reads the JSONL file with a `BufReader` — it never
+//! loads the full file into RAM.  `audit_raw_handler` streams the file using
+//! `axum::body::Body::from_stream` so even very large logs (100 MB rotation
+//! threshold) are served without memory spikes.
 
 use agent_runtime::audit::{audit_log_path, verify_chain};
 use axum::{
+    body::Body,
     extract::{Query, State},
     http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::io::BufRead;
+use tokio_util::io::ReaderStream;
 
 use crate::AppState;
 
@@ -42,8 +51,8 @@ pub struct AuditVerifyResponse {
 
 /// `GET /api/audit` — stream-filter the JSONL audit log.
 ///
-/// Reads the log file line-by-line and applies the query filters without loading
-/// the full file into memory.  Returns a JSON array of matching event objects.
+/// Reads the log file line-by-line via `BufReader` (never loads the full file
+/// into RAM) and applies query filters.  Returns a JSON array of matching events.
 pub async fn audit_query_handler(
     Query(params): Query<AuditQueryParams>,
     _state: State<AppState>,
@@ -52,8 +61,8 @@ pub async fn audit_query_handler(
     let limit = params.limit.unwrap_or(MAX_LIMIT).min(MAX_LIMIT);
 
     let path = audit_log_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Json(serde_json::json!([]));
         }
@@ -64,12 +73,15 @@ pub async fn audit_query_handler(
         }
     };
 
+    let reader = std::io::BufReader::new(file);
     let mut results: Vec<serde_json::Value> = Vec::new();
-    for line in content.lines() {
+
+    for line_res in reader.lines() {
         if results.len() >= limit {
             break;
         }
-        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(line) = line_res else { continue };
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
 
@@ -99,31 +111,37 @@ pub async fn audit_query_handler(
     Json(serde_json::json!(results))
 }
 
-/// `GET /api/audit/raw` — return the full JSONL audit log as `text/plain`.
+/// `GET /api/audit/raw` — stream the full JSONL audit log as `text/plain`.
 ///
-/// Used by the Chain Explorer's "Download full log" button.
-/// Returns 404 with a JSON error if the log file does not yet exist.
+/// Uses `tokio::fs::File` + `ReaderStream` so even large logs (100 MB rotation
+/// threshold) are served without loading the full content into RAM.
+/// Returns 404 if the log file does not yet exist.
 pub async fn audit_raw_handler(_state: State<AppState>) -> impl IntoResponse {
     let path = audit_log_path();
-    match std::fs::read_to_string(&path) {
-        Ok(content) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            content,
-        )
-            .into_response(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "audit log not found\n".to_string(),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            format!("error reading audit log: {e}\n"),
-        )
-            .into_response(),
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => {
+            let stream  = ReaderStream::new(file);
+            let body    = Body::from_stream(stream);
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(body)
+                .unwrap()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            axum::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from("audit log not found\n"))
+                .unwrap()
+        }
+        Err(e) => {
+            axum::http::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from(format!("error reading audit log: {e}\n")))
+                .unwrap()
+        }
     }
 }
 

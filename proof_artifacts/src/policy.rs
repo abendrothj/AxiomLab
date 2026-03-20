@@ -223,56 +223,62 @@ impl RuntimePolicyEngine {
     /// the embedded `MANIFEST_SIGNING_PUBLIC_KEY`. Returns a verified engine on
     /// success, or an error message describing what failed.
     ///
-    /// **Escape hatch (dev/CI only):** set `AXIOMLAB_SKIP_MANIFEST_VERIFY=1` to
-    /// skip signature verification with a loud warning. Never set this in production.
+    /// **Escape hatch (dev/CI only):** compile with `--features unsafe-bypass` to
+    /// skip signature verification with a loud warning.  This bypass is a compile-time
+    /// opt-in so it can never accidentally reach production containers — it is absent
+    /// from `[profile.release]` and absent from workspace defaults.
     pub fn load_and_verify(path: &str) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read manifest {path}: {e}"))?;
 
-        let skip = std::env::var("AXIOMLAB_SKIP_MANIFEST_VERIFY").as_deref() == Ok("1");
-
         // Try to parse as SignedProofManifest first.
         match serde_json::from_str::<SignedProofManifest>(&raw) {
             Ok(signed) => {
-                if skip {
+                #[cfg(feature = "unsafe-bypass")]
+                {
                     tracing::warn!(
                         path,
-                        "AXIOMLAB_SKIP_MANIFEST_VERIFY=1 — skipping signature check. \
-                         NOT SAFE FOR PRODUCTION."
+                        "UNSAFE: compiled with `unsafe-bypass` feature — \
+                         manifest signature check disabled. NOT SAFE FOR PRODUCTION."
                     );
                     return Ok(RuntimePolicyEngine::new(signed.manifest).mark_signature_verified());
                 }
+                #[cfg(not(feature = "unsafe-bypass"))]
+                {
+                    let pk_bytes = STANDARD
+                        .decode(MANIFEST_SIGNING_PUBLIC_KEY)
+                        .map_err(|e| format!("invalid MANIFEST_SIGNING_PUBLIC_KEY constant: {e}"))?;
 
-                let pk_bytes = STANDARD
-                    .decode(MANIFEST_SIGNING_PUBLIC_KEY)
-                    .map_err(|e| format!("invalid MANIFEST_SIGNING_PUBLIC_KEY constant: {e}"))?;
+                    verify_signed_manifest(&signed, &pk_bytes)
+                        .map_err(|e| format!("manifest signature verification failed: {e}"))?;
 
-                verify_signed_manifest(&signed, &pk_bytes)
-                    .map_err(|e| format!("manifest signature verification failed: {e}"))?;
-
-                tracing::info!(path, key_id = %signed.signature.key_id, "Manifest signature verified");
-                Ok(RuntimePolicyEngine::new(signed.manifest).mark_signature_verified())
+                    tracing::info!(path, key_id = %signed.signature.key_id, "Manifest signature verified");
+                    Ok(RuntimePolicyEngine::new(signed.manifest).mark_signature_verified())
+                }
             }
             Err(_) => {
                 // Fall back: try unsigned ProofManifest (backwards compat).
-                if skip {
+                #[cfg(feature = "unsafe-bypass")]
+                {
                     let manifest = serde_json::from_str::<ProofManifest>(&raw)
                         .map_err(|e| format!("failed to parse manifest {path}: {e}"))?;
                     tracing::warn!(
                         path,
-                        "AXIOMLAB_SKIP_MANIFEST_VERIFY=1 — loading unsigned manifest. \
+                        "UNSAFE: compiled with `unsafe-bypass` feature — \
+                         loading unsigned manifest. \
                          Sign it with: python3 vessel_physics/generate_manifest.py \
                          --sign ~/Documents/axiomlab_manifest_signing.private"
                     );
                     return Ok(RuntimePolicyEngine::new(manifest).mark_signature_verified());
                 }
-
+                #[cfg(not(feature = "unsafe-bypass"))]
                 Err(format!(
                     "manifest at {path} is unsigned or malformed. \
                      Sign it with:\n  \
                      python3 vessel_physics/generate_manifest.py \
                      --sign ~/Documents/axiomlab_manifest_signing.private\n\
-                     Or bypass (dev/CI only) with: AXIOMLAB_SKIP_MANIFEST_VERIFY=1"
+                     Or bypass (dev/CI only) with: \
+                     cargo build --features proof_artifacts/unsafe-bypass"
                 ))
             }
         }

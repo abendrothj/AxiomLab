@@ -219,7 +219,7 @@ async fn run_pipeline(
 
     // Stage 2: capability bounds
     policy
-        .validate(&call.name, &call.params)
+        .validate(&call.name, &call.params, None)
         .map_err(|e| format!("CAPABILITY: {e}"))?;
 
     // Stage 3: dispatch via gRPC
@@ -563,7 +563,7 @@ async fn run_full_pipeline(
 
     // Stage 2: capability bounds
     policy
-        .validate(&call.name, &call.params)
+        .validate(&call.name, &call.params, None)
         .map_err(|e| format!("CAPABILITY: {e}"))?;
 
     // Stage 3: proof policy

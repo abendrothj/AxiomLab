@@ -203,6 +203,129 @@ pub enum RekorStatus {
     Skipped,
 }
 
+/// One component in a GUM-compliant uncertainty budget.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UncertaintyComponent {
+    /// Human-readable source label (e.g., "pH probe repeatability", "calibration").
+    pub source: String,
+    /// Standard uncertainty u_i for this component.
+    pub u_i: f64,
+    /// Sensitivity coefficient c_i (partial derivative of output w.r.t. input).
+    pub sensitivity_coeff: f64,
+    /// Contribution to combined variance: `(c_i * u_i)^2`.
+    pub contribution: f64,
+}
+
+/// GUM-compliant combined uncertainty budget for a measured parameter.
+///
+/// Built at protocol conclusion from all sensor-reading step outcomes.
+/// Reported as expanded uncertainty U = k × u_combined at 95% confidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UncertaintyBudget {
+    /// Name of the measured parameter (e.g., "pH", "absorbance_600nm").
+    pub parameter: String,
+    /// Physical unit.
+    pub unit: String,
+    /// Type A standard uncertainty (repeatability, from statistics).
+    pub u_type_a: f64,
+    /// Type B standard uncertainty (systematic, from calibration/spec).
+    pub u_type_b: f64,
+    /// Combined standard uncertainty: sqrt(u_a² + u_b²).
+    pub u_combined: f64,
+    /// Effective degrees of freedom (Welch-Satterthwaite).
+    pub effective_dof: f64,
+    /// Coverage factor k from t-distribution at `confidence_level`.
+    pub coverage_factor_k: f64,
+    /// Expanded uncertainty U = k × u_combined.
+    pub expanded_u: f64,
+    /// Confidence level (0.95 for 95%).
+    pub confidence_level: f64,
+    /// Per-source breakdown.
+    pub budget_entries: Vec<UncertaintyComponent>,
+}
+
+impl UncertaintyBudget {
+    /// Build a budget from a list of (source, u_i, sensitivity_coeff) tuples.
+    ///
+    /// `u_type_a_values` comes from repeated measurements; `u_type_b_abs` from specs.
+    pub fn from_instrument_uncertainty(
+        parameter: impl Into<String>,
+        unit: impl Into<String>,
+        reading: f64,
+        u_type_a_fraction: f64,
+        u_type_b_abs: f64,
+    ) -> Self {
+        let parameter = parameter.into();
+        let unit = unit.into();
+
+        let u_a = reading.abs() * u_type_a_fraction;
+        let u_b = u_type_b_abs;
+        let u_c = (u_a * u_a + u_b * u_b).sqrt();
+
+        // Welch-Satterthwaite with large DoF assumption (> 30 → k ≈ 2.0 for 95%).
+        let eff_dof = if u_c > 0.0 {
+            let numerator = (u_a * u_a + u_b * u_b).powi(2);
+            let denominator = (u_a.powi(4) / 30.0) + (u_b.powi(4) / 50.0);
+            if denominator > 0.0 { numerator / denominator } else { 100.0 }
+        } else {
+            100.0
+        };
+
+        // Coverage factor from t-table at 95%: approximate via effective DoF.
+        let k = if eff_dof >= 30.0 { 2.0 } else { t_95_coverage(eff_dof) };
+        let expanded_u = k * u_c;
+
+        UncertaintyBudget {
+            parameter: parameter.clone(),
+            unit: unit.clone(),
+            u_type_a: u_a,
+            u_type_b: u_b,
+            u_combined: u_c,
+            effective_dof: eff_dof,
+            coverage_factor_k: k,
+            expanded_u,
+            confidence_level: 0.95,
+            budget_entries: vec![
+                UncertaintyComponent {
+                    source: format!("{parameter} repeatability (Type A)"),
+                    u_i: u_a,
+                    sensitivity_coeff: 1.0,
+                    contribution: u_a * u_a,
+                },
+                UncertaintyComponent {
+                    source: format!("{parameter} systematic / calibration (Type B)"),
+                    u_i: u_b,
+                    sensitivity_coeff: 1.0,
+                    contribution: u_b * u_b,
+                },
+            ],
+        }
+    }
+}
+
+/// Approximate t-distribution 95% coverage factor for small degrees of freedom.
+/// Values from ISO GUM Table G.2.
+fn t_95_coverage(dof: f64) -> f64 {
+    // Piecewise linear approximation over the standard table.
+    let table: &[(f64, f64)] = &[
+        (1.0, 12.71), (2.0, 4.30), (3.0, 3.18), (4.0, 2.78),
+        (5.0, 2.57),  (6.0, 2.45), (7.0, 2.36), (8.0, 2.31),
+        (10.0, 2.23), (12.0, 2.18), (15.0, 2.13), (20.0, 2.09),
+        (25.0, 2.06), (30.0, 2.04),
+    ];
+    if dof <= 1.0 { return 12.71; }
+    if dof >= 30.0 { return 2.0; }
+    for i in 0..table.len() - 1 {
+        let (d0, k0) = table[i];
+        let (d1, k1) = table[i + 1];
+        if dof <= d1 {
+            let t = (dof - d0) / (d1 - d0);
+            return k0 + t * (k1 - k0);
+        }
+    }
+    2.0
+}
+
 /// The complete result of running a protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolRunResult {
@@ -222,6 +345,10 @@ pub struct ProtocolRunResult {
     pub rekor_status: RekorStatus,
     /// ZK audit proof status; `Pending` until the background task completes.
     pub zk_proof_status: ZkProofStatus,
+    /// Per-parameter uncertainty budgets built from all sensor readings in the run.
+    /// One entry per unique measured parameter (e.g., "pH", "absorbance_600nm").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncertainty_budgets: Vec<UncertaintyBudget>,
 }
 
 // ── Protocol recovery types ───────────────────────────────────────────────────
