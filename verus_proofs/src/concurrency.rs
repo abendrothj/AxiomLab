@@ -80,11 +80,16 @@ impl ChannelManager {
 /// Read `n_sensors` in parallel, each on its own channel, and return
 /// the collected values.
 ///
+/// `read_fn` is called once per sensor with the channel ID and must return
+/// the raw sensor reading (e.g. ADC counts, absorbance units, pH).  In
+/// production pass the real hardware driver; in tests pass a closure.
+///
 /// Under Verus the proof shows: the function never accesses a channel
 /// without a valid token, and all tokens are released on exit.
 pub async fn poll_sensors_verified(
     manager: &ChannelManager,
     sensor_ids: &[u32],
+    read_fn: impl Fn(u32) -> f64,
 ) -> Result<Vec<(u32, f64)>, &'static str> {
     if sensor_ids.len() > manager.available() as usize {
         return Err("not enough available channels");
@@ -95,13 +100,9 @@ pub async fn poll_sensors_verified(
         tokens.push(manager.acquire(sid)?);
     }
 
-    // Read each sensor. In production this calls the real hardware ADC driver.
-    // SIMULATION: returns a fixed reading until hardware driver is injected.
-    // TODO: accept `read_fn: impl Fn(u32) -> f64` to remove this stub.
     let mut results = Vec::with_capacity(sensor_ids.len());
     for token in &tokens {
-        #[allow(clippy::approx_constant)]
-        let reading = 7.04_f64; // STUB — replace with real ADC call
+        let reading = read_fn(token.channel_id());
         results.push((token.channel_id(), reading));
     }
 
@@ -145,9 +146,21 @@ mod tests {
     #[tokio::test]
     async fn poll_multiple_sensors() {
         let mgr = ChannelManager::new(4);
-        let results = poll_sensors_verified(&mgr, &[0, 1, 2]).await.unwrap();
+        let results = poll_sensors_verified(&mgr, &[0, 1, 2], |id| id as f64 * 1.5)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 3);
+        assert_eq!(results[0], (0, 0.0));
+        assert_eq!(results[1], (1, 1.5));
+        assert_eq!(results[2], (2, 3.0));
         // All channels released.
         assert_eq!(mgr.available(), 4);
+    }
+
+    #[tokio::test]
+    async fn poll_too_many_sensors_rejected() {
+        let mgr = ChannelManager::new(2);
+        let err = poll_sensors_verified(&mgr, &[0, 1, 2], |_| 0.0).await;
+        assert!(err.is_err());
     }
 }
