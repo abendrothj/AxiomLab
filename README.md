@@ -61,6 +61,7 @@ The Verus proofs gate high-risk actions at runtime: `proved_add`/`proved_sub` op
   - `central_composite` — face-centered CCD for response-surface models; 2 ≤ k ≤ 4
   - `latin_hypercube` — space-filling design with LCG RNG + Fisher-Yates shuffle; reproducible by seed, n ≤ 200
   - Exposed to the LLM via the `design_experiment` tool; returns a JSON run matrix the LLM uses to propose structured `Protocol`s
+  - **DoE audit linkage** — pass `design_json` from `design_experiment` as `doe_design_json` in `propose_protocol`; the runtime stores the matrix in the `Protocol` record and runs one-way ANOVA automatically at conclusion (`ProtocolRunResult.doe_anova`: F-statistic, p-value, group counts)
 - **Curve fitting** — OLS regression (slope, R², intercept), Hill equation (EC50, E_max, Hill coefficient), Michaelis-Menten (Vmax, Km), AIC-based model selection; exposed via `analyze_series` tool
 - **One-way ANOVA** — F-statistic, p-value (incomplete beta / Lentz continued fraction), eta-squared
 - **OLS linear regression** — multi-variable OLS with Gaussian elimination + partial pivoting; R², adjusted R², residual standard error
@@ -73,7 +74,9 @@ The Verus proofs gate high-risk actions at runtime: `proved_add`/`proved_sub` op
 
 ### Reagent Inventory and Lab State
 
-- **Reagent inventory** — `LabState` tracks reagents (id, name, CAS number, lot, concentration, volume, expiry, GHS hazard codes) and vessel contents; persisted to `.artifacts/lab_state.json`
+- **Reagent inventory** — `LabState` tracks reagents (id, name, CAS number, lot, concentration, volume, expiry, GHS hazard codes, `nominal_ph`) and vessel contents; persisted to `.artifacts/lab_state.json`
+- **LabState sync during tool execution** — `dispense` accepts an optional `reagent_id` param; on success the orchestrator calls `lab_state.add_to_vessel()` and `deduct_volume()`. `aspirate` calls `remove_from_vessel()`. Both sync and save on every successful call.
+- **Physics-based pH simulation** — `read_ph` computes a weighted-average `nominal_ph` from all reagents registered in the vessel (`lab_state.vessel_contents`), applies ±1% noise, and falls back to 7.0 if no `nominal_ph` is set. Replaces the previous hardcoded 7.2 stub.
 - **API**: `GET /api/lab/reagents`, `POST /api/lab/reagents` (JWT), `DELETE /api/lab/reagents/{id}` (JWT), `GET/PUT /api/lab/vessels/{id}/contents` (PUT requires JWT)
 - **Calibration status API** — `GET /api/lab/calibration-status` lists per-instrument calibration validity; Stage 0.1 hard-denies quantitative tools on uncalibrated instruments
 
@@ -112,6 +115,8 @@ All records are persisted in the discovery journal (`journal.json`) and survive 
 - **Multi-slot JoinSet loop** — up to 4 independent experiments run concurrently, each with its own iteration context
 - **Hypothesis lifecycle** — proposed → testing → confirmed / rejected; journal tracks all transitions with timestamps
 - **Auto-findings from curve fits** — when `analyze_series` produces R² ≥ 0.80 (linear) or valid Hill fit, a `source: "system"` finding with typed `Measurement` structs is auto-recorded in the discovery journal and signed into the audit chain
+- **Evidence-gated convergence** — the loop only marks an experiment converged when at least one `source: "system"` finding exists (written by `analyze_series` at R² ≥ 0.80). The LLM cannot fake convergence by calling `confirm_hypothesis` with no data.
+- **Chain-of-thought in audit** — `reasoning_text` extracted from every LLM response is forwarded to all `audit_decision` calls across all 6 pipeline stages, making the LLM's rationale part of the tamper-evident audit record.
 - **Parameter-space coverage tracking** — numeric tool inputs logged as `ParameterProbe` records (capped at 500); `coverage_summary_for_llm()` injects `[min, max] · N values` per parameter into the LLM mandate
 
 ---
@@ -122,7 +127,7 @@ All records are persisted in the discovery journal (`journal.json`) and survive 
 |------|---------|
 | **Physical hardware** | Python SiLA 2 mock server returns simulated values. No real instruments connected. |
 | **LLM** | OpenAI-compatible API; tested with local Ollama (`qwen2.5-coder:7b`). Not a frontier reasoning model. Discovery quality is model-dependent. |
-| **Key management** | Ed25519 and JWT signing are implemented; key custody, rotation, and HSM storage are not. |
+| **Key management** | Ed25519 audit signing key is persisted across restarts via `FileBackedSigner` (env var → file → auto-generate at `~/.config/axiomlab/`). HSM storage and rotation policy are external. |
 | **Benchling export** | `BenchlingAdapter` constructs correctly-shaped API requests; not tested against the live Benchling API (requires a real token). |
 | **PubChem integration** | `search_pubchem()` makes live HTTP requests; requires network access and is subject to PubChem rate limits. |
 | **OIDC** | PKCE flow is implemented and tested in unit tests; requires a real OpenID Connect identity provider (Google, Keycloak, etc.) to function end-to-end. |
@@ -134,29 +139,34 @@ All records are persisted in the discovery journal (`journal.json`) and survive 
 ## Proof Chain
 
 ```text
-LLM intent
+LLM response (tool call JSON + reasoning_text extracted)
+  → Stage 0:   sandbox allowlist
   → Stage 0.1: calibration check (hard deny if uncalibrated)
   → Stage 0.25: chemical compatibility (deny if GHS/NFPA incompatible)
-  → Stage 1: sandbox allowlist
-  → Stage 2: Ed25519 approval (two-person control, revocation checked)
-  → Stage 3: capability bounds (hardware parameter limits)
-  → Stage 4: proof policy (reads vessel_physics_manifest.json)
-      RuntimePolicyEngine checks ArtifactStatus::Passed for LiquidHandling
-  → Stage 5: audit + dispatch
-      Ed25519-signed, hash-chained event written to JSONL
-      SiLA 2 gRPC call to instrument
-        → Python server → PyO3 → Rust VesselRegistry
-            → proved_add / proved_sub (Z3-verified integer arithmetic)
+  → Stage 1:   approval — Ed25519 two-person control, revocation checked
+  → Stage 2:   capability bounds (hardware parameter limits)
+  → Stage 3:   fail-closed (deny all actuation if no proof engine)
+  → Stage 4:   proof policy (reads vessel_physics_manifest.json)
+               RuntimePolicyEngine checks ArtifactStatus::Passed for LiquidHandling
+  → Stage 5:   audit + dispatch
+               Ed25519-signed, hash-chained event written to JSONL
+               reasoning_text included in every audit entry at every stage
+               SiLA 2 gRPC call to instrument
+                 → Python server → PyO3 → Rust VesselRegistry
+                     → proved_add / proved_sub (Z3-verified integer arithmetic)
+               LabState updated (add_to_vessel / deduct_volume) on dispense/aspirate
 ```
 
 For structured protocol runs:
 ```text
-LLM emits ProtocolPlan JSON
+LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
   → parsed and validated (step count ≤ 20, tool names non-empty)
   → ProtocolExecutor iterates steps, each through the full pipeline above
   → ProtocolStepRecord (tool, params, result, proof_artifact_hash, chain hash, Ed25519 sig)
   → UncertaintyBudget computed per measured parameter (GUM §4.3)
   → ProtocolConclusionRecord (LLM conclusion, Ed25519 signed)
+  → if doe_design_json set: one-way ANOVA run on step responses by factor level
+      → DoeAnovaResult (F-statistic, p-value) stored in ProtocolRunResult
   → Sigstore Rekor submission (UUID + integrated timestamp)
 ```
 
@@ -184,6 +194,7 @@ LLM emits ProtocolPlan JSON
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/approvals` | Browser approval UI — review, approve, or deny pending high-risk actions |
 | GET | `/ws?token=<jwt>` | WebSocket event stream (token required when `AXIOMLAB_WS_AUTH` ≠ 0) |
 | GET | `/api/status` | Running state, iteration counter, slot count |
 | GET | `/api/history` | In-memory event snapshot |
@@ -202,7 +213,7 @@ LLM emits ProtocolPlan JSON
 | GET | `/api/studies` | Study records |
 | GET | `/api/studies/{id}` | Single study record |
 | GET | `/api/literature/search?q=` | PubChem compound lookup |
-| GET | `/api/approvals/pending` | Pending approvals |
+| GET | `/api/approvals/pending` | Pending approvals (JSON) |
 | POST | `/api/approvals/submit` | Submit approval decision |
 | GET | `/api/auth/oidc/start` | OIDC PKCE login redirect |
 | GET | `/api/auth/oidc/callback` | OIDC callback + JWT issuance |
@@ -344,9 +355,11 @@ Step count ≤ 20, total volume ≤ 200 mL, dilution series correctness.
 |------------|--------|
 | **Simulated hardware** | The SiLA 2 server returns simulated values. No real instruments connected. |
 | **Local LLM** | `qwen2.5-coder:7b` handles structured tool calls; not a frontier reasoning model. Scientific hypothesis quality is model-dependent. |
-| **Key management** | Ed25519 and JWT signing implemented; HSM storage, rotation policy, and revocation workflows are manual / external. |
+| **Key management** | Ed25519 audit key persisted via `FileBackedSigner`; HSM storage and rotation policy are external. |
 | **Replication measurement stats** | `ReplicateAggregate` reports mean ± SD of steps-succeeded per replicate, not inter-replicate variability in the measurements themselves. |
 | **Audit integrity bound** | Each event is Ed25519-signed and hash-chained. A complete chain rewrite with a fresh key still passes local checks. HSM-backed keys and an external content mirror are needed for production. |
+| **DoE ANOVA grouping** | Auto-ANOVA groups step responses by low/high bracket of the first DoE factor only. Multi-factor or interaction effects require manual analysis. |
+| **LabState ↔ physics sync** | `LabState` tracks reagent identity; `SimVesselState` tracks volumes. They share vessel IDs but the pH computation uses identity (nominal_ph) not concentration-weighted physics. |
 | **PubChem rate limits** | `search_pubchem()` makes live HTTP calls; subject to PubChem's unauthenticated request limits. |
 | **Benchling integration** | `BenchlingAdapter` constructs correct API requests; not tested against the live Benchling API. |
 
@@ -360,7 +373,9 @@ AxiomLab/
 │   ├── src/main.rs             # Route registration, AppState, startup
 │   ├── src/simulator/mod.rs    # JoinSet multi-slot exploration loop
 │   ├── src/simulator/mandate.rs  # LLM system prompt (mandate) builder
-│   ├── src/simulator/tools.rs    # Tool schema definitions for LLM
+│   ├── src/simulator/tools.rs    # Tool schema definitions for LLM (physics pH, sensor dispatch)
+│   ├── src/approvals_ui.rs     # GET /approvals — serves static approval page
+│   ├── src/approvals.html      # Vanilla HTML approval dashboard (auto-refresh, Deny/Approve)
 │   ├── src/discovery.rs        # DiscoveryJournal + ISO 17025 types
 │   ├── src/db.rs               # SQLite persistence (WAL mode)
 │   ├── src/auth.rs             # JWT middleware (HS256)

@@ -12,8 +12,10 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 
 - **server** — Axum HTTP server with WebSocket event streaming, SQLite-indexed audit log, multi-slot experiment scheduler, and the continuous exploration loop that drives the agent.
   - [server/src/main.rs](server/src/main.rs) — HTTP router (see §5 for full API surface), JWT middleware, OIDC handlers, experiment scheduler initialization, ZK status route
-  - [server/src/simulator/mod.rs](server/src/simulator/mod.rs) — `JoinSet`-based parallel exploration loop; 1–4 concurrent experiment slots via `LabScheduler`
+  - [server/src/simulator/mod.rs](server/src/simulator/mod.rs) — `JoinSet`-based parallel exploration loop; 1–4 concurrent experiment slots via `LabScheduler`; convergence gated on `source: "system"` findings
   - [server/src/lab_scheduler.rs](server/src/lab_scheduler.rs) — Slot pool + instrument contention tracking
+  - [server/src/approvals_ui.rs](server/src/approvals_ui.rs) — `GET /approvals` handler; serves `approvals.html` via `include_str!`
+  - [server/src/approvals.html](server/src/approvals.html) — Vanilla HTML approval dashboard: auto-refreshes every 5 s, shows pending action cards with Deny/Approve buttons
   - [server/src/ws_sink.rs](server/src/ws_sink.rs) — WebSocket broadcast sink + in-memory EventBuffer (up to 2000 events per type)
   - [server/src/audit_query.rs](server/src/audit_query.rs) — Streaming JSONL query (BufReader line iterator, never loads full file); `/api/audit/raw` streams via `tokio_util::io::ReaderStream`
   - [server/src/discovery.rs](server/src/discovery.rs) — Discovery journal + ISO 17025 record types (`MethodValidation`, `ReferenceMaterial`, `StudyRecord`)
@@ -26,7 +28,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 - **agent_runtime** — Orchestrator, protocol executor, and all safety layers.
   - [agent_runtime/src/orchestrator.rs](agent_runtime/src/orchestrator.rs) — 6-stage validation pipeline (`try_tool_call`), LLM chat loop (`run_experiment`), protocol execution (`run_protocol`)
   - [agent_runtime/src/notifications.rs](agent_runtime/src/notifications.rs) — `NotificationSink` trait + `WebhookNotifier` (Slack/Discord/generic auto-detect)
-  - [agent_runtime/src/protocol.rs](agent_runtime/src/protocol.rs) — `Protocol`, `ProtocolRunResult`, `UncertaintyBudget` types
+  - [agent_runtime/src/protocol.rs](agent_runtime/src/protocol.rs) — `Protocol`, `ProtocolRunResult`, `UncertaintyBudget`, `DoeAnovaResult` types; `doe_design_json` field links protocols to DoE run matrices
   - [agent_runtime/src/hardware.rs](agent_runtime/src/hardware.rs) — SiLA 2 gRPC client pool: 6 instruments, 12 methods, `abort_all()`
   - [agent_runtime/src/sandbox.rs](agent_runtime/src/sandbox.rs) — Path/command allowlist
   - [agent_runtime/src/capabilities.rs](agent_runtime/src/capabilities.rs) — Numeric parameter bounds
@@ -48,7 +50,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 
 ### 1.2 The 6-Stage Validation Pipeline
 
-When the LLM returns a tool call, `Orchestrator::try_tool_call()` executes these stages in order:
+When the LLM returns a tool call, `Orchestrator::try_tool_call()` extracts `reasoning_text` from the LLM response and executes these stages in order:
 
 | Stage | Name | What it checks |
 | --- | --- | --- |
@@ -59,9 +61,9 @@ When the LLM returns a tool call, `Orchestrator::try_tool_call()` executes these
 | 2 | **Capability** | Numeric parameters within hardware bounds |
 | 3 | **Fail-closed** | High-risk actions without proof policy engine → deny |
 | 4 | **Proof policy** | `RuntimePolicyEngine` authorizes based on Verus artifact status |
-| 5 | **Dispatch** | Signed audit event emitted, SiLA 2 gRPC called |
+| 5 | **Dispatch** | Signed audit event emitted, SiLA 2 gRPC called; LabState updated on dispense/aspirate |
 
-Every stage emits a signed, hash-chained audit entry. A rejection at any stage stops the pipeline.
+Every stage emits a signed, hash-chained audit entry with `reasoning_text` attached. A rejection at any stage stops the pipeline.
 
 ### 1.3 Proof Chain Detail
 
@@ -179,6 +181,33 @@ When `AXIOMLAB_ALERT_WEBHOOK_URL` is set, `WebhookNotifier` fires on:
 
 The payload is auto-formatted for Slack (if URL contains `hooks.slack.com`), Discord (if `discord.com/api/webhooks`), or generic JSON otherwise.
 
+### 3.5 Approval UI
+
+When a high-risk action requires two-person approval, open the built-in approval dashboard in any browser:
+
+```text
+http://localhost:3000/approvals
+```
+
+The page:
+
+- Auto-refreshes every 5 seconds
+- Lists each pending action with tool name, risk class, hypothesis, parameters, and age
+- **Deny** — one click, no credentials required (the approval bundle itself carries cryptographic authority)
+- **Approve…** — opens a dialog to paste the signed approval bundle JSON produced by `approvalctl sign --pending-id <id>`
+
+No JWT required for the page itself. The approval bundle carries the cryptographic authorization.
+
+```bash
+# View pending approvals (JSON)
+curl http://localhost:3000/api/approvals/pending
+
+# Deny without the UI
+curl -X POST http://localhost:3000/api/approvals/submit \
+  -H "Content-Type: application/json" \
+  -d '{"pending_id": "<id>", "bundle": null}'
+```
+
 ---
 
 ## 4) ISO 17025 Records
@@ -242,6 +271,9 @@ QA sign-off computes `SHA-256(canonical_json(study_record))` and stores it as `q
 
 | Method | Path | Description |
 | --- | --- | --- |
+| GET | `/approvals` | Browser approval UI — view, approve, or deny pending high-risk actions |
+| GET | `/api/approvals/pending` | Pending approvals as JSON |
+| POST | `/api/approvals/submit` | Submit approval bundle or deny (`bundle: null`) |
 | GET | `/api/status` | Server status + active slot count |
 | GET | `/api/history` | Recent experiment results |
 | GET | `/api/journal` | Full discovery journal |
@@ -460,11 +492,11 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 - Issue: `RuntimePolicyEngine` can be constructed with `trusted` flag without prior signature verification. In production, `simulator.rs` calls `mark_signature_verified()` only when manifest hash matches a compile-time constant — not a runtime cryptographic check.
 - Mitigation: Use `proofctl verify` with actual Ed25519 keys before deployment.
 
-### 9.2 Medium: Audit signing key is ephemeral
+### 9.2 Low: Audit signing key file is local-only
 
-- Code: [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs)
-- Issue: Ed25519 signing key generated fresh each run. A complete chain rewrite with a fresh key passes local checks (Rekor anchors are the external witness).
-- Mitigation: Persist signing key across runs via HSM or sealed storage.
+- Code: [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — `FileBackedSigner::load_or_create()`
+- Status: **Resolved for single-node deployments.** `audit_signer_from_env()` loads in priority order: `AXIOMLAB_AUDIT_SIGNING_KEY` env var → `AXIOMLAB_AUDIT_SIGNING_KEY_PATH` file → auto-generate at `~/.config/axiomlab/audit_signing.key`. The key survives restarts.
+- Remaining risk: Key is on local disk. A complete chain rewrite from the same host with the same persisted key passes local checks. Rekor anchors remain the external witness. HSM or KMS custody is needed for production.
 
 ### 9.3 Medium: Hardware is simulated
 
@@ -501,13 +533,15 @@ Before running high-risk actions:
 
 ## 11) Suggested Next Hardening Tasks
 
-1. Persist the Ed25519 audit signing key across restarts (HSM or sealed storage).
-2. Restrict trusted policy-engine constructor usage to test-only contexts.
-3. Replace hardware simulation with injected production driver traits (trait-based `SensorDriver` injection behind `--feature hardware`).
-4. Extend integration tests to enforce signed-manifest-only authorization path; add rejection tests for all 6 pipeline stages.
-5. Make approval sidecar write + dispatch atomic (write sidecar → dispatch → delete on success).
-6. Add CI gate that verifies committed `vessel_physics_manifest.json` was generated from current `verus_verified/*.rs` sources.
-7. Add Rekor submission retry queue for network outages at conclusion time.
-8. Validate string tool parameters (`pump_id`, `sensor_id`) against an allowed set at the capability stage.
-9. Add external audit mirror: periodically push chain-tip hashes to a Gist or orphan git branch to survive local disk failure.
-10. Implement full embedding-based RAG (vector DB + paper chunking) to replace the PubChem keyword stub in `literature.rs`.
+1. Restrict trusted policy-engine constructor usage to test-only contexts.
+2. Replace hardware simulation with injected production driver traits (trait-based `SensorDriver` injection behind `--feature hardware`).
+3. Extend integration tests to enforce signed-manifest-only authorization path; add rejection tests for all 6 pipeline stages.
+4. Make approval sidecar write + dispatch atomic (write sidecar → dispatch → delete on success).
+5. Add CI gate that verifies committed `vessel_physics_manifest.json` was generated from current `verus_verified/*.rs` sources.
+6. Add Rekor submission retry queue for network outages at conclusion time.
+7. Validate string tool parameters (`pump_id`, `sensor_id`, `vessel_id`) against an allowed set at the capability stage.
+8. Add external audit mirror: periodically push chain-tip hashes to a Gist or orphan git branch to survive local disk failure.
+9. Implement full embedding-based RAG (vector DB + paper chunking) to replace the PubChem keyword stub in `literature.rs`.
+10. Migrate audit signing key to HSM or KMS for production; current `FileBackedSigner` only survives single-node restarts.
+11. Add `nominal_ph` values to the default reagent catalog so pH simulation works out-of-the-box without manual registration.
+12. Extend `run_doe_anova` to support multi-factor grouping (currently only groups by the first factor's low/high bracket).
