@@ -1066,10 +1066,12 @@ impl<L: LlmBackend> Orchestrator<L> {
     /// Run one-way ANOVA on protocol step responses grouped by the first DoE factor level.
     ///
     /// Parses `doe_design_json` as a `DoeDesign`, pairs each run row with the
-    /// corresponding allowed step result (in order), groups the numeric response
-    /// values by the first factor's level bracket (low ≤ mid vs high > mid),
-    /// then calls `anova_one_way`.  Returns `None` if the design cannot be parsed,
-    /// there are insufficient data points, or ANOVA fails for any reason.
+    /// corresponding allowed step result (in order), discovers the distinct
+    /// levels of the first factor from the run matrix, and groups responses
+    /// accordingly before calling `anova_one_way`.
+    ///
+    /// Returns `None` if the design cannot be parsed, there are fewer than 2
+    /// distinct levels, any group has fewer than 2 observations, or ANOVA fails.
     fn run_doe_anova(
         &self,
         doe_design_json: &str,
@@ -1094,17 +1096,32 @@ impl<L: LlmBackend> Orchestrator<L> {
             })
             .collect();
 
-        // Pair responses with DoE run rows (zip stops at the shorter).
         let first_factor = &design.factors[0];
-        let mid = (first_factor.low + first_factor.high) / 2.0;
 
-        // Group responses by first factor level (low ≤ mid → group 0, else group 1).
-        let n_groups = 2usize;
+        // Discover distinct levels from the run matrix (rounded to 9 decimal
+        // places to absorb floating-point representation noise).  Sort them so
+        // group indices are stable and reproducible.
+        let mut distinct_levels: Vec<f64> = design.runs.iter()
+            .filter_map(|run| run.get(&first_factor.name).copied())
+            .map(|v| (v * 1e9).round() / 1e9)
+            .collect();
+        distinct_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        distinct_levels.dedup();
+
+        if distinct_levels.len() < 2 {
+            return None;
+        }
+
+        // Assign each run's response to the group that matches its rounded level.
+        let n_groups = distinct_levels.len();
         let mut groups: Vec<Vec<f64>> = vec![Vec::new(); n_groups];
-        for (run, response) in design.runs.iter().zip(responses.iter()) {
+        for (run, &response) in design.runs.iter().zip(responses.iter()) {
             let level = run.get(&first_factor.name).copied().unwrap_or(first_factor.low);
-            let group_idx = if level <= mid { 0 } else { 1 };
-            groups[group_idx].push(*response);
+            let rounded = (level * 1e9).round() / 1e9;
+            // Binary search is safe: distinct_levels is sorted and deduped.
+            if let Ok(idx) = distinct_levels.binary_search_by(|v| v.partial_cmp(&rounded).unwrap()) {
+                groups[idx].push(response);
+            }
         }
 
         // Need ≥2 observations per group.

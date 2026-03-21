@@ -749,14 +749,23 @@ fn register_analyze_series_tool(
                     });
                 }
 
+                // R² helper: shared denominator used for Hill and M-M quality gates.
+                let y_mean = ys.iter().sum::<f64>() / ys.len() as f64;
+                let ss_tot: f64 = ys.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
+                let nonlinear_r2 = |ss_res: f64| -> f64 {
+                    if ss_tot > 0.0 { (1.0 - ss_res / ss_tot).clamp(0.0, 1.0) } else { 1.0 }
+                };
+
                 let mut hill_fit_result = None;
                 if model == "auto" || model == "hill" {
                     if let Some(hf) = hill_equation_fit(&xs, &ys) {
+                        let r2 = nonlinear_r2(hf.ss_res);
                         result["hill"] = serde_json::json!({
-                            "e_max":  hf.e_max,
-                            "ec50":   hf.ec50,
-                            "hill_n": hf.hill_n,
-                            "aic":    hf.aic(),
+                            "e_max":     hf.e_max,
+                            "ec50":      hf.ec50,
+                            "hill_n":    hf.hill_n,
+                            "r_squared": r2,
+                            "aic":       hf.aic(),
                         });
                         if let Some(ref lf) = linear_fit {
                             result["recommended_model"] = serde_json::json!(
@@ -767,17 +776,21 @@ fn register_analyze_series_tool(
                                 }
                             );
                         }
-                        hill_fit_result = Some(hf);
+                        hill_fit_result = Some((hf, r2));
                     }
                 }
 
+                let mut mm_fit_result = None;
                 if model == "auto" || model == "michaelis_menten" {
                     if let Some(mmf) = michaelis_menten_fit(&xs, &ys) {
+                        let r2 = nonlinear_r2(mmf.ss_res);
                         result["michaelis_menten"] = serde_json::json!({
-                            "v_max": mmf.v_max,
-                            "km":    mmf.km,
-                            "aic":   mmf.aic(),
+                            "v_max":     mmf.v_max,
+                            "km":        mmf.km,
+                            "r_squared": r2,
+                            "aic":       mmf.aic(),
                         });
+                        mm_fit_result = Some((mmf, r2));
                     }
                 }
 
@@ -812,29 +825,49 @@ fn register_analyze_series_tool(
                             let evidence = vec![format!("n={} data points", xs.len())];
                             let measurements_json = serde_json::to_string(&measurements).unwrap_or_default();
                             let id = j.add_finding(stmt.clone(), evidence, measurements, None, "system");
-                            // Dual-write to SQLite.
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
                         }
                     }
 
-                    // Hill finding.
-                    if let Some(hf) = hill_fit_result {
-                        if hf.ec50 > 0.0 && hf.e_max > 0.0 {
+                    // Hill finding — gate on R² so a poorly-converged fit is not recorded.
+                    if let Some((hf, r2)) = hill_fit_result {
+                        if r2 >= AUTO_FINDING_R2_THRESHOLD {
                             let measurements = vec![
-                                Measurement { parameter: "ec50".into(),   value: hf.ec50,   unit: x_label.clone(), uncertainty: None },
-                                Measurement { parameter: "e_max".into(),  value: hf.e_max,  unit: y_label.clone(), uncertainty: None },
-                                Measurement { parameter: "hill_n".into(), value: hf.hill_n, unit: String::new(),   uncertainty: None },
+                                Measurement { parameter: "ec50".into(),      value: hf.ec50,   unit: x_label.clone(), uncertainty: None },
+                                Measurement { parameter: "e_max".into(),     value: hf.e_max,  unit: y_label.clone(), uncertainty: None },
+                                Measurement { parameter: "hill_n".into(),    value: hf.hill_n, unit: String::new(),   uncertainty: None },
+                                Measurement { parameter: "r_squared".into(), value: r2,        unit: String::new(),   uncertainty: None },
                             ];
                             let stmt = format!(
-                                "Hill fit ({y_label} vs {x_label}): EC50={:.4}, E_max={:.4}, hill_n={:.4}",
-                                hf.ec50, hf.e_max, hf.hill_n
+                                "Hill fit ({y_label} vs {x_label}): EC50={:.4}, E_max={:.4}, hill_n={:.4}, R²={:.4}",
+                                hf.ec50, hf.e_max, hf.hill_n, r2
                             );
                             let evidence = vec![format!("n={} data points, AIC={:.2}", xs.len(), hf.aic())];
                             let measurements_json = serde_json::to_string(&measurements).unwrap_or_default();
                             let id = j.add_finding(stmt.clone(), evidence, measurements, None, "system");
-                            // Dual-write to SQLite.
+                            if let Some(f) = j.findings.last() { db.insert_finding(f); }
+                            j.save(&jpath).ok();
+                            emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                        }
+                    }
+
+                    // Michaelis-Menten finding — same R² gate.
+                    if let Some((mmf, r2)) = mm_fit_result {
+                        if r2 >= AUTO_FINDING_R2_THRESHOLD {
+                            let measurements = vec![
+                                Measurement { parameter: "v_max".into(),     value: mmf.v_max, unit: y_label.clone(), uncertainty: None },
+                                Measurement { parameter: "km".into(),        value: mmf.km,    unit: x_label.clone(), uncertainty: None },
+                                Measurement { parameter: "r_squared".into(), value: r2,        unit: String::new(),   uncertainty: None },
+                            ];
+                            let stmt = format!(
+                                "Michaelis-Menten fit ({y_label} vs {x_label}): Vmax={:.4}, Km={:.4}, R²={:.4}",
+                                mmf.v_max, mmf.km, r2
+                            );
+                            let evidence = vec![format!("n={} data points, AIC={:.2}", xs.len(), mmf.aic())];
+                            let measurements_json = serde_json::to_string(&measurements).unwrap_or_default();
+                            let id = j.add_finding(stmt.clone(), evidence, measurements, None, "system");
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();

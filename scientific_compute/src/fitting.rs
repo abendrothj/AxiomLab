@@ -86,6 +86,97 @@ pub fn linear_regression(x: &[f64], y: &[f64]) -> Option<LinearFit> {
     })
 }
 
+// ── Levenberg-Marquardt solver ────────────────────────────────────────────────
+
+/// Levenberg-Marquardt nonlinear least-squares.
+///
+/// Minimises Σ rᵢ(θ)² where the residual vector and its Jacobian are supplied
+/// as closures.
+///
+/// | Argument    | Meaning                                                        |
+/// |-------------|----------------------------------------------------------------|
+/// | `p0`        | Initial parameter vector (length p).                          |
+/// | `residuals` | Residual vector r (length n): yᵢ − f(xᵢ; θ).                |
+/// | `jacobian`  | n×p Jacobian of residuals: J\[i\]\[j\] = ∂rᵢ/∂θⱼ.          |
+/// | `lower`     | Per-parameter lower bounds; use `f64::NEG_INFINITY` for none. |
+/// | `max_iter`  | Iteration limit (typically 200–300).                          |
+///
+/// Returns `Some(θ)` when the step norm drops below 1 × 10⁻¹⁰ or `max_iter`
+/// is exhausted with a finite solution.  Returns `None` if the linear solve
+/// fails or the parameters diverge.
+fn levenberg_marquardt(
+    p0: Vec<f64>,
+    residuals: impl Fn(&[f64]) -> Vec<f64>,
+    jacobian: impl Fn(&[f64]) -> Vec<Vec<f64>>,
+    lower: &[f64],
+    max_iter: usize,
+) -> Option<Vec<f64>> {
+    let p = p0.len();
+    let mut theta = p0;
+    let mut r = residuals(&theta);
+    let mut ss: f64 = r.iter().map(|ri| ri * ri).sum();
+
+    // Seed λ from 10⁻³ × max diagonal of J^T J at the starting point,
+    // with a floor so the damping is meaningful even for flat starting Jacobians.
+    let j0 = jacobian(&theta);
+    let n_obs = j0.len();
+    let init_diag_max = (0..p)
+        .map(|j| (0..n_obs).map(|i| j0[i][j].powi(2)).sum::<f64>())
+        .fold(0.0_f64, f64::max)
+        .max(1e-6);
+    let mut lambda = 1e-3 * init_diag_max;
+
+    for _ in 0..max_iter {
+        let j = jacobian(&theta);
+        let n_obs = j.len();
+
+        // Accumulate J^T J (p×p) and J^T r (p-vector).
+        let mut jtj = vec![vec![0.0_f64; p]; p];
+        let mut jtr = vec![0.0_f64; p];
+        for i in 0..n_obs {
+            for a in 0..p {
+                jtr[a] += j[i][a] * r[i];
+                for b in 0..p {
+                    jtj[a][b] += j[i][a] * j[i][b];
+                }
+            }
+        }
+
+        // Damping: add λI to J^T J.
+        for a in 0..p { jtj[a][a] += lambda; }
+
+        // Solve (J^T J + λI) Δθ = −J^T r via LU decomposition.
+        let lhs = DMatrix::from_fn(p, p, |r, c| jtj[r][c]);
+        let rhs = DVector::from_vec(jtr.iter().map(|v| -v).collect::<Vec<_>>());
+        let delta = lhs.lu().solve(&rhs)?;
+
+        // Proposed step — clamp to lower bounds.
+        let theta_new: Vec<f64> = theta.iter()
+            .enumerate()
+            .map(|(k, &t)| (t + delta[k]).max(lower[k]))
+            .collect();
+
+        let r_new = residuals(&theta_new);
+        let ss_new: f64 = r_new.iter().map(|ri| ri * ri).sum();
+
+        if ss_new < ss {
+            // Accept: loosen damping, check convergence.
+            theta = theta_new;
+            r = r_new;
+            ss = ss_new;
+            lambda = (lambda * 0.1).max(1e-15);
+            if delta.iter().map(|d| d * d).sum::<f64>().sqrt() < 1e-10 {
+                break;
+            }
+        } else {
+            // Reject: tighten damping (approach steepest descent).
+            lambda = (lambda * 10.0).min(1e12);
+        }
+    }
+
+    if theta.iter().all(|t| t.is_finite()) { Some(theta) } else { None }
+}
+
 // ── Hill equation (sigmoidal dose-response) ───────────────────────────────────
 
 /// Result of a Hill equation fit: y = E_max · x^n / (EC50^n + x^n)
@@ -118,12 +209,12 @@ impl HillFit {
     }
 }
 
-/// Fit a Hill / sigmoidal dose-response curve via gradient descent.
+/// Fit a Hill / sigmoidal dose-response curve via Levenberg-Marquardt.
 ///
-/// Uses a fixed-step gradient descent with restarts from multiple initial
-/// parameter guesses.  For production use, replace with Levenberg-Marquardt.
+/// Uses linear interpolation to seed EC50, then runs L-M from five starting
+/// points and returns the best converged fit.
 ///
-/// Returns `None` if fewer than 3 data points.
+/// Returns `None` if fewer than 3 data points or all starts fail to converge.
 pub fn hill_equation_fit(x: &[f64], y: &[f64]) -> Option<HillFit> {
     let n = x.len();
     if n < 3 || n != y.len() {
@@ -134,8 +225,6 @@ pub fn hill_equation_fit(x: &[f64], y: &[f64]) -> Option<HillFit> {
     let x_mid = x[x.len() / 2].max(1e-9);
 
     // Estimate EC50 from data: linearly interpolate to find x where y ≈ 0.5 * y_max.
-    // Using linear interpolation (not just the midpoint of the enclosing window)
-    // gives a much tighter EC50 starting guess, especially for sparse x grids.
     let y_half = y_max * 0.5;
     let ec50_est = x
         .windows(2)
@@ -164,72 +253,57 @@ pub fn hill_equation_fit(x: &[f64], y: &[f64]) -> Option<HillFit> {
 
     candidates
         .iter()
-        .filter_map(|&(e0, ec0, n0)| hill_gd_fit(x, y, e0, ec0, n0))
+        .filter_map(|&(e0, ec0, n0)| hill_lm_fit(x, y, e0, ec0, n0))
         .min_by(|a, b| a.ss_res.partial_cmp(&b.ss_res).unwrap_or(std::cmp::Ordering::Equal))
 }
 
-fn hill_gd_fit(
-    x: &[f64],
-    y: &[f64],
-    mut e_max: f64,
-    mut ec50: f64,
-    mut hill_n: f64,
-) -> Option<HillFit> {
-    let n_pts = x.len();
-    let eps = 1e-8;
+/// Levenberg-Marquardt inner fit for a single Hill starting point.
+///
+/// Model: f(x; E_max, EC50, n) = E_max · x^n / (EC50^n + x^n)
+///
+/// Jacobian of residuals r_i = y_i − f(x_i; θ):
+///   ∂r/∂E_max = −x^n / denom
+///   ∂r/∂EC50  = +E_max · x^n · n · EC50^(n−1) / denom²
+///   ∂r/∂n     = −E_max · x^n · EC50^n · ln(x/EC50) / denom²
+fn hill_lm_fit(x: &[f64], y: &[f64], e0: f64, ec0: f64, n0: f64) -> Option<HillFit> {
+    const EPS: f64 = 1e-9;
+    let lower = [EPS, EPS, EPS]; // E_max, EC50, hill_n all strictly positive
 
-    // Per-parameter learning rates.  The gradient for ec50 is O(ec50 · hill_n)
-    // times larger than the gradient for e_max (chain rule through ec50^hill_n),
-    // so ec50 needs a proportionally smaller step to stay balanced.
-    let lr_e  = 2e-4;
-    let lr_ec = 2e-5;
-    let lr_n  = 2e-4;
+    let residuals = |theta: &[f64]| -> Vec<f64> {
+        let (e_max, ec50, hn) = (theta[0], theta[1], theta[2]);
+        x.iter().zip(y.iter()).map(|(&xi, &yi)| {
+            let xn    = if xi > 0.0 { xi.powf(hn) } else { 0.0 };
+            let ec50n = ec50.powf(hn);
+            yi - e_max * xn / (ec50n + xn).max(EPS)
+        }).collect()
+    };
 
-    for _ in 0..50_000 {
-        let mut d_e = 0.0_f64;
-        let mut d_ec = 0.0_f64;
-        let mut d_n = 0.0_f64;
+    let jacobian = |theta: &[f64]| -> Vec<Vec<f64>> {
+        let (e_max, ec50, hn) = (theta[0], theta[1], theta[2]);
+        x.iter().map(|&xi| {
+            if xi <= 0.0 { return vec![0.0, 0.0, 0.0]; }
+            let xn     = xi.powf(hn);
+            let ec50n  = ec50.powf(hn);
+            let denom  = (ec50n + xn).max(EPS);
+            let denom2 = denom * denom;
 
-        for (&xi, &yi) in x.iter().zip(y.iter()) {
-            let xn = xi.powf(hill_n).max(eps);
-            let ec50n = ec50.powf(hill_n).max(eps);
-            let denom = ec50n + xn;
-            let pred = e_max * xn / denom;
-            let residual = pred - yi;
+            let dr_de  = -xn / denom;
+            let dr_dec = e_max * xn * hn * ec50.powf(hn - 1.0) / denom2;
+            let dr_dn  = -e_max * xn * ec50n * (xi / ec50).ln() / denom2;
+            vec![dr_de, dr_dec, dr_dn]
+        }).collect()
+    };
 
-            // ∂pred/∂e_max
-            d_e += 2.0 * residual * xn / denom;
-            // ∂pred/∂ec50  (chain rule through ec50^hill_n)
-            let d_ec50n = -e_max * xn / denom.powi(2);
-            d_ec += 2.0 * residual * d_ec50n * hill_n * ec50.powf(hill_n - 1.0).max(eps);
-            // ∂pred/∂hill_n  (chain rule)
-            let d_xn_dn    = xn   * xi.ln().max(-100.0);
-            let d_ec50n_dn = ec50n * ec50.ln().max(-100.0);
-            let dpred_dn = e_max * (d_xn_dn * denom - xn * (d_xn_dn + d_ec50n_dn)) / denom.powi(2);
-            d_n += 2.0 * residual * dpred_dn;
-        }
+    let theta = levenberg_marquardt(vec![e0, ec0, n0], residuals, jacobian, &lower, 300)?;
+    let (e_max, ec50, hill_n) = (theta[0], theta[1], theta[2]);
 
-        e_max  -= lr_e  * d_e  / n_pts as f64;
-        ec50    = (ec50  - lr_ec * d_ec / n_pts as f64).max(eps);
-        hill_n  = (hill_n - lr_n  * d_n  / n_pts as f64).max(eps);
-    }
+    let ss_res: f64 = x.iter().zip(y.iter()).map(|(&xi, &yi)| {
+        let xn    = if xi > 0.0 { xi.powf(hill_n) } else { 0.0 };
+        let ec50n = ec50.powf(hill_n);
+        (yi - e_max * xn / (ec50n + xn).max(EPS)).powi(2)
+    }).sum();
 
-    if !e_max.is_finite() || !ec50.is_finite() || !hill_n.is_finite() {
-        return None;
-    }
-
-    let ss_res: f64 = x
-        .iter()
-        .zip(y.iter())
-        .map(|(&xi, &yi)| {
-            let xn = xi.powf(hill_n).max(eps);
-            let ec50n = ec50.powf(hill_n).max(eps);
-            let pred = e_max * xn / (ec50n + xn);
-            (pred - yi).powi(2)
-        })
-        .sum();
-
-    Some(HillFit { e_max, ec50, hill_n, ss_res, n: n_pts, n_params: 3 })
+    Some(HillFit { e_max, ec50, hill_n, ss_res, n: x.len(), n_params: 3 })
 }
 
 // ── Michaelis-Menten enzyme kinetics ─────────────────────────────────────────
@@ -262,20 +336,24 @@ impl MichaelisMentenFit {
 
 /// Fit a Michaelis-Menten curve to substrate `s` and velocity `v` data.
 ///
-/// Uses the Lineweaver-Burk double-reciprocal linearisation for a robust
-/// closed-form initial estimate, then one pass of gradient refinement.
-/// Returns `None` if fewer than 2 data points.
+/// Two-phase approach:
+/// 1. **Lineweaver-Burk initialisation** — fits 1/V = (Km/Vmax)·(1/S) + 1/Vmax to
+///    obtain scale-appropriate starting values for Vmax and Km.
+/// 2. **Levenberg-Marquardt refinement** — minimises the sum of squared residuals on
+///    the untransformed model V = Vmax·S/(Km+S), eliminating the heteroscedasticity
+///    bias that the double-reciprocal transformation introduces.
+///
+/// Returns `None` if fewer than 2 positive (S, V) data points are available.
 pub fn michaelis_menten_fit(s: &[f64], v: &[f64]) -> Option<MichaelisMentenFit> {
     let n = s.len();
     if n < 2 || n != v.len() {
         return None;
     }
 
-    // Lineweaver-Burk: 1/V = (Km/Vmax) * (1/S) + 1/Vmax
-    // Filter out zero or negative substrate concentrations.
-    let pairs: Vec<(f64, f64)> = s
-        .iter()
-        .zip(v.iter())
+    // ── Phase 1: Lineweaver-Burk initialisation ───────────────────────────────
+    // 1/V = (Km/Vmax)·(1/S) + 1/Vmax  →  slope = Km/Vmax, intercept = 1/Vmax.
+    // Filter out non-positive substrate or velocity values before transforming.
+    let pairs: Vec<(f64, f64)> = s.iter().zip(v.iter())
         .filter(|(si, vi)| **si > 0.0 && **vi > 0.0)
         .map(|(si, vi)| (1.0 / *si, 1.0 / *vi))
         .collect();
@@ -286,27 +364,44 @@ pub fn michaelis_menten_fit(s: &[f64], v: &[f64]) -> Option<MichaelisMentenFit> 
 
     let inv_s: Vec<f64> = pairs.iter().map(|p| p.0).collect();
     let inv_v: Vec<f64> = pairs.iter().map(|p| p.1).collect();
-    let lb_fit = linear_regression(&inv_s, &inv_v)?;
+    let lb = linear_regression(&inv_s, &inv_v)?;
 
-    // slope = Km/Vmax  →  Km = slope * Vmax
-    // intercept = 1/Vmax  →  Vmax = 1/intercept
-    let v_max_est = if lb_fit.intercept.abs() > 1e-12 {
-        1.0 / lb_fit.intercept
+    let v_max_init = if lb.intercept.abs() > 1e-12 {
+        (1.0 / lb.intercept).max(1e-9)
     } else {
-        v.iter().cloned().fold(0.0_f64, f64::max)
+        v.iter().cloned().fold(0.0_f64, f64::max).max(1e-9)
     };
-    let km_est = (lb_fit.slope * v_max_est).max(1e-9);
+    let km_init = (lb.slope * v_max_init).max(1e-9);
 
-    let v_max = v_max_est.max(1e-9);
-    let km = km_est.max(1e-9);
+    // ── Phase 2: Levenberg-Marquardt on the untransformed model ──────────────
+    // r_i = v_i − Vmax·s_i/(Km+s_i)
+    // ∂r/∂Vmax = −s_i/(Km+s_i)
+    // ∂r/∂Km   = +Vmax·s_i/(Km+s_i)²
+    let lower = [1e-9_f64, 1e-9_f64];
 
-    let ss_res: f64 = s
-        .iter()
-        .zip(v.iter())
-        .map(|(&si, &vi)| {
-            let pred = v_max * si / (km + si);
-            (pred - vi).powi(2)
-        })
+    let residuals = |theta: &[f64]| -> Vec<f64> {
+        let (vmax, km) = (theta[0], theta[1]);
+        s.iter().zip(v.iter())
+            .map(|(&si, &vi)| vi - vmax * si / (km + si))
+            .collect()
+    };
+
+    let jacobian = |theta: &[f64]| -> Vec<Vec<f64>> {
+        let (vmax, km) = (theta[0], theta[1]);
+        s.iter().map(|&si| {
+            let d = km + si;
+            vec![-si / d, vmax * si / (d * d)]
+        }).collect()
+    };
+
+    // Fall back to the LB estimate if L-M fails (e.g. degenerate data).
+    let theta = levenberg_marquardt(
+        vec![v_max_init, km_init], residuals, jacobian, &lower, 200,
+    ).unwrap_or(vec![v_max_init, km_init]);
+
+    let (v_max, km) = (theta[0], theta[1]);
+    let ss_res: f64 = s.iter().zip(v.iter())
+        .map(|(&si, &vi)| (vi - v_max * si / (km + si)).powi(2))
         .sum();
 
     Some(MichaelisMentenFit { v_max, km, ss_res, n, n_params: 2 })
@@ -572,51 +667,49 @@ mod tests {
 
     #[test]
     fn hill_fit_recovers_parameters() {
-        // Generate synthetic Hill data with known E_max=1, EC50=10, n=2.
-        // Data must extend well past EC50 so the plateau is visible and
-        // E_max is identifiable (at x=20 the curve only reaches y=0.80;
-        // at x=100 it reaches y=0.99, clearly constraining E_max=1).
+        // Noise-free Hill data: E_max=1, EC50=10, n=2.
+        // Data spans well past EC50 so E_max and n are jointly identifiable.
         let x: Vec<f64> = vec![1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 50.0, 75.0, 100.0];
-        let y: Vec<f64> = x
-            .iter()
-            .map(|&xi| {
-                let xn = xi.powi(2);
-                xn / (100.0 + xn)
-            })
-            .collect();
+        let y: Vec<f64> = x.iter().map(|&xi| {
+            let xn = xi.powi(2);
+            xn / (100.0 + xn)  // EC50^2 = 100, EC50 = 10
+        }).collect();
 
         let fit = hill_equation_fit(&x, &y).unwrap();
-        // E_max should be close to 1.
-        assert!(
-            (fit.e_max - 1.0).abs() < 0.05,
-            "E_max={:.3} expected ~1.0",
-            fit.e_max
-        );
-        // EC50 should be close to 10.
-        assert!(
-            (fit.ec50 - 10.0).abs() < 1.5,
-            "EC50={:.3} expected ~10.0",
-            fit.ec50
-        );
+        // L-M on noise-free data should recover parameters to <1% error.
+        assert!((fit.e_max - 1.0).abs() < 0.01, "E_max={:.4} expected 1.0", fit.e_max);
+        assert!((fit.ec50 - 10.0).abs() < 0.1,  "EC50={:.4} expected 10.0", fit.ec50);
+        assert!((fit.hill_n - 2.0).abs() < 0.05, "n={:.4} expected 2.0", fit.hill_n);
     }
 
     #[test]
     fn michaelis_menten_fit_recovers_vmax_km() {
-        // V = 100 * S / (5 + S)  — Vmax=100, Km=5
+        // Noise-free: V = 100·S/(5+S) — Vmax=100, Km=5.
         let s: Vec<f64> = vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0];
         let v: Vec<f64> = s.iter().map(|&si| 100.0 * si / (5.0 + si)).collect();
 
         let fit = michaelis_menten_fit(&s, &v).unwrap();
-        assert!(
-            (fit.v_max - 100.0).abs() < 5.0,
-            "Vmax={:.2} expected ~100",
-            fit.v_max
-        );
-        assert!(
-            (fit.km - 5.0).abs() < 1.0,
-            "Km={:.2} expected ~5",
-            fit.km
-        );
+        // L-M on noise-free data should recover exact parameters.
+        assert!((fit.v_max - 100.0).abs() < 0.01, "Vmax={:.4} expected 100", fit.v_max);
+        assert!((fit.km   -   5.0).abs() < 0.01, "Km={:.4} expected 5",   fit.km);
+    }
+
+    #[test]
+    fn michaelis_menten_lm_outperforms_lineweaver_burk_on_noisy_data() {
+        // Noisy M-M data biased toward low-S points (worst case for LB).
+        // True: Vmax=50, Km=2.  Substrate concentrations heavily sampled at low [S]
+        // so Lineweaver-Burk 1/V transform gives high leverage to noisy points.
+        // Deterministic noise added manually to avoid rand dependency.
+        let s = vec![0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0];
+        let noise = vec![2.0, -1.5, 1.0, -0.5, 0.8, -0.3, 0.2, -0.1]; // ~5% of Vmax
+        let v: Vec<f64> = s.iter().zip(noise.iter())
+            .map(|(&si, &n)| (50.0_f64 * si / (2.0 + si) + n).max(0.0))
+            .collect();
+
+        let fit = michaelis_menten_fit(&s, &v).unwrap();
+        // L-M should land within 10% of true values even with this noise level.
+        assert!((fit.v_max - 50.0).abs() < 5.0, "Vmax={:.2} expected ~50", fit.v_max);
+        assert!((fit.km   -  2.0).abs() < 0.5,  "Km={:.3} expected ~2",   fit.km);
     }
 
     #[test]
