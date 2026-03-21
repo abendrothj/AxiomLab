@@ -323,12 +323,20 @@ pub enum PreferredModel {
 }
 
 /// Compare a linear and a nonlinear model using the Akaike Information
-/// Criterion.  A difference |ΔAIC| < 2 is considered indistinguishable.
-pub fn model_select_aic(linear_aic: f64, nonlinear_aic: f64) -> PreferredModel {
-    let delta = nonlinear_aic - linear_aic;
-    if delta.abs() < 2.0 {
+/// Criterion.
+///
+/// `delta` is the indistinguishability threshold (|ΔAIC| < threshold).
+/// Defaults to `2.0` when `None` is passed.
+pub fn model_select_aic(
+    linear_aic: f64,
+    nonlinear_aic: f64,
+    delta: Option<f64>,
+) -> PreferredModel {
+    let threshold = delta.unwrap_or(2.0);
+    let diff = nonlinear_aic - linear_aic;
+    if diff.abs() < threshold {
         PreferredModel::Indistinguishable
-    } else if delta > 0.0 {
+    } else if diff > 0.0 {
         PreferredModel::Linear   // lower AIC for linear
     } else {
         PreferredModel::Nonlinear
@@ -613,9 +621,12 @@ mod tests {
 
     #[test]
     fn model_select_prefers_lower_aic() {
-        assert_eq!(model_select_aic(10.0, 15.0), PreferredModel::Linear);
-        assert_eq!(model_select_aic(15.0, 10.0), PreferredModel::Nonlinear);
-        assert_eq!(model_select_aic(10.0, 11.0), PreferredModel::Indistinguishable);
+        assert_eq!(model_select_aic(10.0, 15.0, None), PreferredModel::Linear);
+        assert_eq!(model_select_aic(15.0, 10.0, None), PreferredModel::Nonlinear);
+        assert_eq!(model_select_aic(10.0, 11.0, None), PreferredModel::Indistinguishable);
+        // Custom delta.
+        assert_eq!(model_select_aic(10.0, 14.0, Some(5.0)), PreferredModel::Indistinguishable);
+        assert_eq!(model_select_aic(10.0, 14.0, Some(2.0)), PreferredModel::Linear);
     }
 
     #[test]
@@ -647,7 +658,7 @@ mod tests {
 
         let lin = linear_regression(&x, &y).unwrap();
         let hill = hill_equation_fit(&x, &y).unwrap();
-        let preferred = model_select_aic(lin.aic(), hill.aic());
+        let preferred = model_select_aic(lin.aic(), hill.aic(), None);
         assert_ne!(preferred, PreferredModel::Linear,
             "Hill model should not be worse than linear on sigmoidal data");
     }

@@ -16,6 +16,24 @@ pub enum LlmError {
     MissingApiKey,
     #[error("LLM returned empty response")]
     EmptyResponse,
+    /// Server returned HTTP 429; `retry_after_secs` from the `Retry-After` header.
+    #[error("rate limited (retry after {retry_after_secs:?}s)")]
+    RateLimit { retry_after_secs: Option<u64> },
+    /// Request timed out (connect or read).
+    #[error("LLM request timed out")]
+    Timeout,
+    /// Authentication rejected (HTTP 401/403).
+    #[error("LLM authentication error: {0}")]
+    AuthError(String),
+    /// Unexpected HTTP error status.
+    #[error("LLM server error {0}: {1}")]
+    ServerError(u16, String),
+    /// Could not parse the response body.
+    #[error("LLM response parse error: {0}")]
+    ParseError(String),
+    /// All retry attempts exhausted; inner error is the last failure.
+    #[error("LLM retries exhausted after {attempts} attempt(s): {source}")]
+    RetriesExhausted { attempts: u32, source: Box<LlmError> },
 }
 
 // ── Message types ────────────────────────────────────────────────

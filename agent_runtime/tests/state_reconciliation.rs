@@ -127,7 +127,7 @@ fn phantom_commit_detected_and_applied() {
         .get("beaker_A")
         .expect("beaker_A must now be in vessel_contents");
     assert!(
-        contents.contains(&"__phantom__".to_string()),
+        contents.iter().any(|c| c.reagent_id == "__phantom__"),
         "phantom marker must be recorded"
     );
 }
@@ -182,8 +182,11 @@ fn recorded_vessel_with_liquid_is_in_sync() {
         ghs_hazard_codes: vec![],
         reference_material_id: None,
         nominal_ph: Some(1.0),
+        concentration_m: None,
+        pka: None,
+        is_buffer: false,
     });
-    lab.add_to_vessel("beaker_A", "r1");
+    lab.add_to_vessel("beaker_A", "r1", 500.0);
 
     let mut hw = HashMap::new();
     hw.insert("beaker_A".into(), vessel_volume(500.0));
@@ -257,7 +260,7 @@ async fn network_timeout_then_reconcile() {
     assert!(
         lab.vessel_contents
             .get("beaker_A")
-            .map(|v| v.contains(&"__phantom__".to_string()))
+            .map(|v| v.iter().any(|c| c.reagent_id == "__phantom__"))
             .unwrap_or(false),
         "LabState must record phantom contents after reconciliation"
     );

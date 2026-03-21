@@ -9,6 +9,7 @@ pub mod fft;
 pub mod fitting;
 pub mod lab_data;
 pub mod linalg;
+pub mod rsm;
 pub mod stats;
 
 /// Re-export core numeric types used across the workspace.

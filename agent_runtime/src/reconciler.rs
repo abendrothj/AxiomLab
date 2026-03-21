@@ -68,11 +68,10 @@ pub fn reconcile_vessel_state(
         let expected_ul: Option<f64> = lab_state
             .vessel_contents
             .get(vessel_id.as_str())
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|rid| lab_state.reagents.get(rid.as_str()))
-                    .map(|_| 0.0_f64) // reagent entries don't carry per-vessel sub-volumes
-                    .sum::<f64>()
+            .map(|contribs| {
+                // Sum tracked volumes; zero if the contribution has no recorded volume
+                // (backward-compat migration case).
+                contribs.iter().map(|c| c.volume_ul).sum::<f64>()
             });
 
         // LabState tracks reagent IDs in vessel_contents but NOT the volume
@@ -148,11 +147,16 @@ pub fn reconcile_vessel_state(
 pub fn apply_reconciliation(lab_state: &mut LabState, desyncs: &[VesselDesync]) {
     for d in desyncs {
         if d.actual_ul > 0.0 && !lab_state.vessel_contents.contains_key(d.vessel_id.as_str()) {
+            use crate::lab_state::VesselContribution;
             lab_state
                 .vessel_contents
                 .entry(d.vessel_id.clone())
                 .or_default()
-                .push("__phantom__".into());
+                .push(VesselContribution {
+                    reagent_id:      "__phantom__".into(),
+                    volume_ul:       d.actual_ul,
+                    concentration_m: 0.0,
+                });
         }
     }
 }
@@ -184,6 +188,9 @@ mod tests {
             ghs_hazard_codes: vec![],
             reference_material_id: None,
             nominal_ph: None,
+            concentration_m: None,
+            pka: None,
+            is_buffer: false,
         }
     }
 
@@ -221,7 +228,7 @@ mod tests {
     fn known_vessel_with_contents_and_nonzero_instrument_is_in_sync() {
         let mut lab = LabState::default();
         lab.register_reagent(sample_reagent("r1"));
-        lab.add_to_vessel("beaker_A", "r1");
+        lab.add_to_vessel("beaker_A", "r1", 200.0);
         // Instrument confirms volume present — not a desync
         let hw: HashMap<_, _> = [make_hw("beaker_A", 200.0)].into();
         let desyncs = reconcile_vessel_state(&lab, &hw);
@@ -232,7 +239,7 @@ mod tests {
     fn phantom_drain_detected_for_known_vessel() {
         let mut lab = LabState::default();
         lab.register_reagent(sample_reagent("r1"));
-        lab.add_to_vessel("beaker_A", "r1");
+        lab.add_to_vessel("beaker_A", "r1", 200.0);
         // Instrument says beaker_A is empty but we recorded contents — phantom aspirate
         let hw: HashMap<_, _> = [make_hw("beaker_A", 0.0)].into();
         let desyncs = reconcile_vessel_state(&lab, &hw);
@@ -251,6 +258,6 @@ mod tests {
         }];
         apply_reconciliation(&mut lab, &desyncs);
         let contents = lab.vessel_contents.get("beaker_A").unwrap();
-        assert!(contents.contains(&"__phantom__".to_string()));
+        assert!(contents.iter().any(|c| c.reagent_id == "__phantom__"));
     }
 }

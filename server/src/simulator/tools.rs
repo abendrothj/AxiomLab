@@ -8,6 +8,7 @@ use scientific_compute::fitting::{
 use agent_runtime::{
     audit::{audit_log_path, emit_calibration, emit_journal_finding, emit_journal_hypothesis},
     hardware::SiLA2Clients,
+    ph_model,
     protocol::propose_protocol_schema,
     sandbox::{ResourceLimits, Sandbox},
     tools::{InstrumentUncertainty, ToolRegistry, ToolSpec},
@@ -219,11 +220,7 @@ pub(crate) fn make_sila2_tools(
                             let ph = {
                                 let lab = ls_sensor.lock().unwrap();
                                 let contents = lab.vessel_contents.get(vessel_id).cloned().unwrap_or_default();
-                                let phs: Vec<f64> = contents.iter()
-                                    .filter_map(|rid| lab.reagents.get(rid))
-                                    .filter_map(|r| r.nominal_ph)
-                                    .collect();
-                                if phs.is_empty() { 7.0 } else { phs.iter().sum::<f64>() / phs.len() as f64 }
+                                ph_model::compute_ph(&contents, &lab.reagents)
                             };
                             let noise = rand::thread_rng().gen_range(0.99..=1.01_f64);
                             Ok(serde_json::json!({"sensor_type": "ph", "value": (ph * noise * 100.0).round() / 100.0, "unit": "pH"}))
@@ -428,7 +425,7 @@ pub(crate) fn make_sim_tools(
                     if let Some(rid) = reagent_id {
                         let mut lab = ls.lock().unwrap();
                         lab.deduct_volume(rid, vol).ok(); // noop if reagent not registered
-                        lab.add_to_vessel(id, rid);
+                        lab.add_to_vessel(id, rid, vol);
                         lab.save();
                     }
                     Ok(serde_json::json!({
@@ -467,7 +464,7 @@ pub(crate) fn make_sim_tools(
                     // Sync LabState: remove reagent from vessel contents record.
                     if let Some(rid) = reagent_id {
                         let mut lab = ls.lock().unwrap();
-                        lab.remove_from_vessel(id, rid);
+                        lab.remove_from_vessel(id, rid, vol);
                         lab.save();
                     }
                     Ok(serde_json::json!({
@@ -592,11 +589,7 @@ pub(crate) fn make_sim_tools(
                     let ph = {
                         let lab = ls_ph.lock().unwrap();
                         let contents = lab.vessel_contents.get(vessel_id).cloned().unwrap_or_default();
-                        let phs: Vec<f64> = contents.iter()
-                            .filter_map(|rid| lab.reagents.get(rid))
-                            .filter_map(|r| r.nominal_ph)
-                            .collect();
-                        if phs.is_empty() { 7.0 } else { phs.iter().sum::<f64>() / phs.len() as f64 }
+                        ph_model::compute_ph(&contents, &lab.reagents)
                     };
                     // Add ±1% noise
                     let noise = rand::thread_rng().gen_range(0.99..=1.01_f64);
@@ -767,7 +760,7 @@ fn register_analyze_series_tool(
                         });
                         if let Some(ref lf) = linear_fit {
                             result["recommended_model"] = serde_json::json!(
-                                match model_select_aic(lf.aic(), hf.aic()) {
+                                match model_select_aic(lf.aic(), hf.aic(), None) {
                                     PreferredModel::Linear            => "linear",
                                     PreferredModel::Nonlinear         => "hill",
                                     PreferredModel::Indistinguishable => "indistinguishable",

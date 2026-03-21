@@ -5,6 +5,7 @@ members = [
     "proof_artifacts",
     "server",
     "zk_audit",
+    "verus_proofs",
 ]
 resolver = "2"
 

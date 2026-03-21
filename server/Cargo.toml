@@ -29,3 +29,9 @@ base64         = "0.22"
 openidconnect  = { version = "3", features = ["reqwest"] }
 reqwest        = { workspace = true }
 tokio-util     = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tower          = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
+http           = "1"
+tempfile       = { workspace = true }

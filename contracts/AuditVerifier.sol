@@ -53,6 +53,11 @@ contract AuditVerifier {
         uint64 lastUnixSecs;
     }
 
+    /// @notice SHA-256 of the most recently verified audit chain tip.
+    ///         Zero before any proof has been submitted.
+    ///         Cross-reference against your local JSONL file to confirm integrity.
+    bytes32 private _latestTipHash;
+
     constructor(address _verifier, bytes32 _imageId) {
         verifier = IRiscZeroVerifier(_verifier);
         AUDIT_IMAGE_ID = _imageId;
@@ -70,6 +75,8 @@ contract AuditVerifier {
         AuditSummary memory s = abi.decode(journal, (AuditSummary));
         require(s.chainValid, "AuditVerifier: audit chain integrity check failed");
 
+        _latestTipHash = s.tipHash;
+
         emit AuditProofVerified(
             s.tipHash,
             s.eventCount,
@@ -80,11 +87,10 @@ contract AuditVerifier {
         );
     }
 
-    /// @notice Returns the latest verified tip hash.
-    ///         Compare this against your local audit JSONL to confirm integrity.
+    /// @notice Returns the SHA-256 tip hash of the most recently verified audit chain.
+    ///         Returns bytes32(0) before any proof has been submitted.
+    ///         Compare this against the last entry_hash in your local JSONL file.
     function latestTipHash() external view returns (bytes32) {
-        // Stored in the most recently emitted AuditProofVerified event.
-        // Use an indexer (The Graph / Etherscan) to query historical entries.
-        revert("query AuditProofVerified events for full history");
+        return _latestTipHash;
     }
 }

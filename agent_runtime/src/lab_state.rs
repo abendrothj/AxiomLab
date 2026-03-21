@@ -16,6 +16,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ── VesselContribution ─────────────────────────────────────────────────────────
+
+/// One dispensing event tracked in a vessel.
+///
+/// Records exactly what was added and how much, enabling the pH model to
+/// compute concentration-weighted chemistry rather than a naive average.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VesselContribution {
+    pub reagent_id:      String,
+    /// Volume dispensed in this event, in µL.
+    pub volume_ul:       f64,
+    /// Molar concentration of the reagent at the time of dispense (mol/L).
+    pub concentration_m: f64,
+}
+
 // ── Reagent ────────────────────────────────────────────────────────────────────
 
 /// A reagent lot registered in the laboratory inventory.
@@ -45,6 +60,16 @@ pub struct Reagent {
     /// Nominal pH of the reagent in aqueous solution.  Used by the pH simulator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nominal_ph: Option<f64>,
+    /// Molar concentration (mol/L) as prepared.  Used by the Henderson-Hasselbalch pH model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concentration_m: Option<f64>,
+    /// Acid dissociation constant (pKa).  `Some` → participates in pH chemistry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pka: Option<f64>,
+    /// True → use Henderson-Hasselbalch for pH contribution;
+    /// false → treat as strong acid/base (pKa < 2 or > 12) or neutral.
+    #[serde(default)]
+    pub is_buffer: bool,
 }
 
 impl Reagent {
@@ -63,8 +88,49 @@ impl Reagent {
 pub struct LabState {
     /// Reagent inventory: `reagent_id → Reagent`.
     pub reagents: HashMap<String, Reagent>,
-    /// Vessel contents: `vessel_id → [reagent_id, ...]` (insertion order preserved).
-    pub vessel_contents: HashMap<String, Vec<String>>,
+    /// Vessel contents: `vessel_id → [VesselContribution, ...]` (insertion order preserved).
+    ///
+    /// Backward-compatible: on load from JSON, plain reagent-ID strings are
+    /// converted to `VesselContribution { reagent_id, volume_ul: 0, concentration_m: 0 }`.
+    #[serde(default, deserialize_with = "deser_vessel_contents")]
+    pub vessel_contents: HashMap<String, Vec<VesselContribution>>,
+}
+
+// ── Backward-compatible vessel_contents deserializer ─────────────────────────
+
+/// Accept both the old `Vec<String>` (reagent IDs) and the new
+/// `Vec<VesselContribution>` formats when loading `lab_state.json`.
+fn deser_vessel_contents<'de, D>(
+    d: D,
+) -> Result<HashMap<String, Vec<VesselContribution>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        New(VesselContribution),
+        Old(String),
+    }
+
+    let raw: HashMap<String, Vec<Entry>> = HashMap::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|(vessel, items)| {
+            let contribs = items
+                .into_iter()
+                .map(|e| match e {
+                    Entry::New(c) => c,
+                    Entry::Old(id) => VesselContribution {
+                        reagent_id: id,
+                        volume_ul: 0.0,
+                        concentration_m: 0.0,
+                    },
+                })
+                .collect();
+            (vessel, contribs)
+        })
+        .collect())
 }
 
 impl LabState {
@@ -135,21 +201,41 @@ impl LabState {
 
     // ── Vessel mutations ──────────────────────────────────────────────────────
 
-    /// Record that `reagent_id` was dispensed into `vessel_id`.
-    pub fn add_to_vessel(&mut self, vessel_id: &str, reagent_id: &str) {
+    /// Record that `volume_ul` of `reagent_id` was dispensed into `vessel_id`.
+    ///
+    /// Looks up `Reagent.concentration_m` from the inventory; uses `0.0` if
+    /// the reagent is not found or has no concentration.
+    pub fn add_to_vessel(&mut self, vessel_id: &str, reagent_id: &str, volume_ul: f64) {
+        let concentration_m = self.reagents
+            .get(reagent_id)
+            .and_then(|r| r.concentration_m)
+            .unwrap_or(0.0);
         self.vessel_contents
             .entry(vessel_id.into())
             .or_default()
-            .push(reagent_id.into());
+            .push(VesselContribution { reagent_id: reagent_id.into(), volume_ul, concentration_m });
     }
 
-    /// Remove a reagent from vessel contents (e.g., after aspiration).
-    pub fn remove_from_vessel(&mut self, vessel_id: &str, reagent_id: &str) {
-        if let Some(contents) = self.vessel_contents.get_mut(vessel_id) {
-            if let Some(pos) = contents.iter().position(|r| r == reagent_id) {
-                contents.remove(pos);
+    /// Remove `volume_ul` of `reagent_id` from vessel contents (FIFO order).
+    ///
+    /// Older contributions of the same reagent are drained first.  A
+    /// contribution is removed entirely when its remaining volume reaches zero.
+    pub fn remove_from_vessel(&mut self, vessel_id: &str, reagent_id: &str, volume_ul: f64) {
+        let Some(contribs) = self.vessel_contents.get_mut(vessel_id) else { return };
+        let mut remaining = volume_ul;
+        contribs.retain_mut(|c| {
+            if c.reagent_id != reagent_id || remaining <= 0.0 {
+                return true;
             }
-        }
+            if c.volume_ul <= remaining {
+                remaining -= c.volume_ul;
+                false
+            } else {
+                c.volume_ul -= remaining;
+                remaining = 0.0;
+                true
+            }
+        });
     }
 
     /// Return the reagent names (not IDs) currently in a vessel,
@@ -157,9 +243,9 @@ impl LabState {
     pub fn vessel_reagent_names(&self, vessel_id: &str) -> Vec<String> {
         self.vessel_contents
             .get(vessel_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.reagents.get(id))
+            .map(|contribs| {
+                contribs.iter()
+                    .filter_map(|c| self.reagents.get(&c.reagent_id))
                     .map(|r| r.name.clone())
                     .collect()
             })
@@ -167,8 +253,16 @@ impl LabState {
     }
 
     /// Set vessel contents directly (for the PUT /api/lab/vessels/{id}/contents route).
-    pub fn set_vessel_contents(&mut self, vessel_id: &str, reagent_ids: Vec<String>) {
-        self.vessel_contents.insert(vessel_id.into(), reagent_ids);
+    pub fn set_vessel_contents(&mut self, vessel_id: &str, contributions: Vec<VesselContribution>) {
+        self.vessel_contents.insert(vessel_id.into(), contributions);
+    }
+
+    /// Return all reagent IDs currently recorded in a vessel.
+    pub fn vessel_reagent_ids(&self, vessel_id: &str) -> Vec<&str> {
+        self.vessel_contents
+            .get(vessel_id)
+            .map(|v| v.iter().map(|c| c.reagent_id.as_str()).collect())
+            .unwrap_or_default()
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────
@@ -213,6 +307,9 @@ mod tests {
             ghs_hazard_codes: vec![],
             reference_material_id: None,
             nominal_ph: None,
+            concentration_m: None,
+            pka: None,
+            is_buffer: false,
         }
     }
 
@@ -235,10 +332,44 @@ mod tests {
     fn vessel_contents_tracking() {
         let mut state = LabState::default();
         state.register_reagent(sample_reagent("r1", "NaOH", 200.0));
-        state.add_to_vessel("vessel-1", "r1");
+        state.add_to_vessel("vessel-1", "r1", 100.0);
         assert_eq!(state.vessel_reagent_names("vessel-1"), vec!["NaOH"]);
-        state.remove_from_vessel("vessel-1", "r1");
+        state.remove_from_vessel("vessel-1", "r1", 100.0);
         assert!(state.vessel_reagent_names("vessel-1").is_empty());
+    }
+
+    #[test]
+    fn vessel_contribution_records_volume_and_concentration() {
+        let mut state = LabState::default();
+        let mut r = sample_reagent("r1", "HCl", 500.0);
+        r.concentration_m = Some(0.1);
+        state.register_reagent(r);
+        state.add_to_vessel("v1", "r1", 200.0);
+        let c = &state.vessel_contents["v1"][0];
+        assert_eq!(c.reagent_id, "r1");
+        assert!((c.volume_ul - 200.0).abs() < 1e-10);
+        assert!((c.concentration_m - 0.1).abs() < 1e-10);
+    }
+
+    #[test]
+    fn remove_from_vessel_partial_volume() {
+        let mut state = LabState::default();
+        state.register_reagent(sample_reagent("r1", "HCl", 500.0));
+        state.add_to_vessel("v1", "r1", 200.0);
+        state.remove_from_vessel("v1", "r1", 80.0);
+        let c = &state.vessel_contents["v1"][0];
+        assert!((c.volume_ul - 120.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vessel_backward_compat_deser() {
+        // Old format: array of strings.
+        let json = r#"{"vessel_contents":{"v1":["r1","r2"]},"reagents":{}}"#;
+        let state: LabState = serde_json::from_str(json).unwrap();
+        let v = &state.vessel_contents["v1"];
+        assert_eq!(v[0].reagent_id, "r1");
+        assert_eq!(v[0].volume_ul, 0.0);
+        assert_eq!(v[1].reagent_id, "r2");
     }
 
     #[test]

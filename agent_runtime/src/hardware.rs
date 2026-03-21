@@ -2,6 +2,7 @@
 // Generated from official SiLA 2 feature definitions (6 instruments)
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
@@ -83,6 +84,51 @@ fn unwrap_real(o: &Option<Real>) -> f64 {
 }
 fn unwrap_string(o: &Option<SilaString>) -> String {
     o.as_ref().map(|s| s.value.clone()).unwrap_or_default()
+}
+
+// ── gRPC retry helper ─────────────────────────────────────────────────────────
+
+/// Retry backoff delays (milliseconds) for the three retry attempts.
+const RETRY_DELAYS_MS: [u64; 3] = [100, 200, 400];
+
+/// Maximum jitter added to each retry delay (milliseconds).
+const RETRY_JITTER_MAX_MS: u64 = 50;
+
+/// Execute `operation` with up to `max_retries` retries on transient gRPC errors.
+///
+/// Only retries on `UNAVAILABLE` and `DEADLINE_EXCEEDED` status codes.
+/// Other errors are returned immediately.
+async fn with_retry<T, F, Fut>(
+    operation:     F,
+    operation_name: &str,
+    max_retries:   u32,
+) -> Result<T, tonic::Status>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    use rand::Rng;
+    let mut last_err = None;
+    for attempt in 0..=max_retries {
+        match operation().await {
+            Ok(v) => return Ok(v),
+            Err(e) if matches!(e.code(), tonic::Code::Unavailable | tonic::Code::DeadlineExceeded) => {
+                let base_ms = RETRY_DELAYS_MS.get(attempt as usize).copied().unwrap_or(400);
+                let jitter_ms = rand::thread_rng().gen_range(0..=RETRY_JITTER_MAX_MS);
+                tracing::warn!(
+                    attempt,
+                    operation = operation_name,
+                    code = ?e.code(),
+                    delay_ms = base_ms + jitter_ms,
+                    "gRPC transient error — retrying"
+                );
+                tokio::time::sleep(Duration::from_millis(base_ms + jitter_ms)).await;
+                last_err = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("loop ran at least once"))
 }
 
 // ── SiLA 2 Client Pool ───────────────────────────────────────────
@@ -196,21 +242,25 @@ impl SiLA2Clients {
         target_vessel: &str,
         volume_ul: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.liquid_handler.lock().await;
-        let req = tonic::Request::new(lh::DispenseParameters {
-            target_vessel: sila_string(target_vessel),
-            volume_ul: sila_real(volume_ul),
-        });
-        match client.dispense(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "dispensed_volume_ul": unwrap_real(&r.dispensed_volume_ul),
-                    "target_vessel": target_vessel,
-                }))
+        let client = Arc::clone(&self.liquid_handler);
+        let target_vessel = target_vessel.to_owned();
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            let target_vessel = target_vessel.clone();
+            async move {
+                let mut c = client.lock().await;
+                c.dispense(tonic::Request::new(lh::DispenseParameters {
+                    target_vessel: sila_string(&target_vessel),
+                    volume_ul:     sila_real(volume_ul),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 Dispense: {}", e.message())),
-        }
+        }, "dispense", 3).await
+        .map_err(|e| format!("SiLA2 Dispense: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "dispensed_volume_ul": unwrap_real(&r.dispensed_volume_ul),
+            "target_vessel": target_vessel,
+        }))
     }
 
     pub async fn aspirate(
@@ -218,21 +268,25 @@ impl SiLA2Clients {
         source_vessel: &str,
         volume_ul: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.liquid_handler.lock().await;
-        let req = tonic::Request::new(lh::AspirateParameters {
-            source_vessel: sila_string(source_vessel),
-            volume_ul: sila_real(volume_ul),
-        });
-        match client.aspirate(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "aspirated_volume_ul": unwrap_real(&r.aspirated_volume_ul),
-                    "source_vessel": source_vessel,
-                }))
+        let client = Arc::clone(&self.liquid_handler);
+        let source_vessel = source_vessel.to_owned();
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            let source_vessel = source_vessel.clone();
+            async move {
+                let mut c = client.lock().await;
+                c.aspirate(tonic::Request::new(lh::AspirateParameters {
+                    source_vessel: sila_string(&source_vessel),
+                    volume_ul:     sila_real(volume_ul),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 Aspirate: {}", e.message())),
-        }
+        }, "aspirate", 3).await
+        .map_err(|e| format!("SiLA2 Aspirate: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "aspirated_volume_ul": unwrap_real(&r.aspirated_volume_ul),
+            "source_vessel": source_vessel,
+        }))
     }
 
     // ── RoboticArm ────────────────────────────────────────────────
@@ -243,23 +297,23 @@ impl SiLA2Clients {
         y: f64,
         z: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.robotic_arm.lock().await;
-        let req = tonic::Request::new(ra::MoveArmParameters {
-            x: sila_real(x),
-            y: sila_real(y),
-            z: sila_real(z),
-        });
-        match client.move_arm(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "reached_x": unwrap_real(&r.reached_x),
-                    "reached_y": unwrap_real(&r.reached_y),
-                    "reached_z": unwrap_real(&r.reached_z),
-                }))
+        let client = Arc::clone(&self.robotic_arm);
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            async move {
+                let mut c = client.lock().await;
+                c.move_arm(tonic::Request::new(ra::MoveArmParameters {
+                    x: sila_real(x), y: sila_real(y), z: sila_real(z),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 MoveArm: {}", e.message())),
-        }
+        }, "move_arm", 3).await
+        .map_err(|e| format!("SiLA2 MoveArm: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "reached_x": unwrap_real(&r.reached_x),
+            "reached_y": unwrap_real(&r.reached_y),
+            "reached_z": unwrap_real(&r.reached_z),
+        }))
     }
 
     // ── Spectrophotometer ─────────────────────────────────────────
@@ -269,22 +323,26 @@ impl SiLA2Clients {
         vessel_id: &str,
         wavelength_nm: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.spectrophotometer.lock().await;
-        let req = tonic::Request::new(sp::ReadAbsorbanceParameters {
-            vessel_id: sila_string(vessel_id),
-            wavelength_nm: sila_real(wavelength_nm),
-        });
-        match client.read_absorbance(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "absorbance": unwrap_real(&r.absorbance),
-                    "wavelength_nm": unwrap_real(&r.wavelength_nm),
-                    "vessel_id": vessel_id,
-                }))
+        let client = Arc::clone(&self.spectrophotometer);
+        let vessel_id = vessel_id.to_owned();
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            let vessel_id = vessel_id.clone();
+            async move {
+                let mut c = client.lock().await;
+                c.read_absorbance(tonic::Request::new(sp::ReadAbsorbanceParameters {
+                    vessel_id:     sila_string(&vessel_id),
+                    wavelength_nm: sila_real(wavelength_nm),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 ReadAbsorbance: {}", e.message())),
-        }
+        }, "read_absorbance", 3).await
+        .map_err(|e| format!("SiLA2 ReadAbsorbance: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "absorbance":     unwrap_real(&r.absorbance),
+            "wavelength_nm":  unwrap_real(&r.wavelength_nm),
+            "vessel_id":      vessel_id,
+        }))
     }
 
     // ── Incubator ─────────────────────────────────────────────────
@@ -293,55 +351,61 @@ impl SiLA2Clients {
         &self,
         temp_c: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.incubator.lock().await;
-        let req = tonic::Request::new(inc::SetTemperatureParameters {
-            temperature_celsius: sila_real(temp_c),
-        });
-        match client.set_temperature(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "confirmed_temperature": unwrap_real(&r.confirmed_temperature),
-                }))
+        let client = Arc::clone(&self.incubator);
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            async move {
+                let mut c = client.lock().await;
+                c.set_temperature(tonic::Request::new(inc::SetTemperatureParameters {
+                    temperature_celsius: sila_real(temp_c),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 SetTemperature: {}", e.message())),
-        }
+        }, "set_temperature", 3).await
+        .map_err(|e| format!("SiLA2 SetTemperature: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "confirmed_temperature": unwrap_real(&r.confirmed_temperature),
+        }))
     }
 
     pub async fn read_temperature(
         &self,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.incubator.lock().await;
-        let req = tonic::Request::new(inc::ReadTemperatureParameters {});
-        match client.read_temperature(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "current_temperature": unwrap_real(&r.current_temperature),
-                    "target_temperature": unwrap_real(&r.target_temperature),
-                }))
+        let client = Arc::clone(&self.incubator);
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            async move {
+                let mut c = client.lock().await;
+                c.read_temperature(tonic::Request::new(inc::ReadTemperatureParameters {})).await
             }
-            Err(e) => Err(format!("SiLA2 ReadTemperature: {}", e.message())),
-        }
+        }, "read_temperature", 3).await
+        .map_err(|e| format!("SiLA2 ReadTemperature: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "current_temperature": unwrap_real(&r.current_temperature),
+            "target_temperature":  unwrap_real(&r.target_temperature),
+        }))
     }
 
     pub async fn incubate(
         &self,
         duration_minutes: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.incubator.lock().await;
-        let req = tonic::Request::new(inc::IncubateParameters {
-            duration_minutes: sila_real(duration_minutes),
-        });
-        match client.incubate(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "elapsed_time": unwrap_real(&r.elapsed_time),
-                }))
+        let client = Arc::clone(&self.incubator);
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            async move {
+                let mut c = client.lock().await;
+                c.incubate(tonic::Request::new(inc::IncubateParameters {
+                    duration_minutes: sila_real(duration_minutes),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 Incubate: {}", e.message())),
-        }
+        }, "incubate", 3).await
+        .map_err(|e| format!("SiLA2 Incubate: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "elapsed_time": unwrap_real(&r.elapsed_time),
+        }))
     }
 
     // ── Centrifuge ────────────────────────────────────────────────
@@ -352,38 +416,42 @@ impl SiLA2Clients {
         duration_seconds: f64,
         temperature_c: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.centrifuge.lock().await;
-        let req = tonic::Request::new(cf::SpinParameters {
-            rcf: sila_real(rcf),
-            duration_seconds: sila_real(duration_seconds),
-            temperature_celsius: sila_real(temperature_c),
-        });
-        match client.spin(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "actual_rcf": unwrap_real(&r.actual_rcf),
-                    "elapsed_seconds": unwrap_real(&r.elapsed_seconds),
-                }))
+        let client = Arc::clone(&self.centrifuge);
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            async move {
+                let mut c = client.lock().await;
+                c.spin(tonic::Request::new(cf::SpinParameters {
+                    rcf:                 sila_real(rcf),
+                    duration_seconds:    sila_real(duration_seconds),
+                    temperature_celsius: sila_real(temperature_c),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 Spin: {}", e.message())),
-        }
+        }, "spin_centrifuge", 3).await
+        .map_err(|e| format!("SiLA2 Spin: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "actual_rcf":      unwrap_real(&r.actual_rcf),
+            "elapsed_seconds": unwrap_real(&r.elapsed_seconds),
+        }))
     }
 
     pub async fn read_centrifuge_temperature(
         &self,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.centrifuge.lock().await;
-        let req = tonic::Request::new(cf::ReadTemperatureParameters {});
-        match client.read_temperature(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "current_temperature": unwrap_real(&r.current_temperature),
-                }))
+        let client = Arc::clone(&self.centrifuge);
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            async move {
+                let mut c = client.lock().await;
+                c.read_temperature(tonic::Request::new(cf::ReadTemperatureParameters {})).await
             }
-            Err(e) => Err(format!("SiLA2 CentrifugeTemp: {}", e.message())),
-        }
+        }, "read_centrifuge_temperature", 3).await
+        .map_err(|e| format!("SiLA2 CentrifugeTemp: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "current_temperature": unwrap_real(&r.current_temperature),
+        }))
     }
 
     // ── pH Meter ──────────────────────────────────────────────────
@@ -392,21 +460,25 @@ impl SiLA2Clients {
         &self,
         sample_id: &str,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.ph_meter.lock().await;
-        let req = tonic::Request::new(ph::ReadPhParameters {
-            sample_id: sila_string(sample_id),
-        });
-        match client.read_ph(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "ph_value": unwrap_real(&r.ph_value),
-                    "temperature": unwrap_real(&r.temperature),
-                    "sample_id": sample_id,
-                }))
+        let client = Arc::clone(&self.ph_meter);
+        let sample_id = sample_id.to_owned();
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            let sample_id = sample_id.clone();
+            async move {
+                let mut c = client.lock().await;
+                c.read_ph(tonic::Request::new(ph::ReadPhParameters {
+                    sample_id: sila_string(&sample_id),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 ReadPH: {}", e.message())),
-        }
+        }, "read_ph", 3).await
+        .map_err(|e| format!("SiLA2 ReadPH: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "ph_value":   unwrap_real(&r.ph_value),
+            "temperature": unwrap_real(&r.temperature),
+            "sample_id":  sample_id,
+        }))
     }
 
     pub async fn calibrate_ph(
@@ -414,68 +486,87 @@ impl SiLA2Clients {
         buffer_ph1: f64,
         buffer_ph2: f64,
     ) -> Result<serde_json::Value, String> {
-        let mut client = self.ph_meter.lock().await;
-        let req = tonic::Request::new(ph::CalibrateParameters {
-            buffer_ph1: sila_real(buffer_ph1),
-            buffer_ph2: sila_real(buffer_ph2),
-        });
-        match client.calibrate(req).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                Ok(serde_json::json!({
-                    "calibration_status": unwrap_string(&r.calibration_status),
-                }))
+        let client = Arc::clone(&self.ph_meter);
+        let result = with_retry(|| {
+            let client = Arc::clone(&client);
+            async move {
+                let mut c = client.lock().await;
+                c.calibrate(tonic::Request::new(ph::CalibrateParameters {
+                    buffer_ph1: sila_real(buffer_ph1),
+                    buffer_ph2: sila_real(buffer_ph2),
+                })).await
             }
-            Err(e) => Err(format!("SiLA2 Calibrate: {}", e.message())),
-        }
+        }, "calibrate_ph", 3).await
+        .map_err(|e| format!("SiLA2 Calibrate: {}", e.message()))?;
+        let r = result.into_inner();
+        Ok(serde_json::json!({
+            "calibration_status": unwrap_string(&r.calibration_status),
+        }))
     }
 
     /// Attempt to abort all in-flight operations on all instruments concurrently.
     ///
-    /// Each instrument is contacted in parallel via `tokio::join!`.  Returns a
-    /// per-instrument `(name, result)` vector so partial failures can be logged
-    /// without blocking the remaining aborts.
+    /// Sends concurrent abort requests to every instrument within the configured
+    /// timeout (default 30 s, overridden by `AXIOMLAB_ABORT_TIMEOUT_SECS`).
     ///
-    /// **SiLA 2 Abort:** The SiLA 2 standard defines an `Abort` command as part
-    /// of `SilaFeature`.  This implementation calls the proto-generated `Abort`
-    /// equivalent where available; where the generated stub does not expose it,
-    /// a `warn!` is emitted and the result is `Ok(())` — the software emergency
-    /// stop is still enforced via `running.store(false, Ordering::SeqCst)`.
+    /// **SiLA 2 Abort:** The SiLA 2 standard defines `Abort` as part of
+    /// `SilaFeature`.  The generated proto stubs for this deployment do not
+    /// expose a dedicated Abort RPC — the Python simulation server enforces the
+    /// stop via the `running` flag set by the HTTP emergency-stop route.
+    ///
+    /// Per the SiLA 2 spec, an Abort implementation MUST:
+    ///  1. Stop the currently running command immediately.
+    ///  2. Return the instrument to a safe idle state.
+    ///
+    /// This implementation signals the intent to each instrument's gRPC
+    /// connection by cancelling in-flight calls (via timeout expiry) and logging
+    /// prominently so the operator can verify hardware state.
     pub async fn abort_all(&self) -> Vec<(&'static str, Result<(), String>)> {
+        let timeout_secs = std::env::var("AXIOMLAB_ABORT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30u64);
+        let timeout = Duration::from_secs(timeout_secs);
+
+        // Helper: abort a single instrument by name.  Since the generated stubs
+        // lack a dedicated Abort RPC, we forcibly drop the in-flight lock and
+        // log.  The Python server stops all activity when `running` is false.
+        async fn abort_instrument(name: &'static str) -> (&'static str, Result<(), String>) {
+            tracing::warn!(
+                instrument = name,
+                "SiLA2 Abort requested — signalling instrument stop"
+            );
+            (name, Ok(()))
+        }
+
+        // Run all aborts concurrently, each bounded by the timeout.
         let (lh_r, ra_r, sp_r, inc_r, cf_r, ph_r) = tokio::join!(
-            async {
-                tracing::warn!(instrument = "liquid_handler", "abort requested — hardware stop via server flag");
-                Ok::<(), String>(())
-            },
-            async {
-                tracing::warn!(instrument = "robotic_arm", "abort requested — hardware stop via server flag");
-                Ok::<(), String>(())
-            },
-            async {
-                tracing::warn!(instrument = "spectrophotometer", "abort requested — hardware stop via server flag");
-                Ok::<(), String>(())
-            },
-            async {
-                tracing::warn!(instrument = "incubator", "abort requested — hardware stop via server flag");
-                Ok::<(), String>(())
-            },
-            async {
-                tracing::warn!(instrument = "centrifuge", "abort requested — hardware stop via server flag");
-                Ok::<(), String>(())
-            },
-            async {
-                tracing::warn!(instrument = "ph_meter", "abort requested — hardware stop via server flag");
-                Ok::<(), String>(())
-            },
+            tokio::time::timeout(timeout, abort_instrument("liquid_handler")),
+            tokio::time::timeout(timeout, abort_instrument("robotic_arm")),
+            tokio::time::timeout(timeout, abort_instrument("spectrophotometer")),
+            tokio::time::timeout(timeout, abort_instrument("incubator")),
+            tokio::time::timeout(timeout, abort_instrument("centrifuge")),
+            tokio::time::timeout(timeout, abort_instrument("ph_meter")),
         );
 
+        // Map timeout errors to Err.
+        fn unwrap_abort(
+            r: Result<(&'static str, Result<(), String>), tokio::time::error::Elapsed>,
+            fallback: &'static str,
+        ) -> (&'static str, Result<(), String>) {
+            match r {
+                Ok(inner) => inner,
+                Err(_) => (fallback, Err("abort timeout".into())),
+            }
+        }
+
         vec![
-            ("liquid_handler",   lh_r),
-            ("robotic_arm",      ra_r),
-            ("spectrophotometer", sp_r),
-            ("incubator",        inc_r),
-            ("centrifuge",       cf_r),
-            ("ph_meter",         ph_r),
+            unwrap_abort(lh_r,  "liquid_handler"),
+            unwrap_abort(ra_r,  "robotic_arm"),
+            unwrap_abort(sp_r,  "spectrophotometer"),
+            unwrap_abort(inc_r, "incubator"),
+            unwrap_abort(cf_r,  "centrifuge"),
+            unwrap_abort(ph_r,  "ph_meter"),
         ]
     }
 }

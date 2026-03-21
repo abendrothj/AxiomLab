@@ -106,11 +106,11 @@ impl ChemicalCompatibility {
     /// Returns `Err(reason)` on the first conflict found.
     pub fn check_vessel_addition(
         &self,
-        vessel_contents: &[String],
+        vessel_contents: &[crate::lab_state::VesselContribution],
         adding: &str,
     ) -> Result<(), String> {
-        for existing in vessel_contents {
-            self.check(existing, adding)?;
+        for c in vessel_contents {
+            self.check(&c.reagent_id, adding)?;
         }
         Ok(())
     }
@@ -169,16 +169,22 @@ mod tests {
 
     #[test]
     fn vessel_addition_blocked_on_conflict() {
+        use crate::lab_state::VesselContribution;
         let c = cc();
-        let vessel = vec!["HCl".to_string(), "NaCl".to_string()];
+        let vessel: Vec<VesselContribution> = vec!["HCl", "NaCl"].iter().map(|id| VesselContribution {
+            reagent_id: id.to_string(), volume_ul: 0.0, concentration_m: 0.0,
+        }).collect();
         // Adding NaOH to a vessel that already contains HCl → conflict
         assert!(c.check_vessel_addition(&vessel, "NaOH").is_err());
     }
 
     #[test]
     fn vessel_addition_allowed_when_no_conflict() {
+        use crate::lab_state::VesselContribution;
         let c = cc();
-        let vessel = vec!["NaCl".to_string()];
+        let vessel: Vec<VesselContribution> = vec![VesselContribution {
+            reagent_id: "NaCl".into(), volume_ul: 0.0, concentration_m: 0.0,
+        }];
         assert!(c.check_vessel_addition(&vessel, "glucose").is_ok());
     }
 

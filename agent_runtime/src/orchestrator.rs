@@ -20,11 +20,13 @@ use crate::events::{
     StateTransitionEvent, ToolExecutionEvent,
 };
 use crate::experiment::{Experiment, Stage};
+use crate::hypothesis::{Evidence, EvidencePolicy, HypothesisManager, KeyStatistic};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::protocol::{Protocol, ProtocolPlan, ProtocolRunResult, RekorStatus, StepOutcome, ZkProofStatus};
 use crate::revocation::RevocationList;
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
+use std::sync::Mutex;
 use proof_artifacts::manifest::RiskClass;
 use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
 use sha2::Digest;
@@ -117,6 +119,17 @@ pub struct OrchestratorConfig {
     /// Computed by the server from `DiscoveryJournal.last_calibration_for()`.
     /// Empty map means no calibration checking (graceful degradation).
     pub calibration_status: std::collections::HashMap<String, (bool, bool)>,
+
+    /// Optional shared hypothesis manager.
+    ///
+    /// When set, the orchestrator:
+    ///  1. Injects the active hypothesis context into every system prompt.
+    ///  2. Records evidence from protocol conclusions and done signals.
+    pub hypothesis_manager: Option<Arc<Mutex<HypothesisManager>>>,
+
+    /// Policy governing auto-transitions in the hypothesis state machine.
+    /// Only used when `hypothesis_manager` is `Some`.
+    pub evidence_policy: EvidencePolicy,
 }
 
 impl Default for OrchestratorConfig {
@@ -139,6 +152,8 @@ impl Default for OrchestratorConfig {
             journal_summary: String::new(),
             findings_at_start: 0,
             calibration_status: std::collections::HashMap::new(),
+            hypothesis_manager: None,
+            evidence_policy: EvidencePolicy::default(),
         }
     }
 }
@@ -249,7 +264,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
     }
 
-    /// Build the system prompt from tool specs.
+    /// Build the system prompt from tool specs and hypothesis context.
     fn system_prompt(&self) -> String {
         let tool_descriptions: Vec<String> = self
             .tools
@@ -272,15 +287,21 @@ impl<L: LlmBackend> Orchestrator<L> {
             })
             .collect();
 
+        let hyp_ctx = self.config.hypothesis_manager
+            .as_ref()
+            .map(|m| format!("\n\n{}", m.lock().unwrap().context_block()))
+            .unwrap_or_default();
+
         format!(
             "You are an autonomous lab scientist agent in AxiomLab.\n\
              You control physical lab hardware through these tools:\n\
-             {}\n\n\
+             {}{}\n\n\
              Respond with JSON when you want to call a tool:\n\
              {{\"tool\": \"<name>\", \"params\": {{...}}}}\n\n\
              When generating experiment code, wrap it in ```rust ... ```.\n\
              When you have a conclusion, respond with: {{\"done\": true, \"summary\": \"...\"}}",
-            tool_descriptions.join("\n")
+            tool_descriptions.join("\n"),
+            hyp_ctx,
         )
     }
 
@@ -343,6 +364,15 @@ impl<L: LlmBackend> Orchestrator<L> {
                 self.try_propose_protocol(&response).await
             {
                 consecutive_parse_failures = 0;
+                // Hook A — record protocol conclusion as hypothesis evidence.
+                let key_stat = extract_key_statistic(protocol_result.doe_anova.as_ref());
+                let run_id_str = protocol_result.run_id.to_string();
+                self.record_hypothesis_evidence(
+                    experiment,
+                    &protocol_result.conclusion,
+                    Some(run_id_str.as_str()),
+                    key_stat,
+                );
                 let result_json =
                     serde_json::to_string(&protocol_result).unwrap_or_default();
                 history.push(ChatMessage {
@@ -404,9 +434,17 @@ impl<L: LlmBackend> Orchestrator<L> {
                 }
                 {
                     let prev = experiment.stage;
+                    experiment.advance(Stage::Analyzing)?;
+                    self.emit_transition(experiment, prev);
+                }
+                {
+                    let prev = experiment.stage;
                     experiment.advance(Stage::Completed)?;
                     self.emit_transition(experiment, prev);
                 }
+                // Record evidence for linked hypothesis (Hook B — done signal).
+                self.record_hypothesis_evidence(experiment, &summary, None, None);
+
                 // Emit a Lab Notebook entry with the AI's documented finding.
                 if let Some(sink) = &self.config.event_sink {
                     sink.on_notebook_entry(NotebookEntryEvent {
@@ -1249,7 +1287,11 @@ impl<L: LlmBackend> Orchestrator<L> {
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|x| x.as_str())
-                        .map(String::from)
+                        .map(|id| crate::lab_state::VesselContribution {
+                            reagent_id: id.to_string(),
+                            volume_ul: 0.0,
+                            concentration_m: 0.0,
+                        })
                         .collect::<Vec<_>>()
                 })
             {
@@ -1655,6 +1697,38 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
     }
 
+    /// Record a piece of evidence against the hypothesis linked to `experiment`.
+    ///
+    /// No-op when:
+    /// - `config.hypothesis_manager` is `None`
+    /// - `experiment.hypothesis_id` is `None`
+    /// - the hypothesis is already settled (evidence is silently dropped)
+    fn record_hypothesis_evidence(
+        &self,
+        experiment:  &Experiment,
+        conclusion:  &str,
+        run_id:      Option<&str>,
+        key_stat:    Option<KeyStatistic>,
+    ) {
+        let Some(ref mgr_lock) = self.config.hypothesis_manager else { return };
+        let Some(ref hyp_id) = experiment.hypothesis_id else { return };
+
+        let supports = conclusion_supports_hypothesis(conclusion);
+        let ev = Evidence {
+            id:              uuid::Uuid::new_v4().to_string(),
+            experiment_id:   experiment.id.clone(),
+            run_id:          run_id.map(str::to_owned),
+            supports,
+            summary:         conclusion.chars().take(500).collect(),
+            key_statistic:   key_stat,
+            recorded_at_utc: unix_secs() as i64,
+        };
+        let mut mgr = mgr_lock.lock().unwrap();
+        if let Err(e) = mgr.record_evidence(hyp_id, ev, &self.config.evidence_policy, unix_secs() as i64) {
+            info!(hyp_id, error = %e, "hypothesis evidence not recorded");
+        }
+    }
+
 }
 
 // ── Event utilities ───────────────────────────────────────────────────────────
@@ -1664,6 +1738,51 @@ fn unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Extract the most diagnostically informative statistic from a DoE ANOVA result.
+///
+/// Returns the p-value if available (most informative), falling back to the
+/// F-statistic.  Returns `None` when the result is absent.
+fn extract_key_statistic(doe_anova: Option<&crate::protocol::DoeAnovaResult>) -> Option<KeyStatistic> {
+    let r = doe_anova?;
+    // Prefer p_value (most interpretable for the hypothesis policy).
+    Some(KeyStatistic {
+        name:      "p_value".into(),
+        value:     r.p_value,
+        threshold: Some(0.05),
+    })
+}
+
+/// Heuristic: does the conclusion text suggest the hypothesis is supported?
+///
+/// Returns `true` when:
+/// - ANOVA p_value < 0.05 is mentioned (positive signal), OR
+/// - The text does not contain negative language ("no significant", "failed",
+///   "rejected", "inconclusive", "not significant").
+fn conclusion_supports_hypothesis(conclusion: &str) -> bool {
+    let lower = conclusion.to_lowercase();
+    let negative_phrases = [
+        "no significant",
+        "not significant",
+        "failed",
+        "rejected",
+        "inconclusive",
+        "no effect",
+    ];
+    let has_negative = negative_phrases.iter().any(|p| lower.contains(p));
+    let has_positive_p = lower.contains("p < 0.05")
+        || lower.contains("p=0.0")
+        || lower.contains("p = 0.0")
+        || lower.contains("significant effect");
+    has_positive_p || !has_negative
 }
 
 /// Extract a human-readable target identifier from tool params.
