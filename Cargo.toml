@@ -4,7 +4,6 @@ members = [
     "agent_runtime",
     "proof_artifacts",
     "server",
-    "zk_audit",
     "verus_proofs",
 ]
 resolver = "2"
@@ -34,3 +33,4 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
+metrics = "0.23"

@@ -15,7 +15,6 @@ pub mod orchestrator;
 pub mod protocol;
 pub mod reasoning;
 pub mod audit;
-pub mod rekor;
 pub mod capabilities;
 pub mod approvals;
 pub mod approval_queue;

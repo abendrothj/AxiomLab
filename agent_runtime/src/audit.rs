@@ -129,64 +129,6 @@ pub fn emit_session_start(
     emit_jsonl(path, &event, signer)
 }
 
-/// Anchor the current chain tip to Sigstore Rekor.
-///
-/// Reads the last `entry_hash` from the audit file, signs it with the audit
-/// signer, and submits a `hashedrekord` entry to Rekor.  On success, writes
-/// a `rekor_checkpoint` audit entry containing the UUID and log index so the
-/// anchor is itself part of the verifiable chain.
-///
-/// This is best-effort: failures are logged as warnings and do not affect the
-/// local chain.
-pub async fn anchor_chain_tip_to_rekor(path: &str, signer: &dyn AuditSigner) {
-    let tip = match last_entry_hash(path) {
-        Ok(Some(h)) => h,
-        Ok(None) => {
-            tracing::debug!("rekor checkpoint: audit file empty, skipping");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "rekor checkpoint: failed to read chain tip");
-            return;
-        }
-    };
-
-    let sig_b64  = signer.sign(tip.as_bytes());
-    let pubkey   = crate::rekor::ed25519_pubkey_pem(&signer.verifying_key_bytes());
-
-    match crate::rekor::anchor(&tip, &sig_b64, &pubkey).await {
-        Ok(anchor) => {
-            tracing::info!(
-                uuid       = %anchor.uuid,
-                log_index  = anchor.log_index,
-                chain_tip  = %tip,
-                "Rekor checkpoint anchored"
-            );
-            // Record the anchor in the local chain so verifiers can correlate.
-            let details = serde_json::json!({
-                "chain_tip_hash": tip,
-                "rekor_uuid":     anchor.uuid,
-                "log_index":      anchor.log_index,
-                "integrated_time": anchor.integrated_time,
-            });
-            let event = AuditEvent {
-                unix_secs:    unix_secs_now(),
-                trace_id:     format!("rekor_checkpoint-{}", anchor.log_index),
-                action:       "rekor_checkpoint".into(),
-                decision:     "allow".into(),
-                reason:       details.to_string(),
-                success:      true,
-                approval_ids: None,
-                reasoning_text: None,
-            };
-            emit_jsonl(path, &event, Some(signer)).ok();
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Rekor checkpoint failed — local chain intact");
-        }
-    }
-}
-
 // ── Protocol audit helpers ────────────────────────────────────────────────────
 
 /// Emit a protocol step record into the audit chain.

@@ -4,7 +4,6 @@ pub mod protocol_library;
 mod tools;
 
 use crate::discovery::HypothesisStatus;
-use crate::lab_scheduler::LabScheduler;
 use crate::ws_sink::WebSocketSink;
 use agent_runtime::{
     approval_queue::PendingApprovalQueue,
@@ -24,6 +23,38 @@ use std::sync::{
 };
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
+
+// ── Slot manager ──────────────────────────────────────────────────────────────
+
+struct SlotManager {
+    slot_count: usize,
+    available:  std::sync::atomic::AtomicUsize,
+}
+
+impl SlotManager {
+    fn from_env() -> Self {
+        let count = std::env::var("AXIOMLAB_EXPERIMENT_SLOTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+            .clamp(1, 4);
+        Self { slot_count: count, available: std::sync::atomic::AtomicUsize::new(count) }
+    }
+
+    fn available_slots(&self) -> usize {
+        self.available.load(Ordering::SeqCst)
+    }
+
+    fn try_acquire(&self, _exp_id: &str, _instruments: &[&str]) -> Option<usize> {
+        self.available.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            if v > 0 { Some(v - 1) } else { None }
+        }).ok().map(|prev| self.slot_count - prev)
+    }
+
+    fn release(&self, _slot: usize, _instruments: &[&str]) {
+        self.available.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 // ── Per-experiment task state ─────────────────────────────────────────────────
 
@@ -107,7 +138,6 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
 pub async fn run_loop(
     sink:               Arc<WebSocketSink>,
     running:            Arc<AtomicBool>,
-    stalled:            Arc<AtomicBool>,
     iteration_counter:  Arc<AtomicU32>,
     approval_queue:     Arc<PendingApprovalQueue>,
     db:                 Arc<crate::db::Db>,
@@ -116,7 +146,7 @@ pub async fn run_loop(
     hypothesis_manager: Arc<Mutex<HypothesisManager>>,
 ) {
     let policy     = CapabilityPolicy::default_lab();
-    let scheduler  = LabScheduler::from_env();
+    let scheduler  = SlotManager::from_env();
 
     tracing::info!(
         slot_count = scheduler.slot_count,
@@ -142,16 +172,6 @@ pub async fn run_loop(
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
-        }
-
-        // Block the loop when a stalled dispatch is awaiting operator resolution.
-        if stalled.load(Ordering::SeqCst) {
-            tracing::debug!(
-                "Exploration loop paused — stalled dispatch pending operator action at \
-                 POST /api/approvals/recover/<id> or POST /api/approvals/recover/<id>/cancel"
-            );
-            sleep(Duration::from_secs(5)).await;
-            continue;
         }
 
         // ── Collect any finished tasks ─────────────────────────────────────────

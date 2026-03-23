@@ -12,7 +12,6 @@ use crate::audit::{
     AuditEvent, AuditSigner, audit_signer_from_env, emit_jsonl, emit_protocol_conclusion, emit_protocol_step,
     emit_remote_with_retry, trace_id,
 };
-use crate::rekor;
 use crate::approvals::{ApprovalPolicy, risk_class_for_action};
 use crate::capabilities::CapabilityPolicy;
 use crate::events::{
@@ -22,7 +21,7 @@ use crate::events::{
 use crate::experiment::{Experiment, Stage};
 use crate::hypothesis::{Evidence, EvidencePolicy, HypothesisManager, KeyStatistic};
 use crate::llm::{ChatMessage, LlmBackend};
-use crate::protocol::{Protocol, ProtocolPlan, ProtocolRunResult, RekorStatus, StepOutcome, ZkProofStatus};
+use crate::protocol::{Protocol, ProtocolPlan, ProtocolRunResult, StepOutcome};
 use crate::revocation::RevocationList;
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
@@ -34,6 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{error, info, warn};
+use metrics::{counter, histogram};
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -345,7 +345,10 @@ impl<L: LlmBackend> Orchestrator<L> {
                 self.config.code_gen_temperature
             };
 
+            let llm_start = std::time::Instant::now();
+            counter!("llm_calls_total").increment(1);
             let raw_response = self.llm.chat(&history, temperature).await?;
+            histogram!("llm_latency_ms").record(llm_start.elapsed().as_millis() as f64);
             info!(len = raw_response.len(), "LLM response received");
 
             // Stream tokens to the visualizer before further processing.
@@ -761,10 +764,9 @@ impl<L: LlmBackend> Orchestrator<L> {
             "protocol run concluded"
         );
 
-        // Write signed conclusion to audit chain, then anchor externally to Rekor.
-        let mut rekor_status = RekorStatus::Skipped;
+        // Write signed conclusion to audit chain.
         if let Some(path) = &self.config.audit_log_path {
-            let conclusion_line = emit_protocol_conclusion(
+            emit_protocol_conclusion(
                 path,
                 protocol.id,
                 run_id,
@@ -774,36 +776,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                 steps_succeeded,
                 protocol.template_id.as_deref(),
                 self.config.audit_signer.as_deref(),
-            );
-
-            if let (Ok(line), Some(signer)) =
-                (conclusion_line, self.config.audit_signer.as_deref())
-            {
-                if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let (Some(hash), Some(sig)) = (
-                        entry["entry_hash"].as_str(),
-                        entry["entry_sig_b64"].as_str(),
-                    ) {
-                        let pubkey_pem = rekor::ed25519_pubkey_pem(&signer.verifying_key_bytes());
-                        match rekor::submit_with_retry(hash, sig, &pubkey_pem).await {
-                            Ok(uuid) => {
-                                info!(
-                                    rekor_uuid = %uuid,
-                                    "protocol conclusion anchored to Rekor transparency log"
-                                );
-                                rekor_status = RekorStatus::Anchored { uuid };
-                            }
-                            Err(reason) => {
-                                error!(
-                                    error = %reason,
-                                    "Rekor anchoring failed after retries — local audit chain intact"
-                                );
-                                rekor_status = RekorStatus::Failed { reason };
-                            }
-                        }
-                    }
-                }
-            }
+            ).ok();
         }
 
         // Emit conclusion event.
@@ -832,9 +805,6 @@ impl<L: LlmBackend> Orchestrator<L> {
             });
         }
 
-        // Spawn background ZK proof task — does not block protocol completion.
-        let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
-
         let uncertainty_budgets = self.build_uncertainty_budgets(&step_results);
         let doe_anova = protocol.doe_design_json.as_deref()
             .and_then(|json| self.run_doe_anova(json, &step_results));
@@ -849,8 +819,6 @@ impl<L: LlmBackend> Orchestrator<L> {
             step_results,
             replicate_count: protocol.replicate_count,
             aggregate,
-            rekor_status,
-            zk_proof_status,
             uncertainty_budgets,
             doe_anova,
         }
@@ -1011,36 +979,13 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
         };
 
-        let mut rekor_status = RekorStatus::Skipped;
         if let Some(path) = &self.config.audit_log_path {
-            let conclusion_line = emit_protocol_conclusion(
+            emit_protocol_conclusion(
                 path, protocol.id, run_id, &protocol.name, &conclusion,
                 step_count, steps_succeeded,
                 protocol.template_id.as_deref(), self.config.audit_signer.as_deref(),
-            );
-            if let (Ok(line), Some(signer)) = (conclusion_line, self.config.audit_signer.as_deref()) {
-                if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let (Some(hash), Some(sig)) = (
-                        entry["entry_hash"].as_str(), entry["entry_sig_b64"].as_str(),
-                    ) {
-                        let pubkey_pem = rekor::ed25519_pubkey_pem(&signer.verifying_key_bytes());
-                        match rekor::submit_with_retry(hash, sig, &pubkey_pem).await {
-                            Ok(uuid) => {
-                                info!(rekor_uuid = %uuid, "resumed protocol anchored to Rekor");
-                                rekor_status = RekorStatus::Anchored { uuid };
-                            }
-                            Err(reason) => {
-                                error!(error = %reason, "Rekor anchoring failed for resumed protocol");
-                                rekor_status = RekorStatus::Failed { reason };
-                            }
-                        }
-                    }
-                }
-            }
+            ).ok();
         }
-
-        // Spawn background ZK proof task.
-        let zk_proof_status = self.spawn_zk_proof_if_configured(&self.config.audit_log_path);
 
         let uncertainty_budgets = self.build_uncertainty_budgets(&all_step_results);
         let doe_anova = protocol.doe_design_json.as_deref()
@@ -1056,8 +1001,6 @@ impl<L: LlmBackend> Orchestrator<L> {
             step_results: all_step_results,
             replicate_count: total_replicates as u32,
             aggregate: None,
-            rekor_status,
-            zk_proof_status,
             uncertainty_budgets,
             doe_anova,
         }
@@ -1197,6 +1140,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         // ── Stage 0: Sandbox allowlist ────────────────────────────────────
         if let Err(e) = self.sandbox.check_command(tool_name) {
             error!(%e, "sandbox rejected tool call");
+            counter!("pipeline_stage_fail_total", "stage" => "sandbox").increment(1);
             self.audit_decision(tool_name, "deny", &e.to_string(), false, None, reasoning_text.clone()).await;
             self.emit_tool_event(tool_name, &params, "rejected", &e.to_string());
             return Some(ToolResult {
@@ -1231,6 +1175,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                          Run calibrate_ph / calibrate_spectrophotometer before taking readings."
                     );
                     warn!(%msg);
+                    counter!("pipeline_stage_fail_total", "stage" => "calibration").increment(1);
                     self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                     self.emit_tool_event(tool_name, &params, "rejected", &msg);
                     return Some(ToolResult {
@@ -1395,6 +1340,8 @@ impl<L: LlmBackend> Orchestrator<L> {
                                 self.config.approval_timeout_secs
                             );
                             warn!(%pending_id, %msg);
+                            counter!("approvals_submitted_total", "decision" => "timeout").increment(1);
+                            counter!("pipeline_stage_fail_total", "stage" => "approval").increment(1);
                             self.audit_decision(tool_name, "deny", &msg, false, None, reasoning_text.clone()).await;
                             self.emit_tool_event(tool_name, &params, "rejected", &msg);
                             queue.purge_sidecar(&pending_id);
@@ -1464,6 +1411,7 @@ impl<L: LlmBackend> Orchestrator<L> {
                                  approval_ids={})",
                                 approval_ids.join(",")
                             );
+                            counter!("approvals_submitted_total", "decision" => "approved").increment(1);
                             self.audit_decision(tool_name, "allow", &reason, true, Some(approval_ids), None).await;
                             // Fall through to Stage 2 with original params (no bundle injected).
                         }
@@ -1543,6 +1491,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let Some(capability) = &self.config.capability_policy {
             let param_units = self.tools.spec_for(tool_name).map(|s| &s.parameter_units);
             if let Err(e) = capability.validate(tool_name, &params, param_units) {
+                counter!("pipeline_stage_fail_total", "stage" => "capability").increment(1);
                 self.audit_decision(tool_name, "deny", &e, false, None, reasoning_text.clone()).await;
                 self.emit_tool_event(tool_name, &params, "rejected", &e);
                 return Some(ToolResult {
@@ -1558,6 +1507,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         let high_risk = matches!(risk_class, Some(RiskClass::Actuation | RiskClass::Destructive));
         if high_risk && (self.policy_engine.is_none() || self.policy_context.is_none()) {
             let msg = "high-risk action denied: runtime proof policy is not configured";
+            counter!("pipeline_stage_fail_total", "stage" => "fail_closed").increment(1);
             self.audit_decision(tool_name, "deny", msg, false, None, reasoning_text.clone()).await;
             self.emit_tool_event(tool_name, &params, "rejected", msg);
             return Some(ToolResult {
@@ -1572,6 +1522,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         if let (Some(engine), Some(ctx)) = (&self.policy_engine, &self.policy_context) {
             if let Err(e) = engine.authorize(tool_name, ctx) {
                 let report = engine.explain(tool_name);
+                counter!("pipeline_stage_fail_total", "stage" => "proof_policy").increment(1);
                 self.audit_decision(tool_name, "deny", &report.reason, false, None, reasoning_text.clone()).await;
                 self.emit_tool_event(tool_name, &params, "rejected", &report.reason);
                 return Some(ToolResult {
@@ -1590,6 +1541,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
 
         // ── Stage 5: Audit allow + dispatch ──────────────────────────────
+        counter!("pipeline_stage_pass_total", "stage" => "dispatch").increment(1);
         self.audit_decision(
             tool_name,
             "allow",
@@ -1632,49 +1584,6 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
 
         Some(result)
-    }
-
-    /// Spawn a background task that generates a ZK audit proof and submits it
-    /// to Base L2.  Returns the initial status (`Pending` or `Disabled`).
-    ///
-    /// The task logs its outcome at INFO/ERROR but does not update
-    /// `ProtocolRunResult` in place — callers use the event bus for that.
-    fn spawn_zk_proof_if_configured(
-        &self,
-        audit_log_path: &Option<String>,
-    ) -> ZkProofStatus {
-        // Require the audit log path and Base L2 config.
-        let path = match audit_log_path.clone() {
-            Some(p) => p,
-            None => return ZkProofStatus::Disabled,
-        };
-
-        let cfg = match zk_audit::ZkConfig::from_env() {
-            Some(c) => c,
-            None => {
-                info!(
-                    "AXIOMLAB_BASE_RPC_URL not set — ZK audit proof disabled. \
-                     Set BASE_RPC_URL, BASE_CONTRACT_ADDR, and BASE_WALLET_KEY to enable."
-                );
-                return ZkProofStatus::Disabled;
-            }
-        };
-
-        tokio::spawn(async move {
-            match zk_audit::prove_and_submit(&path, &cfg).await {
-                Ok(tx) => {
-                    info!(
-                        tx_hash = %tx,
-                        "ZK audit proof submitted to Base — https://basescan.org/tx/{tx}"
-                    );
-                }
-                Err(e) => {
-                    error!(error = %e, "ZK audit proof submission failed");
-                }
-            }
-        });
-
-        ZkProofStatus::Pending
     }
 
     async fn audit_decision(

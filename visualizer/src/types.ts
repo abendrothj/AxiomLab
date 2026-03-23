@@ -68,6 +68,63 @@ export const EVENTS = {
   NOTEBOOK_ENTRY: "notebook_entry",
 } as const;
 
+// ── Approval types ────────────────────────────────────────────────
+
+export interface ProtocolStepInfo {
+  step_index: number;
+  total_steps: number;
+  description: string;
+}
+
+export interface PendingApprovalInfo {
+  pending_id: string;
+  tool_name: string;
+  params: Record<string, unknown>;
+  queued_at: number;
+  session_nonce?: string;
+  hypothesis: string;
+  experiment_id: string;
+  iteration: number;
+  risk_class?: string;
+  recent_actions: unknown[];
+  journal_summary: string;
+  protocol_step?: ProtocolStepInfo;
+  findings_before_experiment: number;
+}
+
+export interface StalledResponse {
+  stalled: boolean;
+  approval_ids: string[];
+}
+
+// ── Lab state types ───────────────────────────────────────────────
+
+export interface Reagent {
+  id: string;
+  name: string;
+  cas_number?: string;
+  lot_number: string;
+  concentration?: number;
+  concentration_unit?: string;
+  volume_ul: number;
+  expiry_secs?: number;
+  ghs_hazard_codes: string[];
+}
+
+export interface VesselContribution {
+  reagent_id: string;
+  volume_ul: number;
+  concentration_m: number;
+}
+
+export interface CalibrationEntry {
+  instrument: string;
+  calibrated: boolean;
+  valid: boolean;
+  performed_at_secs?: number;
+  valid_until_secs?: number;
+}
+
 // ── Stage display helpers ─────────────────────────────────────────
 
 export type Stage =

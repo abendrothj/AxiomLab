@@ -11,6 +11,7 @@
 //! threshold) are served without memory spikes.
 
 use agent_runtime::audit::{audit_log_path, verify_chain};
+use tracing::{info, warn};
 use axum::{
     body::Body,
     extract::{Query, State},
@@ -61,12 +62,19 @@ pub async fn audit_query_handler(
     let limit = params.limit.unwrap_or(MAX_LIMIT).min(MAX_LIMIT);
 
     let path = audit_log_path();
+    info!(
+        action = params.action.as_deref().unwrap_or("*"),
+        decision = params.decision.as_deref().unwrap_or("*"),
+        limit,
+        "audit query"
+    );
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Json(serde_json::json!([]));
         }
         Err(e) => {
+            warn!(error = %e, "failed to open audit log for query");
             return Json(serde_json::json!({
                 "error": format!("failed to read audit log: {e}")
             }));
@@ -152,13 +160,16 @@ pub async fn audit_raw_handler(_state: State<AppState>) -> impl IntoResponse {
 pub async fn audit_verify_handler(_state: State<AppState>) -> impl IntoResponse {
     let path = audit_log_path().to_string_lossy().into_owned();
     match verify_chain(&path) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(AuditVerifyResponse { verified: true, error: None }),
-        ),
-        Err(e) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(AuditVerifyResponse { verified: false, error: Some(e) }),
-        ),
+        Ok(()) => {
+            info!("audit chain verified OK");
+            (StatusCode::OK, Json(AuditVerifyResponse { verified: true, error: None }))
+        }
+        Err(ref e) => {
+            warn!(error = %e, "audit chain verification FAILED");
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(AuditVerifyResponse { verified: false, error: Some(e.clone()) }),
+            )
+        }
     }
 }

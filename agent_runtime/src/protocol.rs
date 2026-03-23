@@ -10,6 +10,7 @@
 //! plan mid-run.
 
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Maximum number of steps allowed in a single protocol.
@@ -97,6 +98,12 @@ impl ProtocolPlan {
             return Err("protocol must have at least one step".into());
         }
         if self.steps.len() > MAX_PROTOCOL_STEPS {
+            warn!(
+                name = %self.name,
+                steps = self.steps.len(),
+                max = MAX_PROTOCOL_STEPS,
+                "protocol rejected: step count exceeds maximum"
+            );
             return Err(format!(
                 "protocol has {} steps; maximum is {}",
                 self.steps.len(),
@@ -123,6 +130,12 @@ impl ProtocolPlan {
                 return Err(format!("step {i}: params must be a JSON object"));
             }
         }
+        info!(
+            name = %self.name,
+            steps = self.steps.len(),
+            replicates = self.replicate_count,
+            "protocol plan validated"
+        );
         Ok(())
     }
 
@@ -186,32 +199,6 @@ impl ReplicateAggregate {
             sd_steps_succeeded: variance.sqrt(),
         }
     }
-}
-
-/// Status of the ZK audit proof generation and Base L2 submission.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ZkProofStatus {
-    /// Proof task spawned — result not yet available (async background task).
-    Pending,
-    /// Proof generated and submitted to Base; `tx_hash` links to basescan.org.
-    Verified { tx_hash: String },
-    /// Proof generation or submission failed.
-    Failed { reason: String },
-    /// ZK proving is disabled (`AXIOMLAB_BASE_RPC_URL` not set or
-    /// crate built without `prove`/`onchain` features).
-    Disabled,
-}
-
-/// Whether the protocol conclusion was successfully anchored to the Sigstore
-/// Rekor transparency log.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RekorStatus {
-    /// Conclusion hash anchored; `uuid` links to the Rekor log entry.
-    Anchored { uuid: String },
-    /// All Rekor attempts failed.  Local audit chain is still intact.
-    Failed { reason: String },
-    /// No audit signer configured — Rekor submission skipped.
-    Skipped,
 }
 
 /// One component in a GUM-compliant uncertainty budget.
@@ -352,10 +339,6 @@ pub struct ProtocolRunResult {
     pub replicate_count: u32,
     /// Aggregate statistics across replicates; `None` for single-replicate runs.
     pub aggregate: Option<ReplicateAggregate>,
-    /// Rekor transparency-log anchoring status for this conclusion.
-    pub rekor_status: RekorStatus,
-    /// ZK audit proof status; `Pending` until the background task completes.
-    pub zk_proof_status: ZkProofStatus,
     /// Per-parameter uncertainty budgets built from all sensor readings in the run.
     /// One entry per unique measured parameter (e.g., "pH", "absorbance_600nm").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

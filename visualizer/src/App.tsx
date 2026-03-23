@@ -1,14 +1,16 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 import {
   EVENTS, StateTransitionEvent, ToolExecutionEvent, LlmTokenEvent,
-  NotebookEntryEvent, Stage, STAGE_COLORS,
+  NotebookEntryEvent, Stage, STAGE_COLORS, PendingApprovalInfo,
 } from "./types";
 import { eventBus } from "./eventBus";
 import BlueprintGraph from "./components/BlueprintGraph";
 import ChainExplorer from "./pages/ChainExplorer";
+import ApprovalsPanel from "./pages/ApprovalsPanel";
+import LabPanel from "./pages/LabPanel";
 
-type Tab = "dashboard" | "chain";
+type Tab = "dashboard" | "chain" | "approvals" | "lab";
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
@@ -16,6 +18,10 @@ const API = import.meta.env.DEV ? "http://localhost:3000/api" : "/api";
 
 async function apiStatus() {
   return fetch(`${API}/status`).then((r) => r.json()).catch(() => ({}));
+}
+
+async function apiPending(): Promise<PendingApprovalInfo[]> {
+  return fetch(`${API}/approvals/pending`).then((r) => r.json()).catch(() => []);
 }
 
 async function apiHistory(): Promise<{
@@ -69,7 +75,12 @@ export default function App() {
   const [toolEvents, setToolEvents]     = useState<ToolExecutionEvent[]>([]);
   const [notebook, setNotebook]         = useState<NotebookEntryEvent[]>([]);
   const [transitions, setTransitions]   = useState<StateTransitionEvent[]>([]);
+  const [pendingCount, setPendingCount] = useState(0);
   const thinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const refreshPending = useCallback(() => {
+    apiPending().then((list) => setPendingCount(list.length));
+  }, []);
 
   useEffect(() => {
     // Load full history from DB first — survives server restarts
@@ -84,11 +95,18 @@ export default function App() {
       if (s.iteration) setIteration(s.iteration);
     });
 
+    // Pending approvals count for tab badge
+    refreshPending();
+    const pendingPoll = setInterval(refreshPending, 5000);
+
     const connPoll = setInterval(() => {
       const bus = eventBus as unknown as { ws: WebSocket | null };
       setConnected(bus.ws?.readyState === WebSocket.OPEN);
     }, 1500);
-    return () => clearInterval(connPoll);
+    return () => {
+      clearInterval(connPoll);
+      clearInterval(pendingPoll);
+    };
   }, []);
 
   useEffect(() => {
@@ -118,6 +136,7 @@ export default function App() {
       eventBus.listen<ToolExecutionEvent>(EVENTS.TOOL_EXECUTION, (p) => {
         setToolEvents((prev) => [p, ...prev].slice(0, 60));
         setThinking(false);
+        refreshPending();
       }),
       eventBus.listen<NotebookEntryEvent>(EVENTS.NOTEBOOK_ENTRY, (p) => {
         setNotebook((prev) => [...prev, p]);
@@ -141,9 +160,10 @@ export default function App() {
         stage={stage} stageColor={stageColor}
         iteration={iteration} connected={connected}
         tab={tab} onTabChange={setTab}
+        pendingCount={pendingCount}
       />
 
-      {tab === "dashboard" ? (
+      {tab === "dashboard" && (
         <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
           <LivePanel
             toolEvents={toolEvents}
@@ -166,19 +186,54 @@ export default function App() {
           <div style={{ width: 1, background: "#111824", flexShrink: 0 }} />
           <DiscoveriesPanel notebook={notebook} />
         </div>
-      ) : (
-        <ChainExplorer />
       )}
+      {tab === "chain"     && <ChainExplorer />}
+      {tab === "approvals" && <ApprovalsPanel />}
+      {tab === "lab"       && <LabPanel />}
     </div>
   );
 }
 
 // ── Header ────────────────────────────────────────────────────────────────────
 
-function Header({ stage, stageColor, iteration, connected, tab, onTabChange }: {
+const TAB_LABELS: Record<Tab, string> = {
+  dashboard: "DASHBOARD",
+  chain: "CHAIN EXPLORER",
+  approvals: "APPROVALS",
+  lab: "LAB STATE",
+};
+
+function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount }: {
   stage: string; stageColor: string; iteration: number; connected: boolean;
-  tab: Tab; onTabChange: (t: Tab) => void;
+  tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number;
 }) {
+  const [stopping, setStopping] = useState(false);
+  const [stopMsg, setStopMsg]   = useState<string | null>(null);
+
+  async function emergencyStop() {
+    if (!confirm("Trigger emergency stop? This will halt all running experiments.")) return;
+    setStopping(true);
+    const token = localStorage.getItem("axiomlab_token");
+    try {
+      const res = await fetch(`${API}/emergency-stop`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) {
+        setStopMsg("STOPPED");
+      } else if (res.status === 401) {
+        setStopMsg("Auth required — set localStorage.axiomlab_token");
+      } else {
+        setStopMsg("Stop failed");
+      }
+    } catch {
+      setStopMsg("Network error");
+    } finally {
+      setStopping(false);
+      setTimeout(() => setStopMsg(null), 4000);
+    }
+  }
+
   return (
     <div style={{
       height: 52,
@@ -205,15 +260,16 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange }: {
 
       {/* Tab bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        {(["dashboard", "chain"] as Tab[]).map((t) => (
+        {(["dashboard", "chain", "approvals", "lab"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => onTabChange(t)}
             style={{
+              position: "relative",
               background: tab === t ? "#0f1a26" : "transparent",
               border: `1px solid ${tab === t ? "#1a3a50" : "transparent"}`,
               borderRadius: 3,
-              color: tab === t ? "#00d4ff" : "#2a4a5a",
+              color: tab === t ? "#00d4ff" : t === "approvals" && pendingCount > 0 ? "#fd7e14" : "#2a4a5a",
               fontSize: 9, letterSpacing: "0.12em",
               padding: "4px 12px",
               cursor: "pointer",
@@ -221,7 +277,18 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange }: {
               transition: "color 0.15s, border-color 0.15s",
             }}
           >
-            {t === "dashboard" ? "DASHBOARD" : "CHAIN EXPLORER"}
+            {TAB_LABELS[t]}
+            {t === "approvals" && pendingCount > 0 && (
+              <span style={{
+                position: "absolute", top: -4, right: -4,
+                background: "#fd7e14", color: "#070912",
+                fontSize: 7, fontWeight: 700,
+                width: 13, height: 13, borderRadius: "50%",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {pendingCount > 9 ? "9+" : pendingCount}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -255,18 +322,41 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange }: {
         </div>
       )}
 
-      {/* Connection */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 6,
-        fontSize: 9, letterSpacing: "0.1em",
-        color: connected ? "#1a5a3a" : "#5a1a1a",
-      }}>
-        <span style={{
-          width: 5, height: 5, borderRadius: "50%",
-          background: connected ? "#00d4ff" : "#ff3b3b",
-          boxShadow: connected ? "0 0 5px #00d4ff" : "none",
-        }} />
-        {connected ? "LIVE" : "CONNECTING"}
+      {/* Right: E-stop + connection */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        {/* Emergency stop */}
+        <button
+          onClick={emergencyStop}
+          disabled={stopping}
+          title="Emergency stop — halts all experiments"
+          style={{
+            background: stopMsg === "STOPPED" ? "#2a0000" : "transparent",
+            border: "1px solid #ff3b3b44",
+            borderRadius: 3,
+            color: "#ff3b3b",
+            fontSize: 9, letterSpacing: "0.12em",
+            padding: "4px 10px",
+            cursor: "pointer",
+            fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+            opacity: stopping ? 0.6 : 1,
+          }}
+        >
+          {stopMsg ?? (stopping ? "STOPPING…" : "⬛ E-STOP")}
+        </button>
+
+        {/* Connection indicator */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+          fontSize: 9, letterSpacing: "0.1em",
+          color: connected ? "#1a5a3a" : "#5a1a1a",
+        }}>
+          <span style={{
+            width: 5, height: 5, borderRadius: "50%",
+            background: connected ? "#00d4ff" : "#ff3b3b",
+            boxShadow: connected ? "0 0 5px #00d4ff" : "none",
+          }} />
+          {connected ? "LIVE" : "CONNECTING"}
+        </div>
       </div>
     </div>
   );

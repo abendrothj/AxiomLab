@@ -25,6 +25,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
+use tracing::info;
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
@@ -176,8 +177,10 @@ impl Hypothesis {
         if total >= policy.min_evidence && self.status == HypothesisStatus::Active {
             if self.confidence >= policy.support_threshold {
                 self.status = HypothesisStatus::Supported;
+                info!(hypothesis_id = %self.id, confidence = self.confidence, "hypothesis → Supported");
             } else if self.confidence <= 1.0 - policy.refute_threshold {
                 self.status = HypothesisStatus::Refuted;
+                info!(hypothesis_id = %self.id, confidence = self.confidence, "hypothesis → Refuted");
             }
         }
     }

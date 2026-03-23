@@ -60,6 +60,12 @@ impl Db {
         })
     }
 
+    /// Returns `true` when the database connection is alive (used by `/ready`).
+    pub fn ping(&self) -> bool {
+        let conn = self.conn.lock().expect("db mutex");
+        conn.execute_batch("SELECT 1").is_ok()
+    }
+
     /// Returns `true` when all journal tables are empty.
     ///
     /// Used at startup to decide whether to reconstruct from the JSON backup.
