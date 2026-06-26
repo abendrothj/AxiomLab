@@ -561,33 +561,13 @@ fn regularised_inc_beta(x: f64, a: f64, b: f64) -> f64 {
     (front * h / a).clamp(0.0, 1.0)
 }
 
-/// Log-gamma function via Lanczos approximation (g=7, n=9 coefficients).
+/// Natural logarithm of the Gamma function, ln Γ(z).
 ///
-/// Returns ln(Γ(z)).  Computed entirely in log-space to avoid overflow for
-/// large z and underflow for arguments that yield tiny Γ values.
+/// Delegates to the shared Lanczos implementation in [`crate::stats::log_gamma`].
+/// The `fitting.rs` file previously had an independent Lanczos approximation
+/// that was missing the reflection formula for z < 0.5.
 fn lgamma(z: f64) -> f64 {
-    // 0.5 * ln(2π) — the correct Lanczos leading constant.
-    const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_7;
-    const G: f64 = 7.0;
-    const C: [f64; 9] = [
-        0.999_999_999_999_809_3,
-        676.520_368_121_885_1,
-        -1_259.139_216_722_403,
-        771.323_428_777_653_1,
-        -176.615_029_162_140_6,
-        12.507_343_278_686_905,
-        -0.138_571_095_265_720_12,
-        9.984_369_578_019_572e-6,
-        1.505_632_735_149_311_6e-7,
-    ];
-    let z = z - 1.0;
-    let mut x = C[0];
-    for (i, &c) in C[1..].iter().enumerate() {
-        x += c / (z + i as f64 + 1.0);
-    }
-    let t = z + G + 0.5;
-    // Log-space: ln(√(2π)) + (z+0.5)·ln(t) − t + ln(series)
-    LN_SQRT_2PI + (z + 0.5) * t.ln() - t + x.ln()
+    crate::stats::log_gamma(z)
 }
 
 // ── Spectrophotometer (Beer-Lambert simulation) ───────────────────────────────
