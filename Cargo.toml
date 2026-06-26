@@ -12,7 +12,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/yourusername/AxiomLab"
+repository = "https://github.com/abendrothj/AxiomLab"
 
 [workspace.dependencies]
 # Phase 1 – Pure Rust scientific compute
