@@ -256,6 +256,11 @@ impl UncertaintyBudget {
         let parameter = parameter.into();
         let unit = unit.into();
 
+        // Guard against non-finite inputs to prevent NaN propagation.
+        let reading = if reading.is_finite() { reading } else { 0.0 };
+        let u_type_a_fraction = if u_type_a_fraction.is_finite() { u_type_a_fraction } else { 0.0 };
+        let u_type_b_abs = if u_type_b_abs.is_finite() && u_type_b_abs >= 0.0 { u_type_b_abs } else { 0.0 };
+
         let u_a = reading.abs() * u_type_a_fraction;
         let u_b = u_type_b_abs;
         let u_c = (u_a * u_a + u_b * u_b).sqrt();

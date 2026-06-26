@@ -112,6 +112,9 @@ pub fn fit_rsm(design: &DoeDesign, responses: &[f64]) -> Result<RsmModel, String
             responses.len()
         ));
     }
+    if responses.iter().any(|v| !v.is_finite()) {
+        return Err("fit_rsm received non-finite response values (NaN or Inf)".into());
+    }
     let n = responses.len();
     // 1 intercept + k linear + k quadratic + k(k-1)/2 interactions
     let n_params = 1 + 2 * k + k * (k - 1) / 2;
@@ -270,6 +273,10 @@ pub fn tukey_hsd(
     let k = groups.len();
     if k < 2 {
         return Err("tukey_hsd requires at least 2 groups".into());
+    }
+    // Input validation: reject NaN/Inf values.
+    if groups.iter().flat_map(|g| g.iter()).any(|v| !v.is_finite()) {
+        return Err("tukey_hsd received non-finite values (NaN or Inf)".into());
     }
 
     // Harmonic mean of group sizes.
@@ -649,6 +656,30 @@ mod tests {
     // ── tukey_hsd ─────────────────────────────────────────────────────────────
 
     /// Three groups with very distinct means → all pairwise comparisons significant.
+    #[test]
+    fn fit_rsm_rejects_nan_responses() {
+        let design = grid_design_3x3();
+        let reps: Vec<f64> = std::iter::repeat(f64::NAN).take(design.runs.len()).collect();
+        assert!(fit_rsm(&design, &reps).is_err());
+    }
+
+    #[test]
+    fn fit_rsm_rejects_inf_responses() {
+        let design = grid_design_3x3();
+        let reps: Vec<f64> = std::iter::repeat(f64::INFINITY).take(design.runs.len()).collect();
+        assert!(fit_rsm(&design, &reps).is_err());
+    }
+
+    #[test]
+    fn tukey_hsd_rejects_nan_input() {
+        let groups = vec![
+            vec![1.0, 2.0, f64::NAN],
+            vec![4.0, 5.0, 6.0],
+        ];
+        let anova = anova_one_way(&groups).unwrap();
+        assert!(tukey_hsd(&groups, &anova, 0.05).is_err());
+    }
+
     #[test]
     fn tukey_significant_differences() {
         let groups = vec![
