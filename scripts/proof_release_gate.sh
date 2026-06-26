@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Ensure protoc is available for agent_runtime's protobuf build step.
+# GitHub Actions ubuntu-latest images do not include protoc by default.
+if ! command -v protoc &>/dev/null; then
+  echo "[pre-flight] Installing protoc (protobuf-compiler)..."
+  if command -v sudo &>/dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+  else
+    apt-get update -qq && apt-get install -y -qq protobuf-compiler
+  fi
+fi
+
 OUT_DIR="${OUT_DIR:-.artifacts/proof}"
 mkdir -p "$OUT_DIR"
 REPLAY_DIR="$OUT_DIR/replay_bundle"
