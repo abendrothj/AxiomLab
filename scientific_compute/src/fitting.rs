@@ -43,10 +43,14 @@ impl LinearFit {
 
 /// Ordinary least-squares linear regression: y = slope * x + intercept.
 ///
-/// Returns `None` if fewer than 2 data points or if x has zero variance.
+/// Returns `None` if fewer than 2 data points, if x has zero variance,
+/// or if any value in `x` or `y` is NaN or infinite.
 pub fn linear_regression(x: &[f64], y: &[f64]) -> Option<LinearFit> {
     let n = x.len();
     if n < 2 || n != y.len() {
+        return None;
+    }
+    if x.iter().any(|v| !v.is_finite()) || y.iter().any(|v| !v.is_finite()) {
         return None;
     }
 
@@ -214,10 +218,14 @@ impl HillFit {
 /// Uses linear interpolation to seed EC50, then runs L-M from five starting
 /// points and returns the best converged fit.
 ///
-/// Returns `None` if fewer than 3 data points or all starts fail to converge.
+/// Returns `None` if fewer than 3 data points, if any value is NaN or
+/// infinite, or if all starts fail to converge.
 pub fn hill_equation_fit(x: &[f64], y: &[f64]) -> Option<HillFit> {
     let n = x.len();
     if n < 3 || n != y.len() {
+        return None;
+    }
+    if x.iter().any(|v| !v.is_finite()) || y.iter().any(|v| !v.is_finite()) {
         return None;
     }
 
@@ -343,10 +351,14 @@ impl MichaelisMentenFit {
 ///    the untransformed model V = Vmax·S/(Km+S), eliminating the heteroscedasticity
 ///    bias that the double-reciprocal transformation introduces.
 ///
-/// Returns `None` if fewer than 2 positive (S, V) data points are available.
+/// Returns `None` if fewer than 2 positive (S, V) data points are available,
+/// or if any value in `s` or `v` is NaN or infinite.
 pub fn michaelis_menten_fit(s: &[f64], v: &[f64]) -> Option<MichaelisMentenFit> {
     let n = s.len();
     if n < 2 || n != v.len() {
+        return None;
+    }
+    if s.iter().any(|v| !v.is_finite()) || v.iter().any(|v| !v.is_finite()) {
         return None;
     }
 
@@ -455,11 +467,15 @@ pub struct TTestResult {
 
 /// Welch's two-sample t-test (unequal variances, unequal sample sizes).
 ///
-/// Returns `None` if either sample has fewer than 2 observations.
+/// Returns `None` if either sample has fewer than 2 observations or if any
+/// value in `a` or `b` is NaN or infinite.
 pub fn two_sample_t_test(a: &[f64], b: &[f64], alpha: f64) -> Option<TTestResult> {
     let na = a.len();
     let nb = b.len();
     if na < 2 || nb < 2 {
+        return None;
+    }
+    if a.iter().any(|v| !v.is_finite()) || b.iter().any(|v| !v.is_finite()) {
         return None;
     }
 
@@ -737,6 +753,43 @@ mod tests {
         let b: Vec<f64> = vec![1.0, 0.95, 1.05, 1.0, 0.98, 1.02];
         let result = two_sample_t_test(&a, &b, 0.05).unwrap();
         assert!(!result.significant, "near-identical groups should not be significant");
+    }
+
+    #[test]
+    fn linear_regression_rejects_nan() {
+        assert!(linear_regression(&[1.0, 2.0, f64::NAN], &[2.0, 4.0, 6.0]).is_none());
+        assert!(linear_regression(&[1.0, 2.0, 3.0], &[2.0, 4.0, f64::NAN]).is_none());
+    }
+
+    #[test]
+    fn linear_regression_rejects_inf() {
+        assert!(linear_regression(&[1.0, 2.0, f64::INFINITY], &[2.0, 4.0, 6.0]).is_none());
+        assert!(linear_regression(&[1.0, 2.0, 3.0], &[2.0, 4.0, f64::NEG_INFINITY]).is_none());
+    }
+
+    #[test]
+    fn t_test_rejects_nan() {
+        assert!(two_sample_t_test(&[1.0, 2.0, f64::NAN], &[5.0, 6.0, 5.5], 0.05).is_none());
+        assert!(two_sample_t_test(&[1.0, 2.0, 1.5], &[5.0, 6.0, f64::NAN], 0.05).is_none());
+    }
+
+    #[test]
+    fn t_test_rejects_zero_variance() {
+        assert!(two_sample_t_test(&[5.0, 5.0, 5.0], &[10.0, 10.0, 10.0], 0.05).is_none());
+    }
+
+    #[test]
+    fn hill_fit_rejects_nan() {
+        let x = vec![1.0, 2.0, 5.0, 10.0, f64::NAN];
+        let y = vec![0.1, 0.2, 0.5, 0.8, 0.9];
+        assert!(hill_equation_fit(&x, &y).is_none());
+    }
+
+    #[test]
+    fn michaelis_menten_rejects_nan() {
+        let s = vec![1.0, 2.0, 5.0, f64::NAN];
+        let v = vec![50.0, 60.0, 70.0, 80.0];
+        assert!(michaelis_menten_fit(&s, &v).is_none());
     }
 
     #[test]
