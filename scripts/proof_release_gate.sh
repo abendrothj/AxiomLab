@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Ensure protoc is available (Ubuntu CI runners may not have it pre-installed)
+if ! command -v protoc &>/dev/null; then
+  echo "[bootstrap] Installing protobuf-compiler..."
+  sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+fi
+
 OUT_DIR="${OUT_DIR:-.artifacts/proof}"
 mkdir -p "$OUT_DIR"
 REPLAY_DIR="$OUT_DIR/replay_bundle"
