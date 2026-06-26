@@ -250,7 +250,12 @@ pub(crate) fn gauss_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 /// Accuracy is sufficient for hypothesis testing (p < 0.05 / p < 0.01 thresholds).
 pub(crate) fn f_cdf_upper_tail(f: f64, d1: f64, d2: f64) -> f64 {
     if f <= 0.0 { return 1.0; }
+    // Non-finite F (∞ from perfect fit, or NaN from 0/0 intermediate computation):
+    //   lim_{F→∞} P(F > F) = 0. Return 0.0 — mathematically correct for ∞,
+    //   conservative (no evidence against H₀) for NaN.
+    if !f.is_finite() { return 0.0; }
     // x = d1*F / (d1*F + d2) maps F to incomplete beta argument.
+    // Both f and the sum are finite at this point, so x is finite.
     let x = d1 * f / (d1 * f + d2);
     // P(F > f | d1, d2) = I_{1-x}(d2/2, d1/2) ≈ incomplete_beta_upper.
     incomplete_beta(1.0 - x, d2 / 2.0, d1 / 2.0)
@@ -258,6 +263,9 @@ pub(crate) fn f_cdf_upper_tail(f: f64, d1: f64, d2: f64) -> f64 {
 
 /// Regularised incomplete beta function I_x(a, b) via continued fraction expansion.
 fn incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
+    // Non-finite guard: NaN ≤ 0 and NaN ≥ 1 are both false in IEEE 754,
+    // so NaN silently passes the bounds checks and produces NaN in a·ln(x).
+    if !x.is_finite() || !a.is_finite() || !b.is_finite() { return f64::NAN; }
     if x <= 0.0 { return 0.0; }
     if x >= 1.0 { return 1.0; }
     // Use continued fraction via Lentz's algorithm (Press et al. §6.4).
@@ -480,7 +488,7 @@ pub fn anova_two_way(data: &[Vec<Vec<f64>>]) -> Result<TwoWayAnovaResult, String
                     f_statistic: Some(f_ab), p_value: Some(p_ab) },
         AnovaRow2 { source: "Error".into(),      ss: ss_within, df: df_within, ms: ms_within,
                     f_statistic: None,       p_value: None        },
-        AnovaRow2 { source: "Total".into(),      ss: ss_total,  df: df_total,  ms: f64::NAN,
+        AnovaRow2 { source: "Total".into(),      ss: ss_total,  df: df_total,  ms: 0.0,
                     f_statistic: None,       p_value: None        },
     ];
 
@@ -668,5 +676,42 @@ mod tests {
             vec![vec![7.0], vec![10.0]],
         ];
         assert!(anova_two_way(&data).is_err());
+    }
+
+    // ── Root-cause NaN regression tests ───────────────────────────────────────
+
+    /// Infinite F-statistic (perfect fit) must produce p=0, not NaN.
+    #[test]
+    fn f_cdf_upper_tail_infinite_f_returns_zero() {
+        let p = f_cdf_upper_tail(f64::INFINITY, 5.0, 20.0);
+        assert_eq!(p, 0.0, "P(F > ∞) should be 0, got {p}");
+    }
+
+    /// NaN F-statistic must produce 0, not propagate NaN.
+    #[test]
+    fn f_cdf_upper_tail_nan_f_returns_zero() {
+        let p = f_cdf_upper_tail(f64::NAN, 3.0, 15.0);
+        assert_eq!(p, 0.0, "NaN F should give 0, got {p}");
+    }
+
+    /// Very large finite F approaches 0.
+    #[test]
+    fn f_cdf_upper_tail_large_finite_f_approaches_zero() {
+        let p = f_cdf_upper_tail(1e10, 5.0, 20.0);
+        assert!(p < 1e-12, "P(F > 1e10) should be tiny, got {p}");
+    }
+
+    // ── incomplete_beta NaN-guard tests ───────────────────────────────────────
+
+    #[test]
+    fn incomplete_beta_nan_x_returns_nan_not_inf() {
+        let r = incomplete_beta(f64::NAN, 2.0, 3.0);
+        assert!(r.is_nan(), "NaN x should return NaN, got {r}");
+    }
+
+    #[test]
+    fn incomplete_beta_nan_a_returns_nan() {
+        let r = incomplete_beta(0.5, f64::NAN, 3.0);
+        assert!(r.is_nan(), "NaN a should return NaN, got {r}");
     }
 }

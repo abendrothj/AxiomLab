@@ -47,9 +47,9 @@ cat > "$SPEC_PATH" <<EOF_JSON
   "artifacts": [
     {
       "id": "ols_functional",
-      "source_path": "scientific_compute/src/discovery.rs",
+      "source_path": "scientific_compute/src/stats.rs",
       "mir_path": null,
-      "lean_paths": ["lean4/OlsFunctional.lean"],
+      "lean_paths": [],
       "verus_proof_path": null,
       "metadata": {
         "domain": "discovery",
@@ -58,9 +58,9 @@ cat > "$SPEC_PATH" <<EOF_JSON
     },
     {
       "id": "ols_rational",
-      "source_path": "scientific_compute/src/discovery.rs",
+      "source_path": "scientific_compute/src/stats.rs",
       "mir_path": null,
-      "lean_paths": ["lean4/OlsRational.lean"],
+      "lean_paths": [],
       "verus_proof_path": null,
       "metadata": {
         "domain": "discovery",
