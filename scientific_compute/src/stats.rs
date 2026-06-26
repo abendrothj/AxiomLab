@@ -34,7 +34,10 @@ pub struct AnovaResult {
 
 /// Perform one-way ANOVA on `groups` (each group is a `Vec<f64>` of observations).
 ///
-/// Returns `Err` if fewer than 2 groups are provided, or any group has < 2 observations.
+/// Returns `Err` if:
+/// - fewer than 2 groups are provided,
+/// - any group has < 2 observations,
+/// - the overall variance (within groups) is zero — F is undefined without error.
 pub fn anova_one_way(groups: &[Vec<f64>]) -> Result<AnovaResult, String> {
     if groups.len() < 2 {
         return Err("anova_one_way requires at least 2 groups".into());
@@ -42,6 +45,14 @@ pub fn anova_one_way(groups: &[Vec<f64>]) -> Result<AnovaResult, String> {
     for (i, g) in groups.iter().enumerate() {
         if g.len() < 2 {
             return Err(format!("group {i} has fewer than 2 observations"));
+        }
+        // Reject NaN or infinite observations.
+        for &v in g {
+            if !v.is_finite() {
+                return Err(format!(
+                    "group {i} contains non-finite value {}", v
+                ));
+            }
         }
     }
 
@@ -63,6 +74,16 @@ pub fn anova_one_way(groups: &[Vec<f64>]) -> Result<AnovaResult, String> {
     let ss_total = ss_between + ss_within;
     let df_between = k - 1.0;
     let df_within  = n - k;
+
+    // When there is no within-group variance, F is undefined (division by
+    // zero).  This happens with degenerate input where all observations are
+    // identical — the caller should detect this case and report it.
+    if ss_within == 0.0 {
+        return Err(
+            "anova_one_way: no within-group variance — F-statistic is undefined".into()
+        );
+    }
+
     let ms_between = ss_between / df_between;
     let ms_within  = ss_within  / df_within;
     let f_stat     = ms_between / ms_within;
@@ -113,6 +134,19 @@ pub fn linear_regression(x: &[Vec<f64>], y: &[f64]) -> Result<RegressionResult, 
     let n = x.len();
     if n == 0 {
         return Err("no observations".into());
+    }
+    // Check for non-finite predictor or response values.
+    for (i, row) in x.iter().enumerate() {
+        for &v in row {
+            if !v.is_finite() {
+                return Err(format!("predictor x[{i}] contains non-finite value {v}"));
+            }
+        }
+    }
+    for (i, &v) in y.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(format!("response y[{i}] contains non-finite value {v}"));
+        }
     }
     let p = x[0].len(); // number of predictors (without intercept)
     if n < p + 2 {
@@ -221,7 +255,12 @@ pub(crate) fn gauss_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         m.swap(col, max_row);
 
         let pivot = m[col][col];
-        if pivot.abs() < 1e-14 { return None; } // Singular.
+        // Relative tolerance: pivot is singular when it is negligible
+        // compared to the largest element seen so far in this column.
+        let max_in_col = (col..n)
+            .map(|r| m[r][col].abs())
+            .fold(0.0_f64, f64::max);
+        if pivot.abs() <= max_in_col * 1e-14 { return None; }
 
         for row in (col + 1)..n {
             let factor = m[row][col] / pivot;
@@ -249,6 +288,7 @@ pub(crate) fn gauss_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 /// Uses a series expansion of the incomplete beta function.
 /// Accuracy is sufficient for hypothesis testing (p < 0.05 / p < 0.01 thresholds).
 pub(crate) fn f_cdf_upper_tail(f: f64, d1: f64, d2: f64) -> f64 {
+    if !f.is_finite() { return 0.0; }
     if f <= 0.0 { return 1.0; }
     // x = d1*F / (d1*F + d2) maps F to incomplete beta argument.
     let x = d1 * f / (d1 * f + d2);
@@ -389,6 +429,13 @@ pub fn anova_two_way(data: &[Vec<Vec<f64>>]) -> Result<TwoWayAnovaResult, String
                     cell.len()
                 ));
             }
+            for &v in cell {
+                if !v.is_finite() {
+                    return Err(format!(
+                        "cell [{i}][{j}] contains non-finite value {v}"
+                    ));
+                }
+            }
         }
     }
 
@@ -458,6 +505,13 @@ pub fn anova_two_way(data: &[Vec<Vec<f64>>]) -> Result<TwoWayAnovaResult, String
     let df_within = (a * b * (n_per_cell - 1)) as f64;
     let df_total  = n_total - 1.0;
 
+    // No within-cell variance makes F undefined.
+    if ss_within == 0.0 {
+        return Err(
+            "anova_two_way: no within-cell variance — F-statistics are undefined".into()
+        );
+    }
+
     let ms_a      = ss_a      / df_a;
     let ms_b      = ss_b      / df_b;
     let ms_ab     = ss_ab     / df_ab;
@@ -508,22 +562,39 @@ mod tests {
     }
 
     #[test]
-    fn anova_no_difference() {
-        // Same values in all groups → SS_between = 0, F should be 0 or NaN.
+    fn anova_no_difference_rejected() {
+        // Same values in all groups → no within-group variance → F undefined.
         let groups = vec![
             vec![5.0, 5.0, 5.0],
             vec![5.0, 5.0, 5.0],
         ];
-        let r = anova_one_way(&groups).unwrap();
-        // ms_within is also 0 (no within-group variance), so F = 0/0.
-        // Either F is 0 or NaN, and eta_squared is 0.
-        assert!(r.f_statistic < 1e-6 || r.f_statistic.is_nan());
-        assert!(r.eta_squared < 1e-10);
+        assert!(
+            anova_one_way(&groups).is_err(),
+            "zero within-group variance should be rejected"
+        );
     }
 
     #[test]
     fn anova_requires_two_groups() {
         assert!(anova_one_way(&[vec![1.0, 2.0]]).is_err());
+    }
+
+    #[test]
+    fn anova_rejects_nan_input() {
+        let groups = vec![
+            vec![1.0, 2.0, f64::NAN],
+            vec![3.0, 4.0, 5.0],
+        ];
+        assert!(anova_one_way(&groups).is_err(), "NaN input should be rejected");
+    }
+
+    #[test]
+    fn anova_rejects_infinite_input() {
+        let groups = vec![
+            vec![1.0, 2.0, f64::INFINITY],
+            vec![3.0, 4.0, 5.0],
+        ];
+        assert!(anova_one_way(&groups).is_err(), "infinite input should be rejected");
     }
 
     #[test]
