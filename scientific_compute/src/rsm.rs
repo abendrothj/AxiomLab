@@ -169,7 +169,7 @@ pub fn fit_rsm(design: &DoeDesign, responses: &[f64]) -> Result<RsmModel, String
                     f_statistic: Some(f_reg), p_value: Some(p_reg) },
         AnovaRow2 { source: "Error".into(),      ss: ss_res, df: df_err, ms: ms_err,
                     f_statistic: None, p_value: None },
-        AnovaRow2 { source: "Total".into(),       ss: ss_tot, df: (n - 1) as f64, ms: f64::NAN,
+        AnovaRow2 { source: "Total".into(),       ss: ss_tot, df: (n - 1) as f64, ms: 0.0,
                     f_statistic: None, p_value: None },
     ];
 

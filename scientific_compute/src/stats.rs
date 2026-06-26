@@ -250,6 +250,9 @@ pub(crate) fn gauss_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 /// Accuracy is sufficient for hypothesis testing (p < 0.05 / p < 0.01 thresholds).
 pub(crate) fn f_cdf_upper_tail(f: f64, d1: f64, d2: f64) -> f64 {
     if f <= 0.0 { return 1.0; }
+    // Infinite F-statistic (perfect fit): P(F > ∞) = 0.
+    // Non-finite F (e.g. NaN from 0/0 at an intermediate step): 0 (conservative).
+    if !f.is_finite() { return 0.0; }
     // x = d1*F / (d1*F + d2) maps F to incomplete beta argument.
     let x = d1 * f / (d1 * f + d2);
     // P(F > f | d1, d2) = I_{1-x}(d2/2, d1/2) ≈ incomplete_beta_upper.
@@ -258,6 +261,7 @@ pub(crate) fn f_cdf_upper_tail(f: f64, d1: f64, d2: f64) -> f64 {
 
 /// Regularised incomplete beta function I_x(a, b) via continued fraction expansion.
 fn incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
+    if !x.is_finite() || !a.is_finite() || !b.is_finite() { return f64::NAN; }
     if x <= 0.0 { return 0.0; }
     if x >= 1.0 { return 1.0; }
     // Use continued fraction via Lentz's algorithm (Press et al. §6.4).
@@ -480,7 +484,7 @@ pub fn anova_two_way(data: &[Vec<Vec<f64>>]) -> Result<TwoWayAnovaResult, String
                     f_statistic: Some(f_ab), p_value: Some(p_ab) },
         AnovaRow2 { source: "Error".into(),      ss: ss_within, df: df_within, ms: ms_within,
                     f_statistic: None,       p_value: None        },
-        AnovaRow2 { source: "Total".into(),      ss: ss_total,  df: df_total,  ms: f64::NAN,
+        AnovaRow2 { source: "Total".into(),      ss: ss_total,  df: df_total,  ms: 0.0,
                     f_statistic: None,       p_value: None        },
     ];
 
