@@ -124,7 +124,7 @@ pub fn linear_regression(x: &[Vec<f64>], y: &[f64]) -> Result<RegressionResult, 
 
     // Build design matrix X̃ = [1 | X] (n × (p+1)).
     let pp1 = p + 1;
-    let mut x_aug: Vec<Vec<f64>> = x.iter().map(|row| {
+    let x_aug: Vec<Vec<f64>> = x.iter().map(|row| {
         let mut r = vec![1.0];
         r.extend_from_slice(row);
         r
