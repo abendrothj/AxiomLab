@@ -169,7 +169,7 @@ pub fn fit_rsm(design: &DoeDesign, responses: &[f64]) -> Result<RsmModel, String
                     f_statistic: Some(f_reg), p_value: Some(p_reg) },
         AnovaRow2 { source: "Error".into(),      ss: ss_res, df: df_err, ms: ms_err,
                     f_statistic: None, p_value: None },
-        AnovaRow2 { source: "Total".into(),       ss: ss_tot, df: (n - 1) as f64, ms: f64::NAN,
+        AnovaRow2 { source: "Total".into(),       ss: ss_tot, df: (n - 1) as f64, ms: 0.0,
                     f_statistic: None, p_value: None },
     ];
 
@@ -708,5 +708,47 @@ mod tests {
         let q = studentized_range_critical(0.05, 2, 20.0);
         assert!((q - 2.95).abs() < 0.15,
             "q(0.05,k=2,df=20) = {q:.3}, expected ≈ 2.95");
+    }
+
+    // ── Root-cause NaN regression tests ───────────────────────────────────────
+
+    /// Perfect noise-free fit: f_reg = ∞ → p_value must be 0, not NaN.
+    #[test]
+    fn fit_rsm_perfect_fit_p_value_finite() {
+        let design = grid_design_3x3();
+        // y = 3 + 2x₁ − x₂ + 0.5x₁² + 0.3x₂² − 0.4x₁x₂ -- every point on surface
+        let true_betas = [3.0, 2.0, -1.0, 0.5, 0.3, -0.4_f64];
+        let y: Vec<f64> = design.runs.iter().map(|run| {
+            let x1 = run["x1"]; let x2 = run["x2"];
+            true_betas[0]
+                + true_betas[1]*x1 + true_betas[2]*x2
+                + true_betas[3]*x1*x1 + true_betas[4]*x2*x2
+                + true_betas[5]*x1*x2
+        }).collect();
+
+        let m = fit_rsm(&design, &y).unwrap();
+        // The F-statistic p-value must not be NaN even for a perfect fit.
+        assert!(!m.anova_table[0].p_value.unwrap_or(0.0).is_nan(),
+            "Regression p-value is NaN (root cause: f_cdf_upper_tail inf/∞ mismatch)");
+        // Total row ms should not be NaN.
+        assert!(!m.anova_table[2].ms.is_nan(),
+            "Total row ms is NaN (latent seed)");
+    }
+
+    /// Perfect linear-only fit (no quadratic term) should also produce finite
+    /// p-values.
+    #[test]
+    fn fit_rsm_perfect_linear_fit_p_value_finite() {
+        let design = grid_design_3x3();
+        // y = 2x₁ + 3x₂ — strictly linear, no polynomial components
+        let y: Vec<f64> = design.runs.iter().map(|run| {
+            2.0*run["x1"] + 3.0*run["x2"]
+        }).collect();
+
+        let m = fit_rsm(&design, &y).unwrap();
+        assert!(!m.r_squared.is_nan());
+        for row in &m.anova_table {
+            assert!(!row.ms.is_nan(), "ms is NaN in row {}", row.source);
+        }
     }
 }

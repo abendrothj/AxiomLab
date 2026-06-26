@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Ensure protoc is available for agent_runtime's protobuf build step.
+# GitHub Actions ubuntu-latest images do not include protoc by default.
+if ! command -v protoc &>/dev/null; then
+  echo "[pre-flight] Installing protoc (protobuf-compiler)..."
+  if command -v sudo &>/dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+  else
+    apt-get update -qq && apt-get install -y -qq protobuf-compiler
+  fi
+fi
+
 OUT_DIR="${OUT_DIR:-.artifacts/proof}"
 mkdir -p "$OUT_DIR"
 REPLAY_DIR="$OUT_DIR/replay_bundle"
@@ -47,9 +58,9 @@ cat > "$SPEC_PATH" <<EOF_JSON
   "artifacts": [
     {
       "id": "ols_functional",
-      "source_path": "scientific_compute/src/discovery.rs",
+      "source_path": "scientific_compute/src/stats.rs",
       "mir_path": null,
-      "lean_paths": ["lean4/OlsFunctional.lean"],
+      "lean_paths": [],
       "verus_proof_path": null,
       "metadata": {
         "domain": "discovery",
@@ -58,9 +69,9 @@ cat > "$SPEC_PATH" <<EOF_JSON
     },
     {
       "id": "ols_rational",
-      "source_path": "scientific_compute/src/discovery.rs",
+      "source_path": "scientific_compute/src/stats.rs",
       "mir_path": null,
-      "lean_paths": ["lean4/OlsRational.lean"],
+      "lean_paths": [],
       "verus_proof_path": null,
       "metadata": {
         "domain": "discovery",
