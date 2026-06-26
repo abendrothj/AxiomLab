@@ -673,4 +673,41 @@ mod tests {
         ];
         assert!(anova_two_way(&data).is_err());
     }
+
+    // ── f_cdf_upper_tail root-cause NaN tests ────────────────────────────────
+
+    /// Infinite F-statistic (perfect fit) must produce p=0, not NaN.
+    #[test]
+    fn f_cdf_upper_tail_infinite_f_returns_zero() {
+        let p = f_cdf_upper_tail(f64::INFINITY, 5.0, 20.0);
+        assert_eq!(p, 0.0, "P(F > ∞) should be 0, got {p}");
+    }
+
+    /// NaN F-statistic must produce 0, not propagate NaN.
+    #[test]
+    fn f_cdf_upper_tail_nan_f_returns_zero() {
+        let p = f_cdf_upper_tail(f64::NAN, 3.0, 15.0);
+        assert_eq!(p, 0.0, "NaN F should give 0, got {p}");
+    }
+
+    /// Very large finite F approaches 0.
+    #[test]
+    fn f_cdf_upper_tail_large_finite_f_approaches_zero() {
+        let p = f_cdf_upper_tail(1e10, 5.0, 20.0);
+        assert!(p < 1e-12, "P(F > 1e10) should be tiny, got {p}");
+    }
+
+    // ── incomplete_beta NaN-guard tests ───────────────────────────────────────
+
+    #[test]
+    fn incomplete_beta_nan_x_returns_nan_not_inf() {
+        let r = incomplete_beta(f64::NAN, 2.0, 3.0);
+        assert!(r.is_nan(), "NaN x should return NaN, got {r}");
+    }
+
+    #[test]
+    fn incomplete_beta_nan_a_returns_nan() {
+        let r = incomplete_beta(0.5, f64::NAN, 3.0);
+        assert!(r.is_nan(), "NaN a should return NaN, got {r}");
+    }
 }
