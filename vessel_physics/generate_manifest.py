@@ -132,12 +132,21 @@ def sign_manifest(manifest: dict, private_key_path: str) -> dict:
     The private key file must contain a base64-encoded 32-byte Ed25519 private key,
     as written by `cargo run -p proof_artifacts --bin keygen`.
 
-    The signature is over the canonical JSON (sorted keys, no extra whitespace)
-    of the manifest dict.  The returned dict has the shape:
+    The signature is over the exact bytes the Rust verifier hashes:
+    `serde_json::to_vec(&ProofManifest)` (see proof_artifacts/src/signature.rs).
+    That means struct-field declaration order (NOT alphabetical), serde's compact
+    `,`/`:` separators, raw UTF-8 (no \\uXXXX escaping), and BTreeMap fields
+    (`metadata`) emitted in sorted-key order.  The manifest dict below is already
+    built in struct-field order, so we keep that order and only sort `metadata`.
+    Getting this wrong yields a "manifest digest mismatch" at load time (the
+    server fails closed and denies high-risk actions).
+
+    The returned dict has the shape:
         { "manifest": {...}, "signature": { "algorithm": "ed25519",
           "key_id": "...", "manifest_sha256": "...", "signature_b64": "..." } }
     """
     import base64
+    import copy
     import hashlib
 
     try:
@@ -166,7 +175,17 @@ def sign_manifest(manifest: dict, private_key_path: str) -> dict:
     pub_bytes = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
     key_id = base64.b64encode(pub_bytes).decode()
 
-    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    # Reproduce serde_json::to_vec(&ProofManifest): preserve struct-field order
+    # (already how `manifest` is constructed), but sort each BTreeMap (`metadata`),
+    # use compact separators, and emit raw UTF-8 to match the Rust serializer.
+    serde_view = copy.deepcopy(manifest)
+    for artifact in serde_view.get("artifacts", []):
+        meta = artifact.get("metadata")
+        if isinstance(meta, dict):
+            artifact["metadata"] = dict(sorted(meta.items()))
+    canonical = json.dumps(
+        serde_view, sort_keys=False, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
     digest = hashlib.sha256(canonical).hexdigest()
     sig_bytes = private_key.sign(canonical)
     sig_b64 = base64.b64encode(sig_bytes).decode()

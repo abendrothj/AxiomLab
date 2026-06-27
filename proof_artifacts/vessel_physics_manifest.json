@@ -1,11 +1,11 @@
 {
   "manifest": {
     "schema_version": 1,
-    "generated_unix_secs": 1773819439,
+    "generated_unix_secs": 1782543060,
     "build": {
-      "git_commit": "3b4240d46da6426c75099fc2a95703a2ad6c781f",
+      "git_commit": "b9186c8b4d982cce710fed6d7afcf6dc4320a715",
       "binary_hash": "b88b4d7a942d73ba80c474046bcd99ff8246db57bb03649cdd7be3acc6eeef4a",
-      "workspace_hash": "4c5d99da33eadf9c66d1b8c01ec7d2de27118a31f467cabccc84b8f9dc3a5668",
+      "workspace_hash": "7648d0b7957a65ae0fec9ebedce7f14012c39c050b2919ae13b7df5a3b6cc67b",
       "container_image_digest": null,
       "device_id": null,
       "firmware_version": null
@@ -89,7 +89,7 @@
   "signature": {
     "algorithm": "ed25519",
     "key_id": "uosEBKUMFKXGSaE7w0Quk67C6Ab9KUagim0uaicKB1o=",
-    "manifest_sha256": "acde31986eb229851a30aec9f088dbcde1ae3eb5ecb1fc6a8dab4c4d0ff5b58e",
-    "signature_b64": "NfdaTsgGaQttJev5F4ncN21UGSOY/vRcPIQtzFhzZi30i1nluZj0ylvyX2hmf5+R5/rBEP63rM+s5OcUz3LlCw=="
+    "manifest_sha256": "7922dc29d2cbf157dd20ffdfddc7b53f88003d68d528f18e3c6396929befd7b3",
+    "signature_b64": "2yy8bHjocbDfRMDtLAlCUEc/6Egt4xDWfighuUMO4Ljt8NWJhe0flt+QbU8gN/TikIuMVHS91y5sy5DdoIRyBw=="
   }
 }
