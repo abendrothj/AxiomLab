@@ -51,6 +51,18 @@ struct ChatRequest {
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// Constrain generation to a JSON object so small local models can't wrap
+    /// tool calls in prose/markdown fences (the #1 source of "unparseable
+    /// response" re-prompt loops). Sent as OpenAI-compatible `response_format`,
+    /// which Ollama honours. Disable with `AXIOMLAB_LLM_JSON_MODE=off`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,11 +139,16 @@ impl LlmBackend for OpenAiClient {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(1024);
+        let json_mode = std::env::var("AXIOMLAB_LLM_JSON_MODE")
+            .map(|v| !matches!(v.as_str(), "off" | "0" | "false"))
+            .unwrap_or(true);
+        let response_format = json_mode.then(|| ResponseFormat { kind: "json_object".into() });
         let body = ChatRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
             temperature,
             max_tokens: Some(max_tokens),
+            response_format,
         };
         let resp: ChatResponse = self
             .client

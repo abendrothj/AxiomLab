@@ -22,6 +22,12 @@ use std::{
 /// R² threshold above which `analyze_series` auto-records a system finding.
 const AUTO_FINDING_R2_THRESHOLD: f64 = 0.80;
 
+/// Minimum number of distinct data points required before `analyze_series` will
+/// auto-record a system finding. A line through 2 points is R²=1 by construction
+/// and a 3-point fit is barely better, so we require a real series — this keeps
+/// the discovery journal honest (no trivially "perfect" fits as findings).
+const MIN_FINDING_POINTS: usize = 5;
+
 pub(crate) fn make_sandbox() -> Sandbox {
     Sandbox::new(
         vec![PathBuf::from("/lab/workspace")],
@@ -812,7 +818,7 @@ fn register_analyze_series_tool(
 
                     // Linear finding.
                     if let Some(ref lf) = linear_fit {
-                        if lf.r_squared >= AUTO_FINDING_R2_THRESHOLD {
+                        if lf.r_squared >= AUTO_FINDING_R2_THRESHOLD && xs.len() >= MIN_FINDING_POINTS {
                             let measurements = vec![
                                 Measurement { parameter: "slope".into(),     value: lf.slope,           unit: format!("{y_label}/{x_label}"), uncertainty: Some(lf.slope_std_error) },
                                 Measurement { parameter: "intercept".into(), value: lf.intercept,        unit: y_label.clone(),                uncertainty: None },
@@ -833,7 +839,7 @@ fn register_analyze_series_tool(
 
                     // Hill finding — gate on R² so a poorly-converged fit is not recorded.
                     if let Some((hf, r2)) = hill_fit_result {
-                        if r2 >= AUTO_FINDING_R2_THRESHOLD {
+                        if r2 >= AUTO_FINDING_R2_THRESHOLD && xs.len() >= MIN_FINDING_POINTS {
                             let measurements = vec![
                                 Measurement { parameter: "ec50".into(),      value: hf.ec50,   unit: x_label.clone(), uncertainty: None },
                                 Measurement { parameter: "e_max".into(),     value: hf.e_max,  unit: y_label.clone(), uncertainty: None },
@@ -855,7 +861,7 @@ fn register_analyze_series_tool(
 
                     // Michaelis-Menten finding — same R² gate.
                     if let Some((mmf, r2)) = mm_fit_result {
-                        if r2 >= AUTO_FINDING_R2_THRESHOLD {
+                        if r2 >= AUTO_FINDING_R2_THRESHOLD && xs.len() >= MIN_FINDING_POINTS {
                             let measurements = vec![
                                 Measurement { parameter: "v_max".into(),     value: mmf.v_max, unit: y_label.clone(), uncertainty: None },
                                 Measurement { parameter: "km".into(),        value: mmf.km,    unit: x_label.clone(), uncertainty: None },
@@ -873,6 +879,17 @@ fn register_analyze_series_tool(
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
                         }
                     }
+                }
+
+                // Tell the agent why no finding was recorded when the series is
+                // too short — actionable feedback instead of silent no-op.
+                result["min_points_for_finding"] = serde_json::json!(MIN_FINDING_POINTS);
+                if xs.len() < MIN_FINDING_POINTS {
+                    result["finding_gate"] = serde_json::json!(format!(
+                        "No finding recorded: need ≥{} distinct points for a defensible fit (got {}). \
+                         Collect more concentration/parameter levels (and replicate noisy reads).",
+                        MIN_FINDING_POINTS, xs.len()
+                    ));
                 }
 
                 Ok(result)
