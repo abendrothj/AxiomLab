@@ -104,6 +104,24 @@ fn build_proof_manifest() -> (ProofManifest, ExecutionContext) {
                 required_artifacts: vec!["lab_safety_verus".into()],
                 rationale: "Incubation requires verified thermal bounds".into(),
             },
+            ActionPolicy {
+                action: "update_journal".into(),
+                risk_class: RiskClass::ReadOnly,
+                required_artifacts: vec![],
+                rationale: "Journal writes are in-process, no hardware proof required".into(),
+            },
+            ActionPolicy {
+                action: "analyze_series".into(),
+                risk_class: RiskClass::ReadOnly,
+                required_artifacts: vec![],
+                rationale: "Statistical analysis is in-process computation, no proof required".into(),
+            },
+            ActionPolicy {
+                action: "propose_protocol".into(),
+                risk_class: RiskClass::LiquidHandling,
+                required_artifacts: vec!["lab_safety_verus".into()],
+                rationale: "Protocol execution may involve liquid handling".into(),
+            },
         ],
     };
 

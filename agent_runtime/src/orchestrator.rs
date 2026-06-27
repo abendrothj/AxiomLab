@@ -1791,7 +1791,6 @@ fn sanitize_llm_response(raw: &str) -> String {
             limit = MAX_RESPONSE_BYTES,
             "LLM response truncated before processing"
         );
-        // Walk back to the last valid UTF-8 char boundary.
         let mut end = MAX_RESPONSE_BYTES;
         while !raw.is_char_boundary(end) {
             end -= 1;
@@ -1801,8 +1800,70 @@ fn sanitize_llm_response(raw: &str) -> String {
         raw
     };
 
-    // Strip null bytes that can confuse parsers.
-    truncated.replace('\0', "")
+    // Strip null bytes.
+    let clean = truncated.replace('\0', "");
+
+    // If the full string already parses as JSON, return as-is.
+    if serde_json::from_str::<serde_json::Value>(&clean).is_ok() {
+        return clean;
+    }
+
+    // Strip markdown code fences (```json ... ``` or ``` ... ```)
+    // and try again.
+    let defenced = {
+        let s = clean.trim();
+        let s = if let Some(inner) = s.strip_prefix("```json") {
+            inner.trim_start()
+        } else if let Some(inner) = s.strip_prefix("```") {
+            inner.trim_start()
+        } else {
+            s
+        };
+        let s = if let Some(inner) = s.strip_suffix("```") {
+            inner.trim_end()
+        } else {
+            s
+        };
+        s.to_owned()
+    };
+    if serde_json::from_str::<serde_json::Value>(&defenced).is_ok() {
+        return defenced;
+    }
+
+    // Extract the first top-level JSON object `{...}` from prose output.
+    // Walk forward to find `{`, then balance braces to find the end.
+    if let Some(start) = clean.find('{') {
+        let bytes = clean.as_bytes();
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut end = start;
+        for (i, &b) in bytes[start..].iter().enumerate() {
+            if escape_next { escape_next = false; continue; }
+            match b {
+                b'\\' if in_string => { escape_next = true; }
+                b'"' => { in_string = !in_string; }
+                b'{' if !in_string => { depth += 1; }
+                b'}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            let candidate = &clean[start..=end];
+            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                return candidate.to_owned();
+            }
+        }
+    }
+
+    // Fall back: return cleaned string and let the caller handle parse failure.
+    clean
 }
 
 /// Validate that a JSON value matches the expected tool-call schema:

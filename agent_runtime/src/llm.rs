@@ -49,6 +49,8 @@ struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,12 +94,15 @@ impl OpenAiClient {
             std::env::var("AXIOMLAB_LLM_API_KEY").unwrap_or_else(|_| "no-key".to_owned());
         let model =
             std::env::var("AXIOMLAB_LLM_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".to_owned());
-        Ok(Self {
-            client: reqwest::Client::new(),
-            endpoint,
-            api_key,
-            model,
-        })
+        let timeout_secs = std::env::var("AXIOMLAB_LLM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .unwrap_or_default();
+        Ok(Self { client, endpoint, api_key, model })
     }
 
     /// Build with explicit values (useful for tests / non-env setups).
@@ -118,10 +123,15 @@ impl LlmBackend for OpenAiClient {
         temperature: f64,
     ) -> Result<String, LlmError> {
         let url = format!("{}/chat/completions", self.endpoint);
+        let max_tokens = std::env::var("AXIOMLAB_LLM_MAX_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1024);
         let body = ChatRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),
             temperature,
+            max_tokens: Some(max_tokens),
         };
         let resp: ChatResponse = self
             .client

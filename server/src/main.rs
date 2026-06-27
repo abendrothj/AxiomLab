@@ -388,6 +388,18 @@ mod tests {
     /// Raw 32-byte secret used by all JWT tests.
     const TEST_SECRET_BYTES: &[u8] = b"axiomlab-test-secret-32-bytes-ok";
 
+    /// Serializes tests that mutate process-global env vars (`AXIOMLAB_JWT_SECRET`,
+    /// `AXIOMLAB_AUDIT_LOG`). `cargo test` runs tests in parallel within a single
+    /// process, so without this guard one test's `remove_var`/`set_var` can clobber
+    /// another's expected auth state mid-request.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the env lock, recovering from poisoning so a panic in one test does
+    /// not cascade into spurious failures elsewhere.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn test_secret_b64() -> String {
         B64.encode(TEST_SECRET_BYTES)
     }
@@ -458,6 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_missing_token_returns_401() {
+        let _env = env_guard();
         std::env::set_var("AXIOMLAB_JWT_SECRET", test_secret_b64());
         let (state, aq) = test_state().await;
         let app = build_router(aq).with_state(state);
@@ -474,6 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_expired_token_returns_401() {
+        let _env = env_guard();
         std::env::set_var("AXIOMLAB_JWT_SECRET", test_secret_b64());
         let (state, aq) = test_state().await;
         let app = build_router(aq).with_state(state);
@@ -492,6 +506,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_valid_token_accepted() {
+        let _env = env_guard();
         std::env::set_var("AXIOMLAB_JWT_SECRET", test_secret_b64());
         let (state, aq) = test_state().await;
         let app = build_router(aq).with_state(state);
@@ -512,6 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_status_returns_running_state() {
+        let _env = env_guard();
         std::env::remove_var("AXIOMLAB_JWT_SECRET");
         let (state, aq) = test_state().await;
         state.running.store(true, Ordering::SeqCst);
@@ -535,6 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn emergency_stop_sets_running_false() {
+        let _env = env_guard();
         std::env::remove_var("AXIOMLAB_JWT_SECRET");
         let (state, aq) = test_state().await;
         let running = Arc::clone(&state.running);
@@ -556,6 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_verify_empty_log_returns_valid() {
+        let _env = env_guard();
         std::env::remove_var("AXIOMLAB_JWT_SECRET");
         // Point AXIOMLAB_AUDIT_LOG at a guaranteed non-existent path so
         // verify_chain returns Ok(()) — trivially valid, no entries to check.
@@ -582,6 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_reagent_then_list() {
+        let _env = env_guard();
         std::env::remove_var("AXIOMLAB_JWT_SECRET");
         let (state, aq) = test_state().await;
         let app = build_router(Arc::clone(&aq)).with_state(state);
