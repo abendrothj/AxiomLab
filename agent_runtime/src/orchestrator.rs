@@ -120,6 +120,11 @@ pub struct OrchestratorConfig {
     /// Empty map means no calibration checking (graceful degradation).
     pub calibration_status: std::collections::HashMap<String, (bool, bool)>,
 
+    /// Require a fresh system-generated quantitative finding before accepting a
+    /// `{done:true}` completion. The simulator enables this so local models cannot
+    /// end a run by asserting a conclusion without first calling `analyze_series`.
+    pub require_system_finding_for_completion: bool,
+
     /// Optional shared hypothesis manager.
     ///
     /// When set, the orchestrator:
@@ -152,6 +157,7 @@ impl Default for OrchestratorConfig {
             journal_summary: String::new(),
             findings_at_start: 0,
             calibration_status: std::collections::HashMap::new(),
+            require_system_finding_for_completion: false,
             hypothesis_manager: None,
             evidence_policy: EvidencePolicy::default(),
         }
@@ -333,6 +339,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         // Verified record of tool calls dispatched this experiment — used to
         // give scientists trustworthy context when approving high-risk actions.
         let mut recent_actions: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut system_findings_this_experiment: u32 = 0;
 
         for iteration in 0..self.config.max_iterations {
             info!(iteration, stage = ?experiment.stage, "orchestrator step");
@@ -419,6 +426,9 @@ impl<L: LlmBackend> Orchestrator<L> {
                     self.emit_transition(experiment, prev);
                 }
                 let result_json = serde_json::to_string(&tool_result).unwrap_or_default();
+                if tool_result.name == "analyze_series" {
+                    system_findings_this_experiment += recorded_finding_count(&tool_result.output);
+                }
                 history.push(ChatMessage {
                     role: "user".into(),
                     content: format!("Tool result: {result_json}"),
@@ -427,8 +437,23 @@ impl<L: LlmBackend> Orchestrator<L> {
             }
 
             // Check for completion signal.
-            if response.contains("\"done\"") && response.contains("true") {
-                let summary = extract_summary(&response);
+            if let Some(summary) = parse_completion_summary(&response) {
+                if self.config.require_system_finding_for_completion
+                    && system_findings_this_experiment == 0
+                {
+                    warn!(
+                        iteration,
+                        "LLM attempted completion before any system-generated finding"
+                    );
+                    history.push(ChatMessage {
+                        role: "user".into(),
+                        content: "Completion rejected: this experiment has not produced a \
+                                  source=system quantitative finding yet. Collect a real series, \
+                                  call analyze_series, and only finish after the tool reports \
+                                  recorded_findings.".into(),
+                    });
+                    continue;
+                }
                 // Advance through any remaining stages to Completed.
                 if experiment.stage == Stage::Proposed {
                     let prev = experiment.stage;
@@ -1765,15 +1790,25 @@ fn extract_reasoning(response: &str) -> Option<String> {
     }
 }
 
-/// Extract the `summary` field from `{"done": true, "summary": "..."}` responses.
-fn extract_summary(text: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-        if let Some(s) = v.get("summary").and_then(|s| s.as_str()) {
-            return s.to_owned();
-        }
+/// Parse a strict completion envelope.
+fn parse_completion_summary(text: &str) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if v.get("done").and_then(|done| done.as_bool()) == Some(true) {
+        return v
+            .get("summary")
+            .and_then(|summary| summary.as_str())
+            .map(str::to_owned);
     }
-    // Fallback: use the raw response trimmed to 500 chars.
-    text.chars().take(500).collect()
+    None
+}
+
+/// Count system findings reported by the `analyze_series` tool result.
+fn recorded_finding_count(output: &serde_json::Value) -> u32 {
+    output
+        .get("recorded_findings")
+        .and_then(|v| v.as_array())
+        .map(|findings| findings.len() as u32)
+        .unwrap_or(0)
 }
 
 // ── LLM response sanitization ─────────────────────────────────────────────────
@@ -2042,5 +2077,27 @@ mod tests {
     fn schema_rejects_non_object_params() {
         let v = serde_json::json!({"tool": "move_arm", "params": [1, 2, 3]});
         assert!(validate_tool_call_schema(&v).is_err());
+    }
+
+    #[test]
+    fn completion_parser_requires_done_true() {
+        assert_eq!(
+            parse_completion_summary(r#"{"done": true, "summary": "measured"}"#).as_deref(),
+            Some("measured")
+        );
+        assert!(parse_completion_summary(r#"{"done": false, "summary": "not yet"}"#).is_none());
+        assert!(parse_completion_summary(r#"{"conclusion": "unsupported"}"#).is_none());
+    }
+
+    #[test]
+    fn recorded_finding_count_reads_analyze_series_metadata() {
+        let output = serde_json::json!({
+            "recorded_findings": [
+                {"id": "finding-1", "model": "linear"},
+                {"id": "finding-2", "model": "hill"}
+            ]
+        });
+        assert_eq!(recorded_finding_count(&output), 2);
+        assert_eq!(recorded_finding_count(&serde_json::json!({})), 0);
     }
 }

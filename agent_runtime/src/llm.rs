@@ -51,18 +51,51 @@ struct ChatRequest {
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
-    /// Constrain generation to a JSON object so small local models can't wrap
-    /// tool calls in prose/markdown fences (the #1 source of "unparseable
-    /// response" re-prompt loops). Sent as OpenAI-compatible `response_format`,
-    /// which Ollama honours. Disable with `AXIOMLAB_LLM_JSON_MODE=off`.
+    /// Constrain generation to one of the orchestrator's JSON envelopes so small
+    /// local models can't wrap tool calls in prose/markdown fences or dodge into a
+    /// degenerate `{done:false}` object. Sent as OpenAI-compatible
+    /// `response_format: json_schema`, which Ollama honours. Disable with
+    /// `AXIOMLAB_LLM_JSON_MODE=off`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
+    response_format: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
-struct ResponseFormat {
-    #[serde(rename = "type")]
-    kind: String,
+fn orchestrator_response_format() -> serde_json::Value {
+    serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "orchestrator_response",
+            "strict": true,
+            "schema": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool": { "type": "string", "enum": [
+                                "read_ph", "read_absorbance", "read_temperature", "read_sensor",
+                                "dispense", "aspirate", "set_temperature", "move_arm",
+                                "spin_centrifuge", "incubate", "calibrate_ph",
+                                "propose_protocol", "analyze_series", "update_journal",
+                                "design_experiment"
+                            ] },
+                            "params": { "type": "object" }
+                        },
+                        "required": ["tool", "params"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "done": { "type": "boolean", "enum": [true] },
+                            "summary": { "type": "string", "minLength": 1 }
+                        },
+                        "required": ["done", "summary"],
+                        "additionalProperties": false
+                    }
+                ]
+            }
+        }
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,14 +131,14 @@ impl OpenAiClient {
     /// Build from environment variables:
     /// - `AXIOMLAB_LLM_ENDPOINT` (default: `http://localhost:11434/v1`)
     /// - `AXIOMLAB_LLM_API_KEY` (default: `no-key` for local Ollama)
-    /// - `AXIOMLAB_LLM_MODEL` (default: `qwen2.5-coder:7b`)
+    /// - `AXIOMLAB_LLM_MODEL` (default: `qwen2.5:3b`)
     pub fn from_env() -> Result<Self, LlmError> {
         let endpoint = std::env::var("AXIOMLAB_LLM_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:11434/v1".to_owned());
         let api_key =
             std::env::var("AXIOMLAB_LLM_API_KEY").unwrap_or_else(|_| "no-key".to_owned());
         let model =
-            std::env::var("AXIOMLAB_LLM_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".to_owned());
+            std::env::var("AXIOMLAB_LLM_MODEL").unwrap_or_else(|_| "qwen2.5:3b".to_owned());
         let timeout_secs = std::env::var("AXIOMLAB_LLM_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -142,7 +175,7 @@ impl LlmBackend for OpenAiClient {
         let json_mode = std::env::var("AXIOMLAB_LLM_JSON_MODE")
             .map(|v| !matches!(v.as_str(), "off" | "0" | "false"))
             .unwrap_or(true);
-        let response_format = json_mode.then(|| ResponseFormat { kind: "json_object".into() });
+        let response_format = json_mode.then(orchestrator_response_format);
         let body = ChatRequest {
             model: self.model.clone(),
             messages: messages.to_vec(),

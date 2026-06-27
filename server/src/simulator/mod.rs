@@ -9,13 +9,14 @@ use agent_runtime::{
     approval_queue::PendingApprovalQueue,
     capabilities::CapabilityPolicy,
     events::EventSink,
-    experiment::Experiment,
+    experiment::{Experiment, Stage},
     hypothesis::HypothesisManager,
     lab_state::LabState,
     llm::OpenAiClient,
     orchestrator::{Orchestrator, OrchestratorConfig},
     revocation::RevocationList,
 };
+use crate::discovery::DiscoveryJournal;
 use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -23,6 +24,71 @@ use std::sync::{
 };
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
+
+// ── Loop pacing ───────────────────────────────────────────────────────────────
+
+/// Tunable exploration-loop pacing (all overridable via env).
+struct LoopConfig {
+    max_iterations:        u32,
+    inter_run_pause_secs:  u64,
+    idle_pause_secs:       u64,
+    backoff_base_secs:     u64,
+    backoff_max_secs:      u64,
+}
+
+impl LoopConfig {
+    fn from_env() -> Self {
+        Self {
+            max_iterations: env_u32("AXIOMLAB_MAX_ITERATIONS", 10).clamp(3, 30),
+            inter_run_pause_secs: env_u64("AXIOMLAB_EXPERIMENT_PAUSE_SECS", 120).clamp(10, 3600),
+            idle_pause_secs: env_u64("AXIOMLAB_IDLE_PAUSE_SECS", 300).clamp(60, 3600),
+            backoff_base_secs: env_u64("AXIOMLAB_EXHAUST_BACKOFF_BASE_SECS", 60).clamp(10, 600),
+            backoff_max_secs: env_u64("AXIOMLAB_EXHAUST_BACKOFF_MAX_SECS", 300).clamp(60, 3600),
+        }
+    }
+
+    /// Exponential backoff after consecutive max-iteration exhaustions (60 → 120 → 240 → 300 cap).
+    fn backoff_secs(&self, consecutive_exhaustions: u32) -> u64 {
+        if consecutive_exhaustions == 0 {
+            return self.inter_run_pause_secs;
+        }
+        let exp = consecutive_exhaustions.saturating_sub(1).min(4);
+        let scaled = self.backoff_base_secs.saturating_mul(1u64 << exp);
+        scaled.min(self.backoff_max_secs)
+    }
+}
+
+fn env_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// True when the journal already has findings but nothing is actively being tested.
+fn should_idle_exploration(journal: &DiscoveryJournal) -> bool {
+    if journal.findings.is_empty() {
+        return false;
+    }
+    !journal.hypotheses.iter().any(|h| {
+        h.status == HypothesisStatus::Proposed || h.status == HypothesisStatus::Testing
+    })
+}
+
+fn experiment_exhausted_iterations(experiment: &Experiment) -> bool {
+    experiment.stage == Stage::Failed
+        && experiment
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("max orchestrator iterations"))
+}
 
 // ── Slot manager ──────────────────────────────────────────────────────────────
 
@@ -78,8 +144,9 @@ struct ExperimentTask {
 
 /// Result returned from a completed experiment task.
 struct TaskResult {
-    slot:      usize,
-    converged: bool,
+    slot:                  usize,
+    converged:             bool,
+    exhausted_iterations:  bool,
 }
 
 // ── Single-experiment runner ───────────────────────────────────────────────────
@@ -89,7 +156,11 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
         Ok(c)  => c,
         Err(e) => {
             tracing::error!("LLM init failed for slot {}: {e}", task.slot);
-            return TaskResult { slot: task.slot, converged: false };
+            return TaskResult {
+                slot: task.slot,
+                converged: false,
+                exhausted_iterations: false,
+            };
         }
     };
 
@@ -130,7 +201,56 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
             })
     };
 
-    TaskResult { slot: task.slot, converged }
+    TaskResult {
+        slot: task.slot,
+        converged,
+        exhausted_iterations: experiment_exhausted_iterations(&experiment),
+    }
+}
+
+async fn pause_after_run(
+    res: &TaskResult,
+    sink: &WebSocketSink,
+    loop_cfg: &LoopConfig,
+    consecutive_exhaustions: &mut u32,
+    slot_count: usize,
+) {
+    if slot_count != 1 {
+        return;
+    }
+
+    if res.converged {
+        *consecutive_exhaustions = 0;
+        tracing::info!("All hypotheses settled — exploration converged. Pausing 60 s.");
+        sleep(Duration::from_secs(60)).await;
+        return;
+    }
+
+    if res.exhausted_iterations {
+        *consecutive_exhaustions = consecutive_exhaustions.saturating_add(1);
+        let pause = loop_cfg.backoff_secs(*consecutive_exhaustions);
+        tracing::info!(
+            consecutive = *consecutive_exhaustions,
+            pause_secs = pause,
+            "Experiment hit max iterations — backing off before next run"
+        );
+        sleep(Duration::from_secs(pause)).await;
+        return;
+    }
+
+    if should_idle_exploration(&sink.journal.lock().unwrap()) {
+        *consecutive_exhaustions = 0;
+        let pause = loop_cfg.idle_pause_secs;
+        tracing::info!(
+            pause_secs = pause,
+            "Journal has findings and no active hypotheses — extended idle"
+        );
+        sleep(Duration::from_secs(pause)).await;
+        return;
+    }
+
+    *consecutive_exhaustions = 0;
+    sleep(Duration::from_secs(loop_cfg.inter_run_pause_secs)).await;
 }
 
 // ── Exploration loop ───────────────────────────────────────────────────────────
@@ -147,9 +267,13 @@ pub async fn run_loop(
 ) {
     let policy     = CapabilityPolicy::default_lab();
     let scheduler  = SlotManager::from_env();
+    let loop_cfg   = LoopConfig::from_env();
 
     tracing::info!(
         slot_count = scheduler.slot_count,
+        max_iterations = loop_cfg.max_iterations,
+        inter_run_pause_secs = loop_cfg.inter_run_pause_secs,
+        idle_pause_secs = loop_cfg.idle_pause_secs,
         "Exploration loop starting ({} concurrent experiment slot(s))",
         scheduler.slot_count,
     );
@@ -166,7 +290,8 @@ pub async fn run_loop(
         engine.manifest().actions.len()
     );
 
-    let mut iteration    = 0u32;
+    let mut iteration               = 0u32;
+    let mut consecutive_exhaustions = 0u32;
     let mut join_set: JoinSet<TaskResult> = JoinSet::new();
 
     loop {
@@ -185,23 +310,27 @@ pub async fn run_loop(
             };
             scheduler.release(res.slot, &[]);
             tracing::debug!(slot = res.slot, converged = res.converged, "Slot freed");
-
-            if res.converged {
-                let (n_findings, n_hyp) = {
-                    let j = sink.journal.lock().unwrap();
-                    (j.findings.len(), j.hypotheses.len())
-                };
-                tracing::info!(
-                    findings   = n_findings,
-                    hypotheses = n_hyp,
-                    "All hypotheses settled — exploration converged. Pausing 60 s."
-                );
-                sleep(Duration::from_secs(60)).await;
-            }
+            pause_after_run(
+                &res,
+                &sink,
+                &loop_cfg,
+                &mut consecutive_exhaustions,
+                scheduler.slot_count,
+            )
+            .await;
         }
 
         // ── Fill available slots ───────────────────────────────────────────────
         while scheduler.available_slots() > 0 && running.load(Ordering::SeqCst) {
+            if should_idle_exploration(&sink.journal.lock().unwrap()) {
+                tracing::info!(
+                    pause_secs = loop_cfg.idle_pause_secs,
+                    "Skipping new experiment — findings recorded, no active hypotheses"
+                );
+                sleep(Duration::from_secs(loop_cfg.idle_pause_secs)).await;
+                break;
+            }
+
             iteration += 1;
             iteration_counter.store(iteration, Ordering::SeqCst);
 
@@ -248,7 +377,7 @@ pub async fn run_loop(
             };
 
             let config = OrchestratorConfig {
-                max_iterations: 20,
+                max_iterations: loop_cfg.max_iterations,
                 code_gen_temperature: 0.2,
                 reasoning_temperature: 0.7,
                 capability_policy: Some(policy.clone()),
@@ -259,6 +388,7 @@ pub async fn run_loop(
                 journal_summary,
                 findings_at_start,
                 calibration_status,
+                require_system_finding_for_completion: true,
                 hypothesis_manager: Some(Arc::clone(&hypothesis_manager)),
                 ..OrchestratorConfig::default()
             };
@@ -308,24 +438,14 @@ pub async fn run_loop(
                 };
                 scheduler.release(res.slot, &[]);
                 tracing::debug!(slot = res.slot, "Slot freed after join_next");
-
-                if res.converged {
-                    let (n_findings, n_hyp) = {
-                        let j = sink.journal.lock().unwrap();
-                        (j.findings.len(), j.hypotheses.len())
-                    };
-                    tracing::info!(
-                        findings   = n_findings,
-                        hypotheses = n_hyp,
-                        "All hypotheses settled — converged. Pausing 60 s."
-                    );
-                    sleep(Duration::from_secs(60)).await;
-                } else {
-                    // Brief pause between sequential iterations (slot_count == 1 path).
-                    if scheduler.slot_count == 1 {
-                        sleep(Duration::from_secs(4)).await;
-                    }
-                }
+                pause_after_run(
+                    &res,
+                    &sink,
+                    &loop_cfg,
+                    &mut consecutive_exhaustions,
+                    scheduler.slot_count,
+                )
+                .await;
             }
         }
     }
@@ -333,4 +453,50 @@ pub async fn run_loop(
     // Drain remaining tasks on shutdown.
     join_set.abort_all();
     tracing::info!("Loop stopped after {iteration} iterations");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::{DiscoveryJournal, Finding, Hypothesis, HypothesisStatus};
+
+    #[test]
+    fn idle_when_findings_exist_but_no_active_hypotheses() {
+        let mut j = DiscoveryJournal::default();
+        j.findings.push(Finding {
+            id: "f1".into(),
+            statement: "s".into(),
+            evidence: vec![],
+            measurements: vec![],
+            experiment_id: None,
+            source: "system".into(),
+            first_observed_secs: 0,
+        });
+        assert!(should_idle_exploration(&j));
+
+        j.hypotheses.push(Hypothesis {
+            id: "h1".into(),
+            statement: "test".into(),
+            status: HypothesisStatus::Proposed,
+            created_secs: 0,
+            updated_secs: 0,
+        });
+        assert!(!should_idle_exploration(&j));
+    }
+
+    #[test]
+    fn backoff_scales_with_consecutive_exhaustions() {
+        let cfg = LoopConfig {
+            max_iterations: 10,
+            inter_run_pause_secs: 120,
+            idle_pause_secs: 300,
+            backoff_base_secs: 60,
+            backoff_max_secs: 300,
+        };
+        assert_eq!(cfg.backoff_secs(1), 60);
+        assert_eq!(cfg.backoff_secs(2), 120);
+        assert_eq!(cfg.backoff_secs(3), 240);
+        assert_eq!(cfg.backoff_secs(4), 300);
+        assert_eq!(cfg.backoff_secs(10), 300);
+    }
 }

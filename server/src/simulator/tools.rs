@@ -803,6 +803,7 @@ fn register_analyze_series_tool(
                 // ── Auto-record system findings when fit quality clears threshold ──
                 let audit_path = audit_log_path().to_string_lossy().into_owned();
                 let now = unix_now_secs();
+                let mut recorded_findings = Vec::new();
 
                 if let Ok(mut j) = journal.lock() {
                     // Record x-values as parameter-space coverage probes.
@@ -834,6 +835,11 @@ fn register_analyze_series_tool(
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                            recorded_findings.push(serde_json::json!({
+                                "id": id,
+                                "model": "linear",
+                                "statement": stmt,
+                            }));
                         }
                     }
 
@@ -856,6 +862,11 @@ fn register_analyze_series_tool(
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                            recorded_findings.push(serde_json::json!({
+                                "id": id,
+                                "model": "hill",
+                                "statement": stmt,
+                            }));
                         }
                     }
 
@@ -877,9 +888,16 @@ fn register_analyze_series_tool(
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                            recorded_findings.push(serde_json::json!({
+                                "id": id,
+                                "model": "michaelis_menten",
+                                "statement": stmt,
+                            }));
                         }
                     }
                 }
+
+                result["recorded_findings"] = serde_json::Value::Array(recorded_findings);
 
                 // Tell the agent why no finding was recorded when the series is
                 // too short — actionable feedback instead of silent no-op.

@@ -81,14 +81,14 @@ impl HttpLlmBackend {
     /// |-------------------------|-----------------------------------------|
     /// | `AXIOMLAB_LLM_ENDPOINT` | `http://localhost:11434/v1`             |
     /// | `AXIOMLAB_LLM_API_KEY`  | `no-key`                                |
-    /// | `AXIOMLAB_LLM_MODEL`    | `qwen2.5-coder:7b`                      |
+    /// | `AXIOMLAB_LLM_MODEL`    | `qwen2.5:3b`                            |
     pub fn from_env() -> Self {
         let endpoint = std::env::var("AXIOMLAB_LLM_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:11434/v1".into());
         let api_key = std::env::var("AXIOMLAB_LLM_API_KEY")
             .unwrap_or_else(|_| "no-key".into());
         let model = std::env::var("AXIOMLAB_LLM_MODEL")
-            .unwrap_or_else(|_| "qwen2.5-coder:7b".into());
+            .unwrap_or_else(|_| "qwen2.5:3b".into());
         Self::new(endpoint, api_key, model, 3, Duration::from_secs(30))
     }
 
