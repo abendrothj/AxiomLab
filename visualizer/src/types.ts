@@ -31,6 +31,22 @@ export interface NotebookEntryEvent {
   outcome: "discovery" | "rejection" | "inconclusive";
 }
 
+/** Live exploration-loop pacing — wait until next experiment, backoff, idle, etc. */
+export interface LoopStatus {
+  phase: "running" | "paused" | "idle" | "backoff" | "converged" | string;
+  reason: string;
+  wait_secs: number;
+  resume_at_ms: number;
+}
+
+export const LOOP_PHASE_COLORS: Record<string, string> = {
+  running: "#00d4ff",
+  paused: "#6c8a9a",
+  idle: "#a78bfa",
+  backoff: "#fd7e14",
+  converged: "#00ff9d",
+};
+
 // ── Typed param shapes ────────────────────────────────────────────
 
 export interface DispenseParams {
@@ -66,6 +82,7 @@ export const EVENTS = {
   STATE_TRANSITION: "state_transition",
   TOOL_EXECUTION: "tool_execution",
   NOTEBOOK_ENTRY: "notebook_entry",
+  LOOP_STATUS: "loop_status",
 } as const;
 
 // ── Approval types ────────────────────────────────────────────────

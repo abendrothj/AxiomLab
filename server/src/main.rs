@@ -60,6 +60,8 @@ pub(crate) struct AppState {
     pub lab_state: Arc<Mutex<LabState>>,
     /// Rich hypothesis state machine — shared with the orchestrator.
     pub hypothesis_manager: Arc<Mutex<HypothesisManager>>,
+    /// Live exploration-loop pacing status (wait-until-next-experiment, etc.).
+    loop_status: Arc<Mutex<ws_sink::LoopStatus>>,
     /// Prometheus metrics handle — rendered by GET /metrics.
     metrics_handle: PrometheusHandle,
 }
@@ -83,11 +85,13 @@ async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1)
         .clamp(1, 4);
+    let loop_status = s.loop_status.lock().unwrap().clone();
     axum::Json(serde_json::json!({
-        "running":    s.running.load(Ordering::SeqCst),
-        "iteration":  s.iteration.load(Ordering::SeqCst),
-        "notebook":   notebook,
-        "slot_count": slot_count,
+        "running":     s.running.load(Ordering::SeqCst),
+        "iteration":   s.iteration.load(Ordering::SeqCst),
+        "notebook":    notebook,
+        "slot_count":  slot_count,
+        "loop_status": loop_status,
     }))
 }
 
@@ -286,9 +290,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
     let snapshot = serde_json::json!({
         "event": "snapshot",
         "payload": {
-            "running":   state.running.load(Ordering::SeqCst),
-            "iteration": state.iteration.load(Ordering::SeqCst),
-            "notebook":  *state.notebook.lock().unwrap(),
+            "running":     state.running.load(Ordering::SeqCst),
+            "iteration":   state.iteration.load(Ordering::SeqCst),
+            "notebook":    *state.notebook.lock().unwrap(),
+            "loop_status": *state.loop_status.lock().unwrap(),
         }
     });
     if socket.send(Message::Text(snapshot.to_string())).await.is_err() {
@@ -454,6 +459,7 @@ mod tests {
             sila_clients:       None,
             lab_state:          Arc::new(Mutex::new(LabState::default())),
             hypothesis_manager: Arc::new(Mutex::new(HypothesisManager::default())),
+            loop_status: Arc::new(Mutex::new(ws_sink::LoopStatus::default())),
             metrics_handle:     metrics_exporter_prometheus::PrometheusBuilder::new()
                                     .build_recorder()
                                     .handle(),
@@ -776,6 +782,7 @@ async fn main() {
         hypothesis_manager: Arc::new(Mutex::new(
             sqlite_db.load_hypothesis_manager().unwrap_or_default()
         )),
+        loop_status: Arc::new(Mutex::new(ws_sink::LoopStatus::default())),
         metrics_handle,
     };
 
@@ -788,6 +795,7 @@ async fn main() {
             events,
             journal:  Arc::clone(&journal),
             db:       Arc::clone(&sqlite_db),
+            loop_status: Arc::clone(&state.loop_status),
         });
         state.running.store(true, Ordering::SeqCst);
         let running         = Arc::clone(&state.running);

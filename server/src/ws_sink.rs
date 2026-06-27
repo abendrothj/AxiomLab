@@ -9,6 +9,42 @@ use tokio::sync::broadcast;
 use crate::db::Db;
 use crate::discovery::{journal_path, DiscoveryJournal};
 
+// ── Loop status (pacing transparency) ─────────────────────────────────────────
+
+/// Live, viewer-facing description of what the exploration loop is doing between
+/// experiments. Broadcast over WS as `loop_status` and seeded into the snapshot
+/// so a freshly loaded page immediately shows any active wait.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LoopStatus {
+    /// "running" | "paused" | "idle" | "backoff" | "converged"
+    pub phase:        String,
+    /// Human-readable explanation of the current phase.
+    pub reason:       String,
+    /// Total length of the current wait, in seconds (0 when running).
+    pub wait_secs:    u64,
+    /// Unix epoch (ms) when the next experiment is expected to start (0 when running).
+    pub resume_at_ms: i64,
+}
+
+impl Default for LoopStatus {
+    fn default() -> Self {
+        Self {
+            phase:        "running".into(),
+            reason:       "Starting up".into(),
+            wait_secs:    0,
+            resume_at_ms: 0,
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 // ── Exploration log ───────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -89,12 +125,29 @@ pub struct WebSocketSink {
     pub journal:  Arc<Mutex<DiscoveryJournal>>,
     /// SQLite dual-write target.
     pub db:       Arc<Db>,
+    /// Shared loop-pacing status (also read by /api/status + the WS snapshot).
+    pub loop_status: Arc<Mutex<LoopStatus>>,
 }
 
 impl WebSocketSink {
     fn broadcast(&self, event: &str, payload: impl serde::Serialize) {
         let msg = serde_json::json!({ "event": event, "payload": payload });
         self.tx.send(msg.to_string()).ok();
+    }
+
+    /// Record + broadcast that the loop is pausing for `wait_secs` before the
+    /// next experiment. `wait_secs == 0` signals the loop is actively running.
+    pub fn set_loop_status(&self, phase: &str, reason: impl Into<String>, wait_secs: u64) {
+        let status = LoopStatus {
+            phase:        phase.to_owned(),
+            reason:       reason.into(),
+            wait_secs,
+            resume_at_ms: if wait_secs == 0 { 0 } else { now_ms() + (wait_secs as i64) * 1000 },
+        };
+        if let Ok(mut g) = self.loop_status.lock() {
+            *g = status.clone();
+        }
+        self.broadcast("loop_status", &status);
     }
 }
 

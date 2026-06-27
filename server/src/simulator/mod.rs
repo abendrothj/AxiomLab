@@ -222,6 +222,11 @@ async fn pause_after_run(
     if res.converged {
         *consecutive_exhaustions = 0;
         tracing::info!("All hypotheses settled — exploration converged. Pausing 60 s.");
+        sink.set_loop_status(
+            "converged",
+            "All hypotheses settled — pausing before next cycle",
+            60,
+        );
         sleep(Duration::from_secs(60)).await;
         return;
     }
@@ -234,6 +239,14 @@ async fn pause_after_run(
             pause_secs = pause,
             "Experiment hit max iterations — backing off before next run"
         );
+        sink.set_loop_status(
+            "backoff",
+            format!(
+                "Hit max iterations ({}) — backoff #{} before retry",
+                loop_cfg.max_iterations, *consecutive_exhaustions
+            ),
+            pause,
+        );
         sleep(Duration::from_secs(pause)).await;
         return;
     }
@@ -245,12 +258,23 @@ async fn pause_after_run(
             pause_secs = pause,
             "Journal has findings and no active hypotheses — extended idle"
         );
+        sink.set_loop_status(
+            "idle",
+            "Findings recorded, no active hypotheses — waiting for new questions",
+            pause,
+        );
         sleep(Duration::from_secs(pause)).await;
         return;
     }
 
     *consecutive_exhaustions = 0;
-    sleep(Duration::from_secs(loop_cfg.inter_run_pause_secs)).await;
+    let pause = loop_cfg.inter_run_pause_secs;
+    sink.set_loop_status(
+        "paused",
+        format!("Cool-down between experiments ({pause}s configured)"),
+        pause,
+    );
+    sleep(Duration::from_secs(pause)).await;
 }
 
 // ── Exploration loop ───────────────────────────────────────────────────────────
@@ -326,6 +350,11 @@ pub async fn run_loop(
                 tracing::info!(
                     pause_secs = loop_cfg.idle_pause_secs,
                     "Skipping new experiment — findings recorded, no active hypotheses"
+                );
+                sink.set_loop_status(
+                    "idle",
+                    "Findings recorded, no active hypotheses — skipping new experiment",
+                    loop_cfg.idle_pause_secs,
                 );
                 sleep(Duration::from_secs(loop_cfg.idle_pause_secs)).await;
                 break;
@@ -413,6 +442,14 @@ pub async fn run_loop(
                 slot,
                 experiment_id = %task.experiment_id,
                 "Spawning experiment in slot {slot}"
+            );
+            sink.set_loop_status(
+                "running",
+                format!(
+                    "Experiment {iteration} — up to {} LLM iterations",
+                    loop_cfg.max_iterations
+                ),
+                0,
             );
             join_set.spawn(run_one_experiment(task));
 

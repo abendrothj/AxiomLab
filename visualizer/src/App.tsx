@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   EVENTS, StateTransitionEvent, ToolExecutionEvent, LlmTokenEvent,
   NotebookEntryEvent, Stage, STAGE_COLORS, PendingApprovalInfo,
+  LoopStatus, LOOP_PHASE_COLORS,
 } from "./types";
 import { eventBus } from "./eventBus";
 import BlueprintGraph from "./components/BlueprintGraph";
@@ -76,6 +77,7 @@ export default function App() {
   const [notebook, setNotebook]         = useState<NotebookEntryEvent[]>([]);
   const [transitions, setTransitions]   = useState<StateTransitionEvent[]>([]);
   const [pendingCount, setPendingCount] = useState(0);
+  const [loopStatus, setLoopStatus]       = useState<LoopStatus | null>(null);
   const thinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshPending = useCallback(() => {
@@ -93,6 +95,7 @@ export default function App() {
     // Current iteration from in-memory status
     apiStatus().then((s) => {
       if (s.iteration) setIteration(s.iteration);
+      if (s.loop_status) setLoopStatus(s.loop_status as LoopStatus);
     });
 
     // Pending approvals count for tab badge
@@ -110,9 +113,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    return eventBus.listen<{ running: boolean; iteration: number; notebook: NotebookEntryEvent[] }>(
+    return eventBus.listen<{ running: boolean; iteration: number; notebook: NotebookEntryEvent[]; loop_status?: LoopStatus }>(
       "snapshot", (snap) => {
         setIteration(snap.iteration);
+        if (snap.loop_status) setLoopStatus(snap.loop_status);
         // DB history is already loaded — only fall back to snapshot if DB was empty
         setNotebook((prev) => prev.length > 0 ? prev : (snap.notebook ?? []));
         setConnected(true);
@@ -140,6 +144,9 @@ export default function App() {
       }),
       eventBus.listen<NotebookEntryEvent>(EVENTS.NOTEBOOK_ENTRY, (p) => {
         setNotebook((prev) => [...prev, p]);
+      }),
+      eventBus.listen<LoopStatus>(EVENTS.LOOP_STATUS, (p) => {
+        setLoopStatus(p);
       }),
     ];
     return () => unsubs.forEach((fn) => fn());
@@ -170,6 +177,7 @@ export default function App() {
             stage={stage}
             stageColor={stageColor}
             thinking={thinking}
+            loopStatus={loopStatus}
           />
           <div style={{ width: 1, background: "#111824", flexShrink: 0 }} />
 
@@ -364,11 +372,12 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pen
 
 // ── Live Panel (left) ─────────────────────────────────────────────────────────
 
-function LivePanel({ toolEvents, stage, stageColor, thinking }: {
+function LivePanel({ toolEvents, stage, stageColor, thinking, loopStatus }: {
   toolEvents: ToolExecutionEvent[];
   stage: string;
   stageColor: string;
   thinking: boolean;
+  loopStatus: LoopStatus | null;
 }) {
   return (
     <div style={{
@@ -407,6 +416,9 @@ function LivePanel({ toolEvents, stage, stageColor, thinking }: {
         </div>
       </div>
 
+      {/* Section: loop pacing transparency */}
+      <LoopStatusPanel status={loopStatus} />
+
       {/* Section: activity feed — all events, newest first */}
       <div style={{
         flex: 1, display: "flex", flexDirection: "column", overflow: "hidden",
@@ -426,6 +438,147 @@ function LivePanel({ toolEvents, stage, stageColor, thinking }: {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Loop status panel ─────────────────────────────────────────────────────────
+
+function formatCountdown(secs: number): string {
+  if (secs <= 0) return "now";
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  if (m === 0) return `${s}s`;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+const PHASE_LABELS: Record<string, string> = {
+  running: "RUNNING",
+  paused: "COOL-DOWN",
+  idle: "IDLE",
+  backoff: "BACKOFF",
+  converged: "CONVERGED",
+};
+
+function LoopStatusPanel({ status }: { status: LoopStatus | null }) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!status || status.phase === "running" || status.wait_secs === 0) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [status]);
+
+  if (!status) {
+    return (
+      <div style={{ padding: "14px 22px", borderBottom: "1px solid #0e1520", flexShrink: 0 }}>
+        <SectionLabel>EXPLORATION LOOP</SectionLabel>
+        <div style={{ marginTop: 8, fontSize: 10, color: "#1a3040" }}>connecting…</div>
+      </div>
+    );
+  }
+
+  const phaseColor = LOOP_PHASE_COLORS[status.phase] ?? "#3a4a5a";
+  const phaseLabel = PHASE_LABELS[status.phase] ?? status.phase.toUpperCase();
+  const isWaiting = status.phase !== "running" && status.wait_secs > 0 && status.resume_at_ms > 0;
+  const remaining = isWaiting
+    ? Math.max(0, Math.ceil((status.resume_at_ms - now) / 1000))
+    : 0;
+  const progress = isWaiting && status.wait_secs > 0
+    ? Math.min(1, Math.max(0, 1 - remaining / status.wait_secs))
+    : status.phase === "running" ? 1 : 0;
+
+  return (
+    <div style={{
+      padding: "14px 22px 16px",
+      borderBottom: "1px solid #0e1520",
+      flexShrink: 0,
+      background: `${phaseColor}06`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <SectionLabel>EXPLORATION LOOP</SectionLabel>
+        <span style={{
+          fontSize: 8, letterSpacing: "0.12em", fontWeight: 700,
+          color: phaseColor,
+          padding: "2px 8px",
+          border: `1px solid ${phaseColor}44`,
+          borderRadius: 2,
+          background: `${phaseColor}12`,
+        }}>
+          {phaseLabel}
+        </span>
+      </div>
+
+      <p style={{
+        margin: "10px 0 0",
+        fontSize: 11,
+        color: "#5a7a8a",
+        lineHeight: 1.55,
+      }}>
+        {status.reason}
+      </p>
+
+      {isWaiting ? (
+        <div style={{ marginTop: 12 }}>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            marginBottom: 6,
+          }}>
+            <span style={{ fontSize: 9, color: "#2a4a5a", letterSpacing: "0.08em" }}>
+              NEXT EXPERIMENT
+            </span>
+            <span style={{
+              fontSize: 18, fontWeight: 700, color: phaseColor,
+              letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums",
+            }}>
+              {formatCountdown(remaining)}
+            </span>
+          </div>
+          <div style={{
+            height: 4,
+            background: "#0e1520",
+            borderRadius: 2,
+            overflow: "hidden",
+          }}>
+            <div style={{
+              height: "100%",
+              width: `${progress * 100}%`,
+              background: phaseColor,
+              borderRadius: 2,
+              transition: "width 1s linear",
+              boxShadow: `0 0 8px ${phaseColor}66`,
+            }} />
+          </div>
+          <div style={{
+            marginTop: 6,
+            fontSize: 9,
+            color: "#1a3040",
+            letterSpacing: "0.06em",
+          }}>
+            {status.wait_secs}s total wait
+          </div>
+        </div>
+      ) : status.phase === "running" ? (
+        <div style={{
+          marginTop: 10,
+          fontSize: 10,
+          color: phaseColor,
+          letterSpacing: "0.08em",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+        }}>
+          <span style={{
+            width: 6, height: 6, borderRadius: "50%",
+            background: phaseColor,
+            boxShadow: `0 0 6px ${phaseColor}`,
+            animation: "pulse-dot 1.2s ease-in-out infinite",
+          }} />
+          experiment in progress
+        </div>
+      ) : null}
     </div>
   );
 }
