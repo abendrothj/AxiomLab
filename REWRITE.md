@@ -329,7 +329,7 @@ Each crate is independently compilable and tested before the next is started. No
 
 - [x] 1. `crates/types/` — domain types, zero deps **(done — 8 tests pass)**
 - [x] 2. `crates/audit/` — chain + Rekor, depends on types **(done — 15 tests pass)**
-- [ ] 3. `crates/chemistry/` — compatibility table, depends on types
+- [x] 3. `crates/chemistry/` — compatibility table **(done — 7 tests pass; returns `HazardLevel`, operates on reagent names)**
 - [ ] 4. `crates/sila/` — proto codegen + clients, depends on types
 - [ ] 5. `crates/proofs/` — artifact loading + predicates, depends on types
 - [ ] 6. `crates/gate/` — pipeline + all 7 gates, depends on all above
