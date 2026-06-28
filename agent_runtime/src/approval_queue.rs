@@ -57,33 +57,26 @@ pub struct ProtocolStepInfo {
 }
 
 /// Context the orchestrator assembles from its own state — not from anything
-/// the LLM produced — so the scientist can trust it.
+/// the agent produced — so the operator can trust it.
 #[derive(Debug, Clone, Default)]
 pub struct ApprovalContext {
-    /// The hypothesis the current experiment is testing (set by the mandate,
-    /// not by the LLM's tool call output).
-    pub hypothesis: String,
-    /// Stable ID of the current experiment.
+    /// The operator-issued directive this run is fulfilling (set externally,
+    /// not from the agent's tool call output).
+    pub directive: String,
+    /// Stable ID of the current run.
     pub experiment_id: String,
-    /// Which iteration of the experiment loop this call was made in.
+    /// Which iteration of the execution loop this call was made in.
     pub iteration: u32,
     /// Risk class determined from the proof manifest (`ReadOnly`, `LiquidHandling`,
-    /// `Actuation`, `Destructive`).  Set by `try_tool_call`, not the LLM.
+    /// `Actuation`, `Destructive`).  Set by `try_tool_call`, not the agent.
     pub risk_class: Option<String>,
-    /// The last N tool calls successfully dispatched this experiment, in order.
-    /// Each entry is `(tool_name, params)`.  Gives the scientist a verifiable
+    /// The last N tool calls successfully dispatched this run, in order.
+    /// Each entry is `(tool_name, params)`.  Gives the operator a verifiable
     /// record of what the agent has actually done, not what it claims to have done.
     pub recent_actions: Vec<(String, serde_json::Value)>,
-    /// Pre-formatted operation log summary (findings count, active/settled
-    /// directives, recent runs).  Set once per experiment by the server layer
-    /// from the persisted log — not from LLM output.
-    pub journal_summary: String,
     /// If this approval was triggered from inside a structured protocol, the
-    /// step position and description give the scientist precise context.
+    /// step position and description give the operator precise context.
     pub protocol_step: Option<ProtocolStepInfo>,
-    /// Number of confirmed findings in the journal at the start of this experiment.
-    /// Compare with current journal to judge whether the agent is making progress.
-    pub findings_before_experiment: u32,
 }
 
 // ── Pending entry ─────────────────────────────────────────────────────────────
@@ -104,7 +97,7 @@ struct PendingEntry {
 /// Returned by `GET /api/approvals/pending`.
 ///
 /// Every field is sourced from the orchestrator's own state, not from the
-/// LLM's output, so the scientist can rely on it when deciding to approve or deny.
+/// agent's output, so the operator can rely on it when deciding to approve or deny.
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingApprovalInfo {
     pub pending_id:    String,
@@ -115,28 +108,18 @@ pub struct PendingApprovalInfo {
     /// Included so the operator can pass the correct nonce to `approvalctl sign`.
     pub session_nonce: Option<String>,
     // ── System-verified context ───────────────────────────────────────────────
-    /// Hypothesis the experiment is testing (set externally, not by the LLM).
-    pub hypothesis:    String,
+    /// Operator directive this run is fulfilling (set externally, not by the agent).
+    pub directive:     String,
     pub experiment_id: String,
     pub iteration:     u32,
     /// Risk class from the proof manifest.
     pub risk_class:    Option<String>,
-    /// Last ≤5 tool calls dispatched this experiment (verified from orchestrator
-    /// state, not from the LLM's narrative).
+    /// Last ≤5 tool calls dispatched this run (verified from orchestrator
+    /// state, not from the agent's narrative).
     pub recent_actions: Vec<serde_json::Value>,
-    // ── Scientific judgment context ───────────────────────────────────────────
-    /// Compact operation log state: finding count, directive statuses,
-    /// recent protocol runs.  Pre-formatted by the server from the persisted
-    /// log — not from the LLM.
-    pub journal_summary: String,
     /// If this approval was triggered from a structured protocol, the step
-    /// position and description (e.g. "Step 3 of 5: increment fill fraction by
-    /// 100µL to map absorbance midpoint") give the scientist precise context.
+    /// position and description give the operator precise context.
     pub protocol_step: Option<ProtocolStepInfo>,
-    /// Number of confirmed findings in the journal at the start of this
-    /// experiment.  Lets the operator compare "before" vs "current journal"
-    /// to judge whether the agent is making progress.
-    pub findings_before_experiment: u32,
 }
 
 // ── Submit errors ─────────────────────────────────────────────────────────────
@@ -165,19 +148,17 @@ fn entry_to_info(e: &PendingEntry) -> PendingApprovalInfo {
         .map(|(tool, params)| serde_json::json!({"tool": tool, "params": params}))
         .collect();
     PendingApprovalInfo {
-        pending_id:                 e.pending_id.clone(),
-        tool_name:                  e.tool_name.clone(),
-        params:                     e.params.clone(),
-        queued_at:                  e.queued_at,
-        session_nonce:              e.session_nonce.clone(),
-        hypothesis:                 e.context.hypothesis.clone(),
-        experiment_id:              e.context.experiment_id.clone(),
-        iteration:                  e.context.iteration,
-        risk_class:                 e.context.risk_class.clone(),
-        recent_actions:             recent,
-        journal_summary:            e.context.journal_summary.clone(),
-        protocol_step:              e.context.protocol_step.clone(),
-        findings_before_experiment: e.context.findings_before_experiment,
+        pending_id:    e.pending_id.clone(),
+        tool_name:     e.tool_name.clone(),
+        params:        e.params.clone(),
+        queued_at:     e.queued_at,
+        session_nonce: e.session_nonce.clone(),
+        directive:     e.context.directive.clone(),
+        experiment_id: e.context.experiment_id.clone(),
+        iteration:     e.context.iteration,
+        risk_class:    e.context.risk_class.clone(),
+        recent_actions: recent,
+        protocol_step: e.context.protocol_step.clone(),
     }
 }
 
@@ -297,14 +278,12 @@ mod tests {
 
     fn ctx() -> ApprovalContext {
         ApprovalContext {
-            hypothesis:                 "absorbance scales with fill fraction".into(),
-            experiment_id:              "exp-test-1".into(),
-            iteration:                  2,
-            risk_class:                 Some("LiquidHandling".into()),
-            recent_actions:             vec![],
-            journal_summary:            String::new(),
-            protocol_step:              None,
-            findings_before_experiment: 0,
+            directive:     "Calibrate spectrophotometer at 500 nm".into(),
+            experiment_id: "exp-test-1".into(),
+            iteration:     2,
+            risk_class:    Some("LiquidHandling".into()),
+            recent_actions: vec![],
+            protocol_step: None,
         }
     }
 
@@ -360,7 +339,7 @@ mod tests {
         assert!(list.iter().any(|e| e.pending_id == id1));
         let arm = list.iter().find(|e| e.pending_id == id2).unwrap();
         assert_eq!(arm.session_nonce.as_deref(), Some("nonce-abc"));
-        assert_eq!(arm.hypothesis, "absorbance scales with fill fraction");
+        assert_eq!(arm.directive, "Calibrate spectrophotometer at 500 nm");
         assert_eq!(arm.risk_class.as_deref(), Some("LiquidHandling"));
         assert_eq!(arm.recent_actions.len(), 1);
         assert_eq!(arm.recent_actions[0]["tool"], "read_absorbance");

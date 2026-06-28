@@ -254,36 +254,6 @@ pub fn emit_journal_finding(
     emit_jsonl(path, &event, signer)
 }
 
-/// Emit a journal hypothesis update record into the audit chain.
-///
-/// Called when the LLM adds or changes the status of a hypothesis via
-/// `update_journal`.  Tracks the full lifecycle: Proposed → Testing →
-/// Confirmed/Rejected.
-pub fn emit_journal_hypothesis(
-    path: &str,
-    hypothesis_id: &str,
-    statement: &str,
-    status: &str,
-    signer: Option<&dyn AuditSigner>,
-) -> Result<String, std::io::Error> {
-    let details = serde_json::json!({
-        "hypothesis_id": hypothesis_id,
-        "statement": statement,
-        "status": status,
-    });
-    let event = AuditEvent {
-        unix_secs: unix_secs_now(),
-        trace_id: format!("journal_hypothesis-{hypothesis_id}"),
-        action: "journal_hypothesis".into(),
-        decision: "allow".into(),
-        reason: details.to_string(),
-        success: true,
-        approval_ids: None,
-        reasoning_text: None,
-    };
-    emit_jsonl(path, &event, signer)
-}
-
 /// Emit a calibration record into the audit chain.
 ///
 /// Called when `calibrate_ph` (or any instrument calibration tool) succeeds.

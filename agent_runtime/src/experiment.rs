@@ -1,6 +1,6 @@
-//! Experiment lifecycle state machine.
+//! Protocol run lifecycle state machine.
 //!
-//! An experiment progresses through:
+//! A protocol run progresses through:
 //!   Proposed → Executing → Analyzing → Completed
 //!
 //! Any stage can transition to `Failed`.
@@ -16,25 +16,24 @@ pub enum ExperimentError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Stage {
-    /// The LLM is designing the experimental approach.
+    /// The agent is planning the approach.
     Proposed,
-    /// The LLM is issuing tool calls and collecting data.
+    /// The agent is issuing tool calls and collecting data.
     Executing,
     /// Data collected; statistical analysis and evidence recording in progress.
     Analyzing,
-    /// Experiment completed — done signal received.
+    /// Run completed — done signal received.
     Completed,
-    /// Experiment failed at some stage.
+    /// Run failed at some stage.
     Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Experiment {
     pub id: String,
-    pub hypothesis: String,
+    /// The operator-issued directive this run is fulfilling.
+    pub directive: String,
     pub stage: Stage,
-    /// The hypothesis this experiment is linked to, if any.
-    pub hypothesis_id: Option<String>,
     /// Raw results (populated at `Completed`).
     pub results: Option<serde_json::Value>,
     /// Error message if `Failed`.
@@ -42,28 +41,11 @@ pub struct Experiment {
 }
 
 impl Experiment {
-    pub fn new(id: impl Into<String>, hypothesis: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<String>, directive: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            hypothesis: hypothesis.into(),
+            directive: directive.into(),
             stage: Stage::Proposed,
-            hypothesis_id: None,
-            results: None,
-            error: None,
-        }
-    }
-
-    /// Convenience constructor for experiments linked to a hypothesis record.
-    pub fn new_with_hypothesis(
-        id: impl Into<String>,
-        hypothesis: impl Into<String>,
-        hypothesis_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            hypothesis: hypothesis.into(),
-            stage: Stage::Proposed,
-            hypothesis_id: Some(hypothesis_id.into()),
             results: None,
             error: None,
         }
@@ -106,7 +88,7 @@ mod tests {
 
     #[test]
     fn happy_path() {
-        let mut exp = Experiment::new("exp-001", "NaOH + HCl → NaCl + H₂O");
+        let mut exp = Experiment::new("exp-001", "Calibrate pH meter with pH 4/7/10 buffers");
         assert_eq!(exp.stage, Stage::Proposed);
         exp.advance(Stage::Executing).unwrap();
         exp.advance(Stage::Analyzing).unwrap();
@@ -118,7 +100,6 @@ mod tests {
     fn reject_skip_analyzing() {
         let mut exp = Experiment::new("exp-002", "test");
         exp.advance(Stage::Executing).unwrap();
-        // Skipping Analyzing is invalid.
         assert!(exp.advance(Stage::Completed).is_err());
     }
 
@@ -148,19 +129,11 @@ mod tests {
     }
 
     #[test]
-    fn new_with_hypothesis_sets_id() {
-        let exp = Experiment::new_with_hypothesis("e1", "stmt", "hyp-123");
-        assert_eq!(exp.hypothesis_id.as_deref(), Some("hyp-123"));
-        assert_eq!(exp.stage, Stage::Proposed);
-    }
-
-    #[test]
     fn no_forward_transition_from_completed() {
         let mut exp = Experiment::new("exp-006", "test");
         exp.advance(Stage::Executing).unwrap();
         exp.advance(Stage::Analyzing).unwrap();
         exp.advance(Stage::Completed).unwrap();
-        // Cannot advance to any non-Failed stage once Completed.
         assert!(exp.advance(Stage::Executing).is_err());
         assert!(exp.advance(Stage::Analyzing).is_err());
     }

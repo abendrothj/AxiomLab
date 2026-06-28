@@ -248,30 +248,6 @@ impl DiscoveryJournal {
         id
     }
 
-    /// Add a new hypothesis. Returns the new hypothesis's id.
-    pub fn add_hypothesis(&mut self, statement: String) -> String {
-        let id = Uuid::new_v4().to_string();
-        self.hypotheses.push(Hypothesis {
-            id: id.clone(),
-            statement,
-            status: HypothesisStatus::Proposed,
-            created_secs: now_secs(),
-            updated_secs: now_secs(),
-        });
-        id
-    }
-
-    /// Update a hypothesis's status by id. Returns false if the id wasn't found.
-    pub fn update_hypothesis_status(&mut self, id: &str, status: HypothesisStatus) -> bool {
-        if let Some(h) = self.hypotheses.iter_mut().find(|h| h.id == id) {
-            h.status = status;
-            h.updated_secs = now_secs();
-            true
-        } else {
-            false
-        }
-    }
-
     /// Record an instrument calibration. Returns the new calibration record's id.
     pub fn record_calibration(
         &mut self,

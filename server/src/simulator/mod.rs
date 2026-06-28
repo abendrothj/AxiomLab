@@ -3,7 +3,6 @@ mod mandate;
 pub mod protocol_library;
 mod tools;
 
-use crate::discovery::HypothesisStatus;
 use crate::protocol_queue::ProtocolQueue;
 use crate::ws_sink::WebSocketSink;
 use agent_runtime::{
@@ -11,7 +10,6 @@ use agent_runtime::{
     capabilities::CapabilityPolicy,
     events::EventSink,
     experiment::{Experiment, Stage},
-    hypothesis::HypothesisManager,
     lab_state::LabState,
     llm::OpenAiClient,
     orchestrator::{Orchestrator, OrchestratorConfig},
@@ -74,14 +72,11 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// True when the operation log has findings but no directive is active — seed from the commissioning agenda.
-fn needs_agenda_directive(journal: &DiscoveryJournal) -> bool {
-    if journal.findings.is_empty() {
-        return false;
-    }
-    !journal.hypotheses.iter().any(|h| {
-        h.status == HypothesisStatus::Proposed || h.status == HypothesisStatus::Testing
-    })
+/// Return the next science-agenda item not yet attempted, or None if all are done.
+fn next_agenda_directive(journal: &DiscoveryJournal) -> Option<(&'static str, &'static str)> {
+    SCIENCE_AGENDA.iter().find(|(key, _)| {
+        !journal.runs.iter().any(|r| r.protocol_name.contains(key) || r.hypothesis.contains(key))
+    }).copied()
 }
 
 fn experiment_exhausted_iterations(experiment: &Experiment) -> bool {
@@ -131,24 +126,6 @@ const SCIENCE_AGENDA: &[(&str, &str)] = &[
     ),
 ];
 
-/// Propose the next untried hypothesis from the science agenda.
-/// Returns true when a hypothesis was added (and the journal saved).
-fn seed_follow_up_hypothesis(journal: &mut crate::discovery::DiscoveryJournal) -> bool {
-    for (key, stmt) in SCIENCE_AGENDA {
-        let already_exists = journal.hypotheses.iter().any(|h| h.statement.contains(key));
-        if !already_exists {
-            journal.add_hypothesis(stmt.to_string());
-            tracing::info!(key = key, "Seeded follow-up hypothesis from science agenda");
-            if let Err(e) = journal.save(&crate::discovery::journal_path()) {
-                tracing::warn!("Failed to persist journal after hypothesis seed: {e}");
-            }
-            return true;
-        }
-    }
-    tracing::warn!("Science agenda exhausted — all planned hypotheses have been proposed");
-    false
-}
-
 // ── Agenda status query (used by /api/agenda handler) ────────────────────────
 
 #[derive(serde::Serialize)]
@@ -158,23 +135,15 @@ pub(crate) struct AgendaItem {
     pub status:    &'static str, // "pending" | "proposed" | "testing" | "completed" | "rejected"
 }
 
-/// Return the commissioning agenda with live completion status derived from
-/// the operation journal.  Called by the GET /api/agenda handler.
+/// Return the commissioning agenda with live completion status derived from run history.
+/// Called by the GET /api/agenda handler.
 pub(crate) fn agenda_status(journal: &DiscoveryJournal) -> Vec<AgendaItem> {
     SCIENCE_AGENDA
         .iter()
         .map(|(key, stmt)| {
-            let status = journal
-                .hypotheses
-                .iter()
-                .find(|h| h.statement.contains(key))
-                .map(|h| match h.status {
-                    HypothesisStatus::Proposed  => "proposed",
-                    HypothesisStatus::Testing   => "testing",
-                    HypothesisStatus::Confirmed => "completed",
-                    HypothesisStatus::Rejected  => "rejected",
-                })
-                .unwrap_or("pending");
+            let run = journal.runs.iter()
+                .find(|r| r.protocol_name.contains(key) || r.hypothesis.contains(key));
+            let status = if run.is_some() { "completed" } else { "pending" };
             AgendaItem { key, statement: stmt, status }
         })
         .collect()
@@ -231,12 +200,11 @@ struct ExperimentTask {
 
 /// Result returned from a completed experiment task.
 struct TaskResult {
-    slot:                  usize,
-    experiment_id:         String,
-    converged:             bool,
-    exhausted_iterations:  bool,
-    /// The most recent system-recorded finding from this experiment, if any.
-    finding_summary:       Option<String>,
+    slot:                 usize,
+    experiment_id:        String,
+    exhausted_iterations: bool,
+    /// Conclusion text from the most recent protocol run, for queue result summaries.
+    finding_summary:      Option<String>,
 }
 
 // ── Single-experiment runner ───────────────────────────────────────────────────
@@ -249,7 +217,6 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
             return TaskResult {
                 slot: task.slot,
                 experiment_id: task.experiment_id.clone(),
-                converged: false,
                 exhausted_iterations: false,
                 finding_summary: None,
             };
@@ -280,30 +247,14 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
         tracing::error!("Slot {} experiment {} error: {e}", task.slot, task.experiment_id);
     }
 
-    // Convergence check — all hypotheses settled + at least one system-generated finding.
-    // A "system" finding is auto-recorded by `analyze_series` (R² ≥ 0.80); the LLM
-    // cannot fake convergence by calling `confirm_hypothesis` without measured data.
-    let (converged, finding_summary) = {
+    let finding_summary = {
         let j = task.sink.journal.lock().unwrap();
-        let has_system_finding = j.findings.iter()
-            .any(|f| f.source == "system");
-        let settled = has_system_finding
-            && !j.hypotheses.is_empty()
-            && j.hypotheses.iter().all(|h| {
-                h.status == HypothesisStatus::Confirmed
-                    || h.status == HypothesisStatus::Rejected
-            });
-        // Extract the most recent finding from this experiment for the queue result summary.
-        let summary = j.findings.iter().rev()
-            .find(|f| f.experiment_id.as_deref() == Some(&task.experiment_id))
-            .map(|f| f.statement.clone());
-        (settled, summary)
+        j.runs.last().map(|r| r.conclusion.clone())
     };
 
     TaskResult {
         slot: task.slot,
         experiment_id: task.experiment_id.clone(),
-        converged,
         exhausted_iterations: experiment_exhausted_iterations(&experiment),
         finding_summary,
     }
@@ -317,18 +268,6 @@ async fn pause_after_run(
     slot_count: usize,
 ) {
     if slot_count != 1 {
-        return;
-    }
-
-    if res.converged {
-        *consecutive_exhaustions = 0;
-        tracing::info!("Execution cycle converged — all directives settled. Pausing 60 s.");
-        sink.set_loop_status(
-            "converged",
-            "All directives settled — pausing before next cycle",
-            60,
-        );
-        sleep(Duration::from_secs(60)).await;
         return;
     }
 
@@ -352,28 +291,22 @@ async fn pause_after_run(
         return;
     }
 
-    if needs_agenda_directive(&sink.journal.lock().unwrap()) {
-        *consecutive_exhaustions = 0;
-        let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
-        if seeded {
-            sink.set_loop_status("commissioning", "Agenda directive seeded — queuing next experiment", 0);
-            return;
-        }
+    *consecutive_exhaustions = 0;
+    let has_pending = {
+        let j = sink.journal.lock().unwrap();
+        next_agenda_directive(&j).is_some()
+    };
+    if !has_pending {
         let pause = loop_cfg.idle_pause_secs;
-        tracing::info!(
-            pause_secs = pause,
-            "Science agenda exhausted — all planned experiments complete, extended idle"
-        );
+        tracing::info!(pause_secs = pause, "Commissioning agenda complete — awaiting operator directives");
         sink.set_loop_status(
             "idle",
-            "Commissioning agenda complete — awaiting operator directives via /api/queue",
+            "Commissioning complete — awaiting operator directives via /api/queue",
             pause,
         );
         sleep(Duration::from_secs(pause)).await;
         return;
     }
-
-    *consecutive_exhaustions = 0;
     let pause = loop_cfg.inter_run_pause_secs;
     sink.set_loop_status(
         "paused",
@@ -387,23 +320,21 @@ async fn pause_after_run(
 //
 // Priority order for each cycle:
 //   1. Pending items in the operator protocol queue (highest priority)
-//   2. Proposed directives in the journal (from the commissioning agenda)
-//   3. Seed the next commissioning procedure from the science agenda
+//   2. Next untried task from the science agenda (commissioning fallback)
 //
 // The queue is the primary interface: operators push work here and the loop
-// executes it. The science agenda is fallback commissioning that keeps the
-// system characterizing instruments when no operator work is queued.
+// executes it. The science agenda keeps instruments characterized when no
+// operator work is queued.
 
 pub async fn run_loop(
-    sink:               Arc<WebSocketSink>,
-    running:            Arc<AtomicBool>,
-    iteration_counter:  Arc<AtomicU32>,
-    approval_queue:     Arc<PendingApprovalQueue>,
-    db:                 Arc<crate::db::Db>,
-    sila_clients:       Option<Arc<agent_runtime::hardware::SiLA2Clients>>,
-    lab_state:          Arc<Mutex<LabState>>,
-    hypothesis_manager: Arc<Mutex<HypothesisManager>>,
-    protocol_queue:     Arc<Mutex<ProtocolQueue>>,
+    sink:              Arc<WebSocketSink>,
+    running:           Arc<AtomicBool>,
+    iteration_counter: Arc<AtomicU32>,
+    approval_queue:    Arc<PendingApprovalQueue>,
+    db:                Arc<crate::db::Db>,
+    sila_clients:      Option<Arc<agent_runtime::hardware::SiLA2Clients>>,
+    lab_state:         Arc<Mutex<LabState>>,
+    protocol_queue:    Arc<Mutex<ProtocolQueue>>,
 ) {
     let policy     = CapabilityPolicy::default_lab();
     let scheduler  = SlotManager::from_env();
@@ -453,14 +384,8 @@ pub async fn run_loop(
             // Update the protocol queue if this experiment served a queued item.
             if let Some(queue_id) = queued_experiment_map.remove(&res.experiment_id) {
                 let mut q = protocol_queue.lock().unwrap();
-                if res.converged {
-                    let summary = res.finding_summary
-                        .as_deref()
-                        .unwrap_or("Converged — quantitative finding recorded")
-                        .to_owned();
-                    q.mark_completed(&queue_id, summary);
-                } else if res.exhausted_iterations {
-                    q.mark_failed(&queue_id, "Max iterations reached without converging".into());
+                if res.exhausted_iterations {
+                    q.mark_failed(&queue_id, "Max iterations reached without completing".into());
                 } else {
                     let summary = res.finding_summary
                         .as_deref()
@@ -470,7 +395,7 @@ pub async fn run_loop(
                 }
             }
             scheduler.release(res.slot, &[]);
-            tracing::debug!(slot = res.slot, converged = res.converged, "Slot freed");
+            tracing::debug!(slot = res.slot, exhausted = res.exhausted_iterations, "Slot freed");
             pause_after_run(
                 &res,
                 &sink,
@@ -489,42 +414,27 @@ pub async fn run_loop(
                 q.next_pending().map(|item| (item.id.clone(), item.statement.clone()))
             };
 
-            // Priority 2: proposed journal directives (from the commissioning agenda).
-            let journal_directive = if queued_directive.is_none() {
+            // Priority 2: next commissioning task from the science agenda.
+            let agenda_directive = if queued_directive.is_none() {
                 let j = sink.journal.lock().unwrap();
-                j.hypotheses.iter()
-                    .find(|h| h.status == HypothesisStatus::Proposed)
-                    .map(|h| (h.id.clone(), h.statement.clone()))
+                next_agenda_directive(&j).map(|(key, stmt)| (key.to_string(), stmt.to_string()))
             } else {
                 None
             };
 
-            // Priority 3: seed the next commissioning procedure when nothing is queued.
-            let active_directive = queued_directive.or(journal_directive);
+            let active_directive = queued_directive.clone().or(agenda_directive);
             if active_directive.is_none() {
-                // Nothing from queue or journal — check if we need to seed a new procedure.
-                if needs_agenda_directive(&sink.journal.lock().unwrap()) {
-                    let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
-                    if seeded {
-                        sink.set_loop_status(
-                            "commissioning",
-                            "Commissioning procedure seeded — starting execution",
-                            0,
-                        );
-                        continue;
-                    }
-                    tracing::info!(
-                        pause_secs = loop_cfg.idle_pause_secs,
-                        "Commissioning agenda complete — idling until new operator directives arrive"
-                    );
-                    sink.set_loop_status(
-                        "idle",
-                        "Commissioning complete — awaiting operator directives via /api/queue",
-                        loop_cfg.idle_pause_secs,
-                    );
-                    sleep(Duration::from_secs(loop_cfg.idle_pause_secs)).await;
-                    break;
-                }
+                tracing::info!(
+                    pause_secs = loop_cfg.idle_pause_secs,
+                    "Commissioning agenda complete — idling until new operator directives arrive"
+                );
+                sink.set_loop_status(
+                    "idle",
+                    "Commissioning complete — awaiting operator directives via /api/queue",
+                    loop_cfg.idle_pause_secs,
+                );
+                sleep(Duration::from_secs(loop_cfg.idle_pause_secs)).await;
+                break;
             }
 
             iteration += 1;
@@ -534,17 +444,13 @@ pub async fn run_loop(
             let instruments: &[&str] = &[];
             let exp_id = format!("exp-{iteration}-{}", uuid::Uuid::new_v4());
 
-            // If this experiment serves a queued item, record the mapping.
-            if let Some((ref qid, _)) = active_directive {
-                // Only queue items have UUIDs without the "hyp-" prefix used by journal hypotheses.
-                let is_queue_item = !qid.starts_with("hyp-");
-                if is_queue_item {
-                    protocol_queue.lock().unwrap().mark_running(qid, &exp_id);
-                    queued_experiment_map.insert(exp_id.clone(), qid.clone());
-                    tracing::info!(queue_id = %qid, exp_id = %exp_id, "Executing operator-queued protocol");
-                } else {
-                    tracing::info!(directive = %qid, slot = 0, "Executing commissioning directive");
-                }
+            // If this experiment serves an operator-queued item, record the mapping.
+            if let Some((ref qid, _)) = queued_directive {
+                protocol_queue.lock().unwrap().mark_running(qid, &exp_id);
+                queued_experiment_map.insert(exp_id.clone(), qid.clone());
+                tracing::info!(queue_id = %qid, exp_id = %exp_id, "Executing operator-queued protocol");
+            } else if let Some((ref key, _)) = active_directive {
+                tracing::info!(directive = %key, slot = 0, "Executing commissioning directive from agenda");
             }
 
             let slot = match scheduler.try_acquire(&exp_id, instruments) {
@@ -552,12 +458,10 @@ pub async fn run_loop(
                 None    => break, // all slots busy (shouldn't happen here, but guard)
             };
 
-            let (mandate, journal_summary, findings_at_start, calibration_status) = {
+            let (mandate, calibration_status) = {
                 let log     = sink.log.lock().unwrap();
                 let journal = sink.journal.lock().unwrap();
                 let m = mandate::build_mandate(iteration, &log, &journal, &policy, active_directive.as_ref());
-                let s = journal.summary_for_llm();
-                let f = journal.findings.len() as u32;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
                 let cal: std::collections::HashMap<String, (bool, bool)> = [
@@ -570,7 +474,7 @@ pub async fn run_loop(
                     let valid = rec.map(|r| r.is_valid_at(now)).unwrap_or(false);
                     (tool.to_string(), (calibrated, valid))
                 }).collect();
-                (m, s, f, cal)
+                (m, cal)
             };
 
             let config = OrchestratorConfig {
@@ -582,11 +486,7 @@ pub async fn run_loop(
                 event_sink: Some(Arc::clone(&sink) as Arc<dyn EventSink>),
                 approval_queue: Some(Arc::clone(&approval_queue)),
                 approval_timeout_secs: 300,
-                journal_summary,
-                findings_at_start,
                 calibration_status,
-                require_system_finding_for_completion: true,
-                hypothesis_manager: Some(Arc::clone(&hypothesis_manager)),
                 ..OrchestratorConfig::default()
             };
 
@@ -660,30 +560,50 @@ pub async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{DiscoveryJournal, Finding, Hypothesis, HypothesisStatus};
+    use crate::discovery::{DiscoveryJournal, RunSummary};
 
     #[test]
-    fn idle_when_findings_exist_but_no_active_hypotheses() {
+    fn next_agenda_directive_skips_completed_runs() {
         let mut j = DiscoveryJournal::default();
-        j.findings.push(Finding {
-            id: "f1".into(),
-            statement: "s".into(),
-            evidence: vec![],
-            measurements: vec![],
-            experiment_id: None,
-            source: "system".into(),
-            first_observed_secs: 0,
-        });
-        assert!(needs_agenda_directive(&j));
+        // No runs yet — first agenda item is returned.
+        let first = next_agenda_directive(&j).map(|(k, _)| k);
+        assert_eq!(first, Some("ph-titration-capacity"));
 
-        j.hypotheses.push(Hypothesis {
-            id: "h1".into(),
-            statement: "test".into(),
-            status: HypothesisStatus::Proposed,
-            created_secs: 0,
-            updated_secs: 0,
+        // Record a run whose protocol_name contains the first key.
+        j.runs.push(RunSummary {
+            run_id: "r1".into(),
+            protocol_name: "pH titration — buffer capacity [ph-titration-capacity]".into(),
+            hypothesis: String::new(),
+            conclusion: "done".into(),
+            steps_succeeded: 6,
+            steps_total: 6,
+            timestamp_secs: 0,
         });
-        assert!(!needs_agenda_directive(&j));
+        // Now the second item should be next.
+        let second = next_agenda_directive(&j).map(|(k, _)| k);
+        assert_eq!(second, Some("beer-lambert-upper-range"));
+    }
+
+    #[test]
+    fn agenda_status_reflects_run_history() {
+        let mut j = DiscoveryJournal::default();
+        let items = agenda_status(&j);
+        assert!(items.iter().all(|i| i.status == "pending"));
+
+        j.runs.push(RunSummary {
+            run_id: "r1".into(),
+            protocol_name: "[incubator-temperature-linearity]".into(),
+            hypothesis: String::new(),
+            conclusion: "done".into(),
+            steps_succeeded: 5,
+            steps_total: 5,
+            timestamp_secs: 0,
+        });
+        let items = agenda_status(&j);
+        let incubator = items.iter().find(|i| i.key == "incubator-temperature-linearity").unwrap();
+        assert_eq!(incubator.status, "completed");
+        let ph = items.iter().find(|i| i.key == "ph-titration-capacity").unwrap();
+        assert_eq!(ph.status, "pending");
     }
 
     #[test]

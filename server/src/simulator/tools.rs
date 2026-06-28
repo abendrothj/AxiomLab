@@ -1,12 +1,12 @@
 use crate::db::Db;
-use crate::discovery::{journal_path, DiscoveryJournal, HypothesisStatus, Measurement, ParameterProbe};
+use crate::discovery::{journal_path, DiscoveryJournal, Measurement, ParameterProbe};
 use agent_runtime::lab_state::LabState;
 use rand::Rng;
 use scientific_compute::fitting::{
     hill_equation_fit, linear_regression, michaelis_menten_fit, model_select_aic, PreferredModel,
 };
 use agent_runtime::{
-    audit::{audit_log_path, emit_calibration, emit_journal_finding, emit_journal_hypothesis},
+    audit::{audit_log_path, emit_calibration, emit_journal_finding},
     hardware::SiLA2Clients,
     ph_model,
     protocol::propose_protocol_schema,
@@ -37,7 +37,7 @@ pub(crate) fn make_sandbox() -> Sandbox {
             "aspirate".into(), "read_absorbance".into(), "read_ph".into(),
             "read_temperature".into(), "set_temperature".into(),
             "spin_centrifuge".into(), "calibrate_ph".into(), "incubate".into(),
-            "propose_protocol".into(), "update_journal".into(), "analyze_series".into(),
+            "propose_protocol".into(), "analyze_series".into(),
         ],
         ResourceLimits::default(),
     )
@@ -285,7 +285,6 @@ pub(crate) fn make_sila2_tools(
     );
 
     register_analyze_series_tool(&mut r, journal.clone(), Arc::clone(&db), ws_tx);
-    register_journal_tool(&mut r, journal, db);
     register_doe_tool(&mut r);
     r
 }
@@ -673,7 +672,6 @@ pub(crate) fn make_sim_tools(
     );
 
     register_analyze_series_tool(&mut r, journal.clone(), Arc::clone(&db), ws_tx);
-    register_journal_tool(&mut r, journal, db);
     register_doe_tool(&mut r);
     r
 }
@@ -938,131 +936,6 @@ fn broadcast_finding(tx: &broadcast::Sender<String>, id: &str, statement: &str, 
     tx.send(msg.to_string()).ok();
 }
 
-/// Register the `update_journal` tool: LLM-driven operation log mutations.
-fn register_journal_tool(registry: &mut ToolRegistry, journal: Arc<Mutex<DiscoveryJournal>>, db: Arc<Db>) {
-    let jpath = journal_path();
-    registry.register(
-        ToolSpec {
-            name: "update_journal".into(),
-            description: "Record a quantitative finding or manage an execution directive in the \
-                persistent operation log. Actions: add_finding, add_hypothesis, \
-                confirm_hypothesis, reject_hypothesis, set_hypothesis_status.".into(),
-            parameters_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["add_finding", "add_hypothesis", "confirm_hypothesis",
-                                 "reject_hypothesis", "set_hypothesis_status"]
-                    },
-                    "statement":      {"type": "string"},
-                    "evidence":       {"type": "string"},
-                    "measurements": {
-                        "type": "array",
-                        "description": "Optional structured numeric measurements supporting this finding",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "parameter":   {"type": "string"},
-                                "value":       {"type": "number"},
-                                "unit":        {"type": "string"},
-                                "uncertainty": {"type": "number"}
-                            },
-                            "required": ["parameter", "value", "unit"]
-                        }
-                    },
-                    "hypothesis_id":  {"type": "string"},
-                    "status": {
-                        "type": "string",
-                        "enum": ["proposed", "testing", "confirmed", "rejected"]
-                    }
-                },
-                "required": ["action"]
-            }),
-            parameter_units: HashMap::new(),
-            instrument_uncertainty: None,
-        },
-        Box::new(move |p| {
-            let journal    = Arc::clone(&journal);
-            let jpath      = jpath.clone();
-            let db         = Arc::clone(&db);
-            let audit_path = audit_log_path().to_string_lossy().into_owned();
-            Box::pin(async move {
-                let action = p["action"].as_str().ok_or("missing action")?;
-                let mut j  = journal.lock().map_err(|_| "journal lock poisoned")?;
-                match action {
-                    "add_finding" => {
-                        let stmt     = p["statement"].as_str().ok_or("missing statement")?.to_string();
-                        let ev       = p["evidence"].as_str().unwrap_or("").to_string();
-                        let evidence = if ev.is_empty() { vec![] } else { vec![ev.clone()] };
-                        // Parse optional structured measurements from the LLM.
-                        let measurements: Vec<Measurement> = p.get("measurements")
-                            .and_then(|m| serde_json::from_value(m.clone()).ok())
-                            .unwrap_or_default();
-                        let measurements_json = serde_json::to_string(&measurements).unwrap_or_default();
-                        let id = j.add_finding(stmt.clone(), evidence, measurements, None, "llm");
-                        // Dual-write to SQLite.
-                        if let Some(f) = j.findings.last() { db.insert_finding(f); }
-                        j.save(&jpath).ok();
-                        emit_journal_finding(&audit_path, &id, &stmt, &ev, &measurements_json, "llm", None).ok();
-                        Ok(serde_json::json!({"recorded": "finding", "id": id, "statement": stmt}))
-                    }
-                    "add_hypothesis" => {
-                        let stmt = p["statement"].as_str().ok_or("missing statement")?.to_string();
-                        let id   = j.add_hypothesis(stmt.clone());
-                        // Dual-write to SQLite.
-                        if let Some(h) = j.hypotheses.last() { db.upsert_hypothesis(h); }
-                        j.save(&jpath).ok();
-                        emit_journal_hypothesis(&audit_path, &id, &stmt, "proposed", None).ok();
-                        Ok(serde_json::json!({"recorded": "hypothesis", "id": id, "statement": stmt}))
-                    }
-                    "confirm_hypothesis" => {
-                        let id   = p["hypothesis_id"].as_str().ok_or("missing hypothesis_id")?;
-                        let stmt = j.hypotheses.iter().find(|h| h.id == id)
-                            .map(|h| h.statement.clone()).unwrap_or_default();
-                        let ok = j.update_hypothesis_status(id, HypothesisStatus::Confirmed);
-                        // Dual-write to SQLite.
-                        if let Some(h) = j.hypotheses.iter().find(|h| h.id == id) { db.upsert_hypothesis(h); }
-                        j.save(&jpath).ok();
-                        emit_journal_hypothesis(&audit_path, id, &stmt, "confirmed", None).ok();
-                        Ok(serde_json::json!({"updated": ok, "status": "confirmed"}))
-                    }
-                    "reject_hypothesis" => {
-                        let id   = p["hypothesis_id"].as_str().ok_or("missing hypothesis_id")?;
-                        let stmt = j.hypotheses.iter().find(|h| h.id == id)
-                            .map(|h| h.statement.clone()).unwrap_or_default();
-                        let ok = j.update_hypothesis_status(id, HypothesisStatus::Rejected);
-                        // Dual-write to SQLite.
-                        if let Some(h) = j.hypotheses.iter().find(|h| h.id == id) { db.upsert_hypothesis(h); }
-                        j.save(&jpath).ok();
-                        emit_journal_hypothesis(&audit_path, id, &stmt, "rejected", None).ok();
-                        Ok(serde_json::json!({"updated": ok, "status": "rejected"}))
-                    }
-                    "set_hypothesis_status" => {
-                        let id         = p["hypothesis_id"].as_str().ok_or("missing hypothesis_id")?;
-                        let status_str = p["status"].as_str().ok_or("missing status")?;
-                        let status = match status_str {
-                            "proposed"  => HypothesisStatus::Proposed,
-                            "testing"   => HypothesisStatus::Testing,
-                            "confirmed" => HypothesisStatus::Confirmed,
-                            "rejected"  => HypothesisStatus::Rejected,
-                            s           => return Err(format!("unknown status: {s}")),
-                        };
-                        let stmt = j.hypotheses.iter().find(|h| h.id == id)
-                            .map(|h| h.statement.clone()).unwrap_or_default();
-                        let ok = j.update_hypothesis_status(id, status);
-                        // Dual-write to SQLite.
-                        if let Some(h) = j.hypotheses.iter().find(|h| h.id == id) { db.upsert_hypothesis(h); }
-                        j.save(&jpath).ok();
-                        emit_journal_hypothesis(&audit_path, id, &stmt, status_str, None).ok();
-                        Ok(serde_json::json!({"updated": ok}))
-                    }
-                    _ => Err(format!("unknown action: {action}")),
-                }
-            })
-        }),
-    );
-}
 
 /// Register `design_experiment`: generate a DoE run matrix.
 ///

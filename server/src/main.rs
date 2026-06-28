@@ -20,7 +20,6 @@ use axum::{
     Router,
 };
 use agent_runtime::approval_queue::PendingApprovalQueue;
-use agent_runtime::hypothesis::HypothesisManager;
 use agent_runtime::audit::{
     audit_log_path, audit_signer_from_env, emit_emergency_stop,
     emit_session_start, rotate_if_needed,
@@ -60,8 +59,6 @@ pub(crate) struct AppState {
     sila_clients: Option<Arc<SiLA2Clients>>,
     /// Reagent inventory and vessel contents.
     pub lab_state: Arc<Mutex<LabState>>,
-    /// Rich hypothesis state machine — shared with the orchestrator.
-    pub hypothesis_manager: Arc<Mutex<HypothesisManager>>,
     /// Operator protocol queue — the primary interface for directing lab execution.
     pub protocol_queue: Arc<Mutex<ProtocolQueue>>,
     /// Live execution-loop pacing status (wait-until-next-experiment, etc.).
@@ -478,7 +475,6 @@ pub(crate) fn build_router(approval_queue: Arc<PendingApprovalQueue>) -> Router<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_runtime::hypothesis::HypothesisManager;
     use axum::body::Body;
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use http_body_util::BodyExt;
@@ -555,7 +551,6 @@ mod tests {
             audit_log_path:     "/dev/null".into(),
             sila_clients:       None,
             lab_state:          Arc::new(Mutex::new(LabState::default())),
-            hypothesis_manager: Arc::new(Mutex::new(HypothesisManager::default())),
             protocol_queue:     Arc::new(Mutex::new(ProtocolQueue::load(
                                     &ProtocolQueue::default_path()
                                 ))),
@@ -929,14 +924,12 @@ mod tests {
 
     fn approval_ctx() -> agent_runtime::approval_queue::ApprovalContext {
         agent_runtime::approval_queue::ApprovalContext {
-            hypothesis:                 "absorbance scales with concentration".into(),
-            experiment_id:              "exp-gate-test".into(),
-            iteration:                  1,
-            risk_class:                 Some("LiquidHandling".into()),
-            recent_actions:             vec![],
-            journal_summary:            String::new(),
-            protocol_step:              None,
-            findings_before_experiment: 0,
+            directive:      "Calibrate spectrophotometer at 500 nm".into(),
+            experiment_id:  "exp-gate-test".into(),
+            iteration:      1,
+            risk_class:     Some("LiquidHandling".into()),
+            recent_actions: vec![],
+            protocol_step:  None,
         }
     }
 
@@ -1186,9 +1179,6 @@ async fn main() {
         audit_log_path: audit_path_str.clone(),
         sila_clients:   sila_clients.clone(),
         lab_state:      Arc::clone(&lab_state),
-        hypothesis_manager: Arc::new(Mutex::new(
-            sqlite_db.load_hypothesis_manager().unwrap_or_default()
-        )),
         protocol_queue: Arc::new(Mutex::new(ProtocolQueue::load(
             &ProtocolQueue::default_path()
         ))),
@@ -1213,10 +1203,9 @@ async fn main() {
         let db_for_loop        = Arc::clone(&sqlite_db);
         let sila_for_loop      = sila_clients.clone();
         let lab_for_loop       = Arc::clone(&state.lab_state);
-        let hyp_mgr_for_loop   = Arc::clone(&state.hypothesis_manager);
         let pq_for_loop        = Arc::clone(&state.protocol_queue);
         tokio::spawn(async move {
-            simulator::run_loop(sink, running.clone(), iteration, approval_queue, db_for_loop, sila_for_loop, lab_for_loop, hyp_mgr_for_loop, pq_for_loop).await;
+            simulator::run_loop(sink, running.clone(), iteration, approval_queue, db_for_loop, sila_for_loop, lab_for_loop, pq_for_loop).await;
             running.store(false, Ordering::SeqCst);
         });
     }

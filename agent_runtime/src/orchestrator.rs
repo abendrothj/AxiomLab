@@ -19,13 +19,11 @@ use crate::events::{
     StateTransitionEvent, ToolExecutionEvent,
 };
 use crate::experiment::{Experiment, Stage};
-use crate::hypothesis::{Evidence, EvidencePolicy, HypothesisManager, KeyStatistic};
 use crate::llm::{ChatMessage, LlmBackend};
 use crate::protocol::{Protocol, ProtocolPlan, ProtocolRunResult, StepOutcome};
 use crate::revocation::RevocationList;
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
-use std::sync::Mutex;
 use proof_artifacts::manifest::RiskClass;
 use proof_artifacts::policy::{ExecutionContext, RuntimePolicyEngine};
 use sha2::Digest;
@@ -104,37 +102,11 @@ pub struct OrchestratorConfig {
     /// Default: 300 (5 minutes). Only meaningful when `approval_queue` is `Some`.
     pub approval_timeout_secs: u64,
 
-    /// Pre-formatted operation log summary injected into every approval
-    /// context this experiment produces.  Set by the server layer from the
-    /// persisted log before each experiment; not touched by the LLM.
-    pub journal_summary: String,
-
-    /// Number of confirmed findings in the journal at the start of this
-    /// experiment.  Lets the operator compare "before" vs "current" to judge
-    /// whether the agent has made progress.
-    pub findings_at_start: u32,
-
-    /// Per-instrument calibration validity at the start of this experiment.
+    /// Per-instrument calibration validity at the start of this run.
     /// `tool_name → (is_calibrated, is_valid_now)`.
-    /// Computed by the server from `DiscoveryJournal.last_calibration_for()`.
+    /// Computed by the server from the operations log.
     /// Empty map means no calibration checking (graceful degradation).
     pub calibration_status: std::collections::HashMap<String, (bool, bool)>,
-
-    /// Require a fresh system-generated quantitative finding before accepting a
-    /// `{done:true}` completion. The simulator enables this so local models cannot
-    /// end a run by asserting a conclusion without first calling `analyze_series`.
-    pub require_system_finding_for_completion: bool,
-
-    /// Optional shared hypothesis manager.
-    ///
-    /// When set, the orchestrator:
-    ///  1. Injects the active hypothesis context into every system prompt.
-    ///  2. Records evidence from protocol conclusions and done signals.
-    pub hypothesis_manager: Option<Arc<Mutex<HypothesisManager>>>,
-
-    /// Policy governing auto-transitions in the hypothesis state machine.
-    /// Only used when `hypothesis_manager` is `Some`.
-    pub evidence_policy: EvidencePolicy,
 }
 
 impl Default for OrchestratorConfig {
@@ -154,12 +126,7 @@ impl Default for OrchestratorConfig {
             event_sink: None,
             approval_queue: None,
             approval_timeout_secs: 300,
-            journal_summary: String::new(),
-            findings_at_start: 0,
             calibration_status: std::collections::HashMap::new(),
-            require_system_finding_for_completion: false,
-            hypothesis_manager: None,
-            evidence_policy: EvidencePolicy::default(),
         }
     }
 }
@@ -270,7 +237,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
     }
 
-    /// Build the system prompt from tool specs and hypothesis context.
+    /// Build the system prompt from tool specs.
     fn system_prompt(&self) -> String {
         let tool_descriptions: Vec<String> = self
             .tools
@@ -293,21 +260,17 @@ impl<L: LlmBackend> Orchestrator<L> {
             })
             .collect();
 
-        let hyp_ctx = self.config.hypothesis_manager
-            .as_ref()
-            .map(|m| format!("\n\n{}", m.lock().unwrap().context_block()))
-            .unwrap_or_default();
-
         format!(
-            "You are an autonomous lab scientist agent in AxiomLab.\n\
+            "You are an autonomous lab execution agent in AxiomLab.\n\
+             Every action you propose is validated against formally verified safety bounds, \
+             gated by the operator approval queue, and written to the tamper-evident audit chain.\n\
              You control physical lab hardware through these tools:\n\
-             {}{}\n\n\
+             {}\n\n\
              Respond with JSON when you want to call a tool:\n\
              {{\"tool\": \"<name>\", \"params\": {{...}}}}\n\n\
-             When generating experiment code, wrap it in ```rust ... ```.\n\
-             When you have a conclusion, respond with: {{\"done\": true, \"summary\": \"...\"}}",
+             When generating protocol code, wrap it in ```rust ... ```.\n\
+             When the directive is complete, respond with: {{\"done\": true, \"summary\": \"...\"}}",
             tool_descriptions.join("\n"),
-            hyp_ctx,
         )
     }
 
@@ -316,7 +279,7 @@ impl<L: LlmBackend> Orchestrator<L> {
         &self,
         experiment: &mut Experiment,
     ) -> Result<(), OrchestratorError> {
-        info!(id = %experiment.id, hypothesis = %experiment.hypothesis, "starting experiment");
+        info!(id = %experiment.id, directive = %experiment.directive, "starting protocol run");
 
         // Emit the initial Proposed state.
         self.emit_transition(experiment, Stage::Proposed);
@@ -329,21 +292,16 @@ impl<L: LlmBackend> Orchestrator<L> {
             ChatMessage {
                 role: "user".into(),
                 content: format!(
-                    "Design and execute an experiment to test this hypothesis: {}",
-                    experiment.hypothesis
+                    "Execute this protocol directive: {}",
+                    experiment.directive
                 ),
             },
         ];
 
         let mut consecutive_parse_failures: u32 = 0;
-        // Verified record of tool calls dispatched this experiment — used to
-        // give scientists trustworthy context when approving high-risk actions.
+        // Verified record of tool calls dispatched this run — used to give
+        // operators trustworthy context when approving high-risk actions.
         let mut recent_actions: Vec<(String, serde_json::Value)> = Vec::new();
-        let mut system_findings_this_experiment: u32 = 0;
-        // How many times the model tried to finish before producing a real
-        // finding. First time → concrete steer; second time → auto-scaffold a
-        // measurement sweep so a weak model can't stall the loop into max-iters.
-        let mut premature_completions: u32 = 0;
 
         for iteration in 0..self.config.max_iterations {
             info!(iteration, stage = ?experiment.stage, "orchestrator step");
@@ -378,24 +336,6 @@ impl<L: LlmBackend> Orchestrator<L> {
                 self.try_propose_protocol(&response).await
             {
                 consecutive_parse_failures = 0;
-                // Count any source=system findings recorded by analyze_series steps
-                // inside the protocol so they satisfy the completion guard.
-                for step in &protocol_result.step_results {
-                    if step.tool == "analyze_series" {
-                        if let Some(out) = &step.result {
-                            system_findings_this_experiment += recorded_finding_count(out);
-                        }
-                    }
-                }
-                // Hook A — record protocol conclusion as hypothesis evidence.
-                let key_stat = extract_key_statistic(protocol_result.doe_anova.as_ref());
-                let run_id_str = protocol_result.run_id.to_string();
-                self.record_hypothesis_evidence(
-                    experiment,
-                    &protocol_result.conclusion,
-                    Some(run_id_str.as_str()),
-                    key_stat,
-                );
                 let result_json =
                     serde_json::to_string(&protocol_result).unwrap_or_default();
                 history.push(ChatMessage {
@@ -407,15 +347,13 @@ impl<L: LlmBackend> Orchestrator<L> {
 
             // Try to parse as a tool call.
             let approval_ctx = ApprovalContext {
-                hypothesis:                 experiment.hypothesis.clone(),
-                experiment_id:              experiment.id.clone(),
+                directive:     experiment.directive.clone(),
+                experiment_id: experiment.id.clone(),
                 iteration,
-                risk_class:                 None, // filled in by try_tool_call from the manifest
-                recent_actions:             recent_actions.iter().rev().take(5).cloned().collect::<Vec<_>>()
-                                                .into_iter().rev().collect(),
-                journal_summary:            self.config.journal_summary.clone(),
-                protocol_step:              None, // not in a structured protocol
-                findings_before_experiment: self.config.findings_at_start,
+                risk_class:    None, // filled in by try_tool_call from the manifest
+                recent_actions: recent_actions.iter().rev().take(5).cloned().collect::<Vec<_>>()
+                                    .into_iter().rev().collect(),
+                protocol_step: None, // not in a structured protocol
             };
             let cot = extract_reasoning(&response);
             if let Some(tool_result) = self.try_tool_call(&response, Some(approval_ctx), cot).await {
@@ -439,9 +377,6 @@ impl<L: LlmBackend> Orchestrator<L> {
                     self.emit_transition(experiment, prev);
                 }
                 let result_json = serde_json::to_string(&tool_result).unwrap_or_default();
-                if tool_result.name == "analyze_series" {
-                    system_findings_this_experiment += recorded_finding_count(&tool_result.output);
-                }
                 history.push(ChatMessage {
                     role: "user".into(),
                     content: format!("Tool result: {result_json}"),
@@ -451,59 +386,6 @@ impl<L: LlmBackend> Orchestrator<L> {
 
             // Check for completion signal.
             if let Some(summary) = parse_completion_summary(&response) {
-                if self.config.require_system_finding_for_completion
-                    && system_findings_this_experiment == 0
-                {
-                    premature_completions += 1;
-                    if premature_completions >= 2 {
-                        // The model keeps trying to quit without doing the work.
-                        // Run a deterministic measurement sweep so the loop makes
-                        // real progress instead of stalling into max-iterations.
-                        warn!(
-                            iteration,
-                            premature_completions,
-                            "Auto-scaffolding a measurement series after repeated premature completion"
-                        );
-                        let (recorded, result_json) =
-                            self.bootstrap_finding_sweep(experiment).await;
-                        system_findings_this_experiment += recorded;
-                        if experiment.stage == Stage::Proposed {
-                            let prev = experiment.stage;
-                            experiment.advance(Stage::Executing)?;
-                            self.emit_transition(experiment, prev);
-                        }
-                        history.push(ChatMessage {
-                            role: "user".into(),
-                            content: format!(
-                                "You tried to finish without collecting data, so the runtime \
-                                 auto-ran a volume→absorbance sweep on your behalf and called \
-                                 analyze_series. Result: {result_json}\n\
-                                 {} source=system finding(s) are now recorded. Build on this \
-                                 (e.g. update_journal with an interpretation, or run another \
-                                 series) and only then finish with \
-                                 {{\"done\": true, \"summary\": \"...\"}}.",
-                                recorded
-                            ),
-                        });
-                        continue;
-                    }
-                    warn!(
-                        iteration,
-                        "LLM attempted completion before any system-generated finding"
-                    );
-                    history.push(ChatMessage {
-                        role: "user".into(),
-                        content: "Completion rejected: this experiment has not produced a \
-                                  source=system quantitative finding yet. Collect a REAL series \
-                                  before finishing. Concretely, repeat for 6 increasing volumes:\n\
-                                  {\"tool\": \"dispense\", \"params\": {\"vessel_id\": \"beaker_A\", \"volume_ul\": 1000}}\n\
-                                  {\"tool\": \"read_absorbance\", \"params\": {\"vessel_id\": \"beaker_A\", \"wavelength_nm\": 500}}\n\
-                                  then fit them:\n\
-                                  {\"tool\": \"analyze_series\", \"params\": {\"data\": [{\"x\": 1000, \"y\": <reading1>}, {\"x\": 2000, \"y\": <reading2>}], \"x_label\": \"volume_ul\", \"y_label\": \"absorbance_AU\", \"model\": \"linear\"}}\n\
-                                  Only finish after analyze_series reports recorded_findings.".into(),
-                    });
-                    continue;
-                }
                 // Advance through any remaining stages to Completed.
                 if experiment.stage == Stage::Proposed {
                     let prev = experiment.stage;
@@ -520,20 +402,17 @@ impl<L: LlmBackend> Orchestrator<L> {
                     experiment.advance(Stage::Completed)?;
                     self.emit_transition(experiment, prev);
                 }
-                // Record evidence for linked hypothesis (Hook B — done signal).
-                self.record_hypothesis_evidence(experiment, &summary, None, None);
-
-                // Emit a Lab Notebook entry with the AI's documented finding.
+                // Emit a conclusion event so the dashboard can update.
                 if let Some(sink) = &self.config.event_sink {
                     sink.on_notebook_entry(NotebookEntryEvent {
                         experiment_id: experiment.id.clone(),
                         entry: summary,
                         timestamp_ms: unix_ms(),
                         tool_that_triggered: "analysis".to_owned(),
-                        outcome: "discovery".to_owned(),
+                        outcome: "completed".to_owned(),
                     });
                 }
-                info!(id = %experiment.id, "experiment completed");
+                info!(id = %experiment.id, "protocol run completed");
                 return Ok(());
             }
 
@@ -581,89 +460,6 @@ impl<L: LlmBackend> Orchestrator<L> {
     /// runs. Every call goes through the full validation pipeline + audit log.
     ///
     /// Returns `(findings_recorded, analyze_series_result_json)`.
-    async fn bootstrap_finding_sweep(&self, experiment: &Experiment) -> (u32, String) {
-        const VESSEL: &str = "beaker_A";
-        const WAVELENGTH_NM: f64 = 500.0;
-        const STEP_UL: f64 = 900.0; // safely inside the verified dispense bound [0.5, 1000]
-        const LEVELS: u32 = 6;
-
-        let actx = || ApprovalContext {
-            hypothesis:                 experiment.hypothesis.clone(),
-            experiment_id:              experiment.id.clone(),
-            iteration:                  0,
-            risk_class:                 None,
-            recent_actions:             Vec::new(),
-            journal_summary:            self.config.journal_summary.clone(),
-            protocol_step:              None,
-            findings_before_experiment: self.config.findings_at_start,
-        };
-
-        let mut data: Vec<serde_json::Value> = Vec::new();
-        let mut dispensed = 0.0_f64;
-        for _ in 0..LEVELS {
-            let d = self
-                .execute_tool_direct(
-                    "dispense",
-                    // The registry validates `dispense` against the lab schema
-                    // (needs pump_id) but executes via the sim vessel handler
-                    // (uses vessel_id); supply both so it passes and moves fluid.
-                    serde_json::json!({
-                        "pump_id":   "pump-A",
-                        "vessel_id": VESSEL,
-                        "volume_ul": STEP_UL,
-                    }),
-                    Some(actx()),
-                )
-                .await;
-            if !d.success {
-                warn!(output = %d.output, "bootstrap sweep: dispense rejected, stopping early");
-                break;
-            }
-            dispensed += STEP_UL;
-            let r = self
-                .execute_tool_direct(
-                    "read_absorbance",
-                    serde_json::json!({ "vessel_id": VESSEL, "wavelength_nm": WAVELENGTH_NM }),
-                    Some(actx()),
-                )
-                .await;
-            if let Some(y) = r.output.get("absorbance").and_then(|v| v.as_f64()) {
-                data.push(serde_json::json!({ "x": dispensed, "y": y }));
-            }
-        }
-
-        let analysis = self
-            .execute_tool_direct(
-                "analyze_series",
-                serde_json::json!({
-                    "data":    data,
-                    "x_label": "volume_ul",
-                    "y_label": "absorbance_AU",
-                    "model":   "linear",
-                }),
-                Some(actx()),
-            )
-            .await;
-        let recorded = recorded_finding_count(&analysis.output);
-
-        // Restore vessel state so repeated scaffolds don't accumulate volume.
-        let mut remaining = dispensed;
-        while remaining > 0.0 {
-            let chunk = remaining.min(STEP_UL);
-            let _ = self
-                .execute_tool_direct(
-                    "aspirate",
-                    serde_json::json!({ "vessel_id": VESSEL, "volume_ul": chunk }),
-                    Some(actx()),
-                )
-                .await;
-            remaining -= chunk;
-        }
-
-        let result_json = serde_json::to_string(&analysis.output).unwrap_or_default();
-        (recorded, result_json)
-    }
-
     /// Check if the LLM response is a `propose_protocol` call.
     ///
     /// Returns `Some(ProtocolRunResult)` if the response was a valid protocol
@@ -755,11 +551,10 @@ impl<L: LlmBackend> Orchestrator<L> {
         let mut messages = vec![ChatMessage {
             role: "system".into(),
             content: format!(
-                "You are observing the execution of protocol '{}'. \
-                 Hypothesis: {}\n\
+                "You are observing the execution of protocol '{}'.\n\
                  You will see each step result in turn. After all steps, \
-                 provide a scientific conclusion as plain text.",
-                protocol.name, protocol.hypothesis
+                 provide a concise protocol conclusion as plain text.",
+                protocol.name
             ),
         }];
 
@@ -779,19 +574,17 @@ impl<L: LlmBackend> Orchestrator<L> {
                 info!(step = i, replicate = rep, tool = %step.tool, "executing protocol step");
 
                 let step_actx = ApprovalContext {
-                    hypothesis:                 protocol.hypothesis.clone(),
-                    experiment_id:              protocol.id.to_string(),
-                    iteration:                  (rep * step_count + i) as u32,
-                    risk_class:                 None,
-                    recent_actions:             Vec::new(),
-                    journal_summary:            self.config.journal_summary.clone(),
-                    protocol_step:              Some(ProtocolStepInfo {
+                    directive:     protocol.name.clone(),
+                    experiment_id: protocol.id.to_string(),
+                    iteration:     (rep * step_count + i) as u32,
+                    risk_class:    None,
+                    recent_actions: Vec::new(),
+                    protocol_step: Some(ProtocolStepInfo {
                         protocol_name: protocol.name.clone(),
                         step_index:    i,
                         step_count,
                         description:   step.description.clone(),
                     }),
-                    findings_before_experiment: self.config.findings_at_start,
                 };
                 let result = self.execute_tool_direct(
                     &step.tool,
@@ -1039,11 +832,9 @@ impl<L: LlmBackend> Orchestrator<L> {
             role: "system".into(),
             content: format!(
                 "You are resuming protocol '{}' after an interruption. \
-                 Hypothesis: {}\n\
                  The following steps were already completed before the interruption. \
                  Continue from step {}.",
                 protocol.name,
-                protocol.hypothesis,
                 recovery.last_completed_step + 1,
             ),
         }];
@@ -1068,19 +859,17 @@ impl<L: LlmBackend> Orchestrator<L> {
             info!(step = i, tool = %step.tool, "executing resumed protocol step");
 
             let step_actx = ApprovalContext {
-                hypothesis:                 protocol.hypothesis.clone(),
-                experiment_id:              protocol.id.to_string(),
-                iteration:                  (recovery.replicate_index * step_count + i) as u32,
-                risk_class:                 None,
-                recent_actions:             Vec::new(),
-                journal_summary:            self.config.journal_summary.clone(),
-                protocol_step:              Some(ProtocolStepInfo {
+                directive:     protocol.name.clone(),
+                experiment_id: protocol.id.to_string(),
+                iteration:     (recovery.replicate_index * step_count + i) as u32,
+                risk_class:    None,
+                recent_actions: Vec::new(),
+                protocol_step: Some(ProtocolStepInfo {
                     protocol_name: protocol.name.clone(),
                     step_index:    i,
                     step_count,
                     description:   step.description.clone(),
                 }),
-                findings_before_experiment: self.config.findings_at_start,
             };
 
             let result = self.execute_tool_direct(&step.tool, step.params.clone(), Some(step_actx)).await;
@@ -1817,38 +1606,6 @@ impl<L: LlmBackend> Orchestrator<L> {
         }
     }
 
-    /// Record a piece of evidence against the hypothesis linked to `experiment`.
-    ///
-    /// No-op when:
-    /// - `config.hypothesis_manager` is `None`
-    /// - `experiment.hypothesis_id` is `None`
-    /// - the hypothesis is already settled (evidence is silently dropped)
-    fn record_hypothesis_evidence(
-        &self,
-        experiment:  &Experiment,
-        conclusion:  &str,
-        run_id:      Option<&str>,
-        key_stat:    Option<KeyStatistic>,
-    ) {
-        let Some(ref mgr_lock) = self.config.hypothesis_manager else { return };
-        let Some(ref hyp_id) = experiment.hypothesis_id else { return };
-
-        let supports = conclusion_supports_hypothesis(conclusion);
-        let ev = Evidence {
-            id:              uuid::Uuid::new_v4().to_string(),
-            experiment_id:   experiment.id.clone(),
-            run_id:          run_id.map(str::to_owned),
-            supports,
-            summary:         conclusion.chars().take(500).collect(),
-            key_statistic:   key_stat,
-            recorded_at_utc: unix_secs() as i64,
-        };
-        let mut mgr = mgr_lock.lock().unwrap();
-        if let Err(e) = mgr.record_evidence(hyp_id, ev, &self.config.evidence_policy, unix_secs() as i64) {
-            info!(hyp_id, error = %e, "hypothesis evidence not recorded");
-        }
-    }
-
 }
 
 // ── Event utilities ───────────────────────────────────────────────────────────
@@ -1858,51 +1615,6 @@ fn unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-/// Extract the most diagnostically informative statistic from a DoE ANOVA result.
-///
-/// Returns the p-value if available (most informative), falling back to the
-/// F-statistic.  Returns `None` when the result is absent.
-fn extract_key_statistic(doe_anova: Option<&crate::protocol::DoeAnovaResult>) -> Option<KeyStatistic> {
-    let r = doe_anova?;
-    // Prefer p_value (most interpretable for the hypothesis policy).
-    Some(KeyStatistic {
-        name:      "p_value".into(),
-        value:     r.p_value,
-        threshold: Some(0.05),
-    })
-}
-
-/// Heuristic: does the conclusion text suggest the hypothesis is supported?
-///
-/// Returns `true` when:
-/// - ANOVA p_value < 0.05 is mentioned (positive signal), OR
-/// - The text does not contain negative language ("no significant", "failed",
-///   "rejected", "inconclusive", "not significant").
-fn conclusion_supports_hypothesis(conclusion: &str) -> bool {
-    let lower = conclusion.to_lowercase();
-    let negative_phrases = [
-        "no significant",
-        "not significant",
-        "failed",
-        "rejected",
-        "inconclusive",
-        "no effect",
-    ];
-    let has_negative = negative_phrases.iter().any(|p| lower.contains(p));
-    let has_positive_p = lower.contains("p < 0.05")
-        || lower.contains("p=0.0")
-        || lower.contains("p = 0.0")
-        || lower.contains("significant effect");
-    has_positive_p || !has_negative
 }
 
 /// Extract a human-readable target identifier from tool params.
@@ -1969,15 +1681,6 @@ fn parse_completion_summary(text: &str) -> Option<String> {
             .map(str::to_owned);
     }
     None
-}
-
-/// Count system findings reported by the `analyze_series` tool result.
-fn recorded_finding_count(output: &serde_json::Value) -> u32 {
-    output
-        .get("recorded_findings")
-        .and_then(|v| v.as_array())
-        .map(|findings| findings.len() as u32)
-        .unwrap_or(0)
 }
 
 // ── LLM response sanitization ─────────────────────────────────────────────────
@@ -2258,15 +1961,4 @@ mod tests {
         assert!(parse_completion_summary(r#"{"conclusion": "unsupported"}"#).is_none());
     }
 
-    #[test]
-    fn recorded_finding_count_reads_analyze_series_metadata() {
-        let output = serde_json::json!({
-            "recorded_findings": [
-                {"id": "finding-1", "model": "linear"},
-                {"id": "finding-2", "model": "hill"}
-            ]
-        });
-        assert_eq!(recorded_finding_count(&output), 2);
-        assert_eq!(recorded_finding_count(&serde_json::json!({})), 0);
-    }
 }

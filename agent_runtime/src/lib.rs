@@ -26,7 +26,6 @@ pub mod hardware;
 pub mod lab_state;
 pub mod reconciler;
 pub mod ph_model;
-pub mod hypothesis;
 pub mod units;
 pub mod notifications;
 pub mod kms_signer;

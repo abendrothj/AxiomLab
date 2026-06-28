@@ -29,15 +29,13 @@ pub struct ProtocolStep {
     pub description: String,
 }
 
-/// A structured experimental protocol produced by the runtime from a [`ProtocolPlan`].
+/// A structured protocol produced by the runtime from a [`ProtocolPlan`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Protocol {
     /// Unique run identifier assigned at creation time.
     pub id: Uuid,
-    /// Short name for this protocol (e.g. "Dilution Series A").
+    /// Short name for this protocol (e.g. "Spectrophotometer Calibration — 500 nm").
     pub name: String,
-    /// The LLM's scientific hypothesis this protocol is designed to test.
-    pub hypothesis: String,
     /// Ordered list of tool calls to execute.
     pub steps: Vec<ProtocolStep>,
     /// Unix timestamp (seconds) when this protocol was created.
@@ -54,16 +52,14 @@ pub struct Protocol {
     pub doe_design_json: Option<String>,
 }
 
-/// The JSON shape the LLM emits when calling `propose_protocol`.
+/// The JSON shape the agent emits when calling `propose_protocol`.
 ///
 /// Validated and converted into a [`Protocol`] before execution begins.
-/// This is the LLM boundary — only typed, validated data crosses it.
+/// This is the agent boundary — only typed, validated data crosses it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolPlan {
     /// Short protocol name.
     pub name: String,
-    /// Scientific hypothesis being tested.
-    pub hypothesis: String,
     /// Ordered steps to execute (max [`MAX_PROTOCOL_STEPS`]).
     pub steps: Vec<ProtocolStep>,
     /// Number of times to run the full step sequence for replication (default 1, max 10).
@@ -90,9 +86,6 @@ impl ProtocolPlan {
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty() {
             return Err("protocol name must be non-empty".into());
-        }
-        if self.hypothesis.is_empty() {
-            return Err("protocol hypothesis must be non-empty".into());
         }
         if self.steps.is_empty() {
             return Err("protocol must have at least one step".into());
@@ -146,7 +139,6 @@ impl ProtocolPlan {
         Protocol {
             id: Uuid::new_v4(),
             name: self.name,
-            hypothesis: self.hypothesis,
             steps: self.steps,
             created_at_utc: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -406,10 +398,6 @@ pub fn propose_protocol_schema() -> serde_json::Value {
                 "type": "string",
                 "description": "Short name for this protocol (e.g. 'Dilution Series A')"
             },
-            "hypothesis": {
-                "type": "string",
-                "description": "The scientific hypothesis this protocol is designed to test"
-            },
             "steps": {
                 "type": "array",
                 "maxItems": MAX_PROTOCOL_STEPS,
@@ -449,7 +437,7 @@ pub fn propose_protocol_schema() -> serde_json::Value {
                 "description": "Optional: paste the design_json string returned by design_experiment here to link this protocol to the DoE run matrix. The runtime will run one-way ANOVA automatically at conclusion."
             }
         },
-        "required": ["name", "hypothesis", "steps"]
+        "required": ["name", "steps"]
     })
 }
 
@@ -462,7 +450,6 @@ mod tests {
     fn minimal_plan() -> ProtocolPlan {
         ProtocolPlan {
             name: "Test Protocol".into(),
-            hypothesis: "Dispense increases volume".into(),
             steps: vec![ProtocolStep {
                 tool: "dispense".into(),
                 params: serde_json::json!({"pump_id": "beaker_A", "volume_ul": 100.0}),

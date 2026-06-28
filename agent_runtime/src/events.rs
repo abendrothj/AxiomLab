@@ -47,24 +47,24 @@ pub struct LlmTokenEvent {
     pub token: String,
 }
 
-/// Fired when the AI documents a finding in its Lab Notebook.
+/// Fired when a protocol run or directive execution concludes.
 ///
 /// Emitted after the `Analysing → Completed` transition when a `"done": true`
-/// summary is parsed from the LLM response.
+/// summary is parsed from the agent response.
 #[derive(Clone, Serialize)]
 pub struct NotebookEntryEvent {
-    /// The experiment this finding belongs to.
+    /// The run (experiment) this conclusion belongs to.
     pub experiment_id: String,
-    /// The AI's prose finding / conclusion.
+    /// The agent's prose conclusion / summary.
     pub entry: String,
     /// Unix timestamp in milliseconds.
     pub timestamp_ms: u64,
-    /// Name of the tool call that triggered this analysis.
+    /// Name of the tool call that triggered this conclusion.
     pub tool_that_triggered: String,
     /// Outcome classification.
-    /// - `"discovery"` — a novel relationship or interaction was found
-    /// - `"rejection"` — the proof engine rejected a hypothesis
-    /// - `"inconclusive"` — ambiguous result; more data needed
+    /// - `"completed"` — all protocol steps succeeded and were audited
+    /// - `"rejected"` — the safety pipeline blocked this run
+    /// - `"failed"`   — execution encountered an unrecoverable error
     pub outcome: String,
 }
 
