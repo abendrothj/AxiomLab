@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { QueuedProtocol, QueueStatus } from "../types";
+import { QueuedProtocol, QueueStatus, AgendaItem, AgendaResponse } from "../types";
 
 const API = import.meta.env.DEV ? "http://localhost:3000/api" : "/api";
 
@@ -8,6 +8,14 @@ const STATUS_COLORS: Record<QueueStatus, string> = {
   running:   "#fd7e14",
   completed: "#00ff9d",
   failed:    "#ff3b3b",
+};
+
+const AGENDA_COLORS: Record<string, string> = {
+  pending:   "#2a4a5a",
+  proposed:  "#a78bfa",
+  testing:   "#fd7e14",
+  completed: "#00ff9d",
+  rejected:  "#ff3b3b",
 };
 
 function timeAgo(secs: number): string {
@@ -19,6 +27,7 @@ function timeAgo(secs: number): string {
 
 export default function QueuePanel() {
   const [items, setItems]           = useState<QueuedProtocol[]>([]);
+  const [agenda, setAgenda]         = useState<AgendaResponse | null>(null);
   const [loading, setLoading]       = useState(true);
   const [statement, setStatement]   = useState("");
   const [priority, setPriority]     = useState(100);
@@ -26,13 +35,14 @@ export default function QueuePanel() {
   const [submitMsg, setSubmitMsg]   = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    fetch(`${API}/queue`)
-      .then((r) => r.json())
-      .then((data) => {
-        setItems(data.items ?? []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    Promise.all([
+      fetch(`${API}/queue`).then((r) => r.json()),
+      fetch(`${API}/agenda`).then((r) => r.json()),
+    ]).then(([queueData, agendaData]) => {
+      setItems(queueData.items ?? []);
+      setAgenda(agendaData);
+      setLoading(false);
+    }).catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -195,14 +205,34 @@ export default function QueuePanel() {
         </div>
       </div>
 
-      {/* Right: history */}
+      {/* Right: commissioning agenda + history */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <div style={{ padding: "20px 24px 14px", borderBottom: "1px solid #0e1520", flexShrink: 0 }}>
+        {/* Agenda */}
+        <div style={{ flexShrink: 0, borderBottom: "1px solid #0e1520" }}>
+          <div style={{ padding: "20px 24px 14px", display: "flex", alignItems: "baseline", gap: 12 }}>
+            <Label>COMMISSIONING AGENDA</Label>
+            {agenda && (
+              <span style={{ fontSize: 9, color: agenda.completed_count === agenda.total_count ? "#00ff9d" : "#2a4a6a", letterSpacing: "0.08em" }}>
+                {agenda.completed_count}/{agenda.total_count} complete
+              </span>
+            )}
+          </div>
+          {agenda && (
+            <div style={{ padding: "0 24px 16px", display: "flex", flexDirection: "column", gap: 6 }}>
+              {agenda.items.map((item) => (
+                <AgendaRow key={item.key} item={item} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* History */}
+        <div style={{ padding: "16px 24px 10px", borderBottom: "1px solid #080e16", flexShrink: 0 }}>
           <Label>EXECUTION HISTORY</Label>
         </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: "16px 24px" }}>
+        <div style={{ flex: 1, overflowY: "auto", padding: "12px 24px" }}>
           {history.length === 0 ? (
-            <div style={{ fontSize: 10, color: "#1a3040", padding: "24px 0" }}>
+            <div style={{ fontSize: 10, color: "#1a3040", padding: "16px 0" }}>
               No completed executions yet.
             </div>
           ) : (
@@ -217,6 +247,33 @@ export default function QueuePanel() {
 }
 
 // ── Subcomponents ─────────────────────────────────────────────────────────────
+
+function AgendaRow({ item }: { item: AgendaItem }) {
+  const color = AGENDA_COLORS[item.status] ?? "#2a4a5a";
+  // Extract the short human label (everything before the first "[" bracket)
+  const shortLabel = item.statement.split("[")[0].trim().replace(/—.*$/, "").trim();
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{
+        width: 6, height: 6, borderRadius: "50%",
+        background: color,
+        flexShrink: 0,
+        boxShadow: item.status === "testing" ? `0 0 6px ${color}88` : "none",
+      }} />
+      <span style={{ fontSize: 10, color: item.status === "completed" ? "#2a6a4a" : item.status === "pending" ? "#1a3040" : "#6a8a9a", flex: 1, lineHeight: 1.5 }}>
+        {shortLabel}
+      </span>
+      <span style={{
+        fontSize: 8, letterSpacing: "0.1em", color: color,
+        background: `${color}12`, border: `1px solid ${color}28`,
+        borderRadius: 2, padding: "1px 5px", flexShrink: 0,
+      }}>
+        {item.status.toUpperCase()}
+      </span>
+    </div>
+  );
+}
 
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -240,6 +297,7 @@ function QueueCard({ item, onRemove }: { item: QueuedProtocol; onRemove: (id: st
       border: `1px solid ${color}1a`,
       borderLeft: `3px solid ${color}`,
       borderRadius: "0 4px 4px 0",
+      marginBottom: 8,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <span style={{

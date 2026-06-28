@@ -157,6 +157,22 @@ export interface QueuedProtocol {
   result_summary?: string;
 }
 
+// ── Commissioning agenda types ────────────────────────────────────
+
+export type AgendaStatus = "pending" | "proposed" | "testing" | "completed" | "rejected";
+
+export interface AgendaItem {
+  key: string;
+  statement: string;
+  status: AgendaStatus;
+}
+
+export interface AgendaResponse {
+  items: AgendaItem[];
+  completed_count: number;
+  total_count: number;
+}
+
 // ── Stage display helpers ─────────────────────────────────────────
 
 export type Stage =
