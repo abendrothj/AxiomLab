@@ -584,7 +584,7 @@ impl<L: LlmBackend> Orchestrator<L> {
     async fn bootstrap_finding_sweep(&self, experiment: &Experiment) -> (u32, String) {
         const VESSEL: &str = "beaker_A";
         const WAVELENGTH_NM: f64 = 500.0;
-        const STEP_UL: f64 = 1000.0;
+        const STEP_UL: f64 = 900.0; // safely inside the verified dispense bound [0.5, 1000]
         const LEVELS: u32 = 6;
 
         let actx = || ApprovalContext {
@@ -604,7 +604,14 @@ impl<L: LlmBackend> Orchestrator<L> {
             let d = self
                 .execute_tool_direct(
                     "dispense",
-                    serde_json::json!({ "vessel_id": VESSEL, "volume_ul": STEP_UL }),
+                    // The registry validates `dispense` against the lab schema
+                    // (needs pump_id) but executes via the sim vessel handler
+                    // (uses vessel_id); supply both so it passes and moves fluid.
+                    serde_json::json!({
+                        "pump_id":   "pump-A",
+                        "vessel_id": VESSEL,
+                        "volume_ul": STEP_UL,
+                    }),
                     Some(actx()),
                 )
                 .await;
