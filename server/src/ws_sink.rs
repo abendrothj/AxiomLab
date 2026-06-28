@@ -11,7 +11,7 @@ use crate::discovery::{journal_path, DiscoveryJournal};
 
 // ── Loop status (pacing transparency) ─────────────────────────────────────────
 
-/// Live, viewer-facing description of what the exploration loop is doing between
+/// Live, viewer-facing description of what the execution loop is doing between
 /// experiments. Broadcast over WS as `loop_status` and seeded into the snapshot
 /// so a freshly loaded page immediately shows any active wait.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -116,7 +116,7 @@ impl EventBuffer {
 
 /// Broadcasts all orchestrator events to every connected WebSocket client,
 /// buffers them in memory for /api/history, and persists protocol conclusions
-/// to the discovery journal (JSON + SQLite).
+/// to the operation log (JSON + SQLite).
 pub struct WebSocketSink {
     pub tx:       broadcast::Sender<String>,
     pub log:      Arc<Mutex<ExplorationLog>>,
@@ -193,7 +193,7 @@ impl EventSink for WebSocketSink {
     }
 
     fn on_protocol_conclusion(&self, event: ProtocolConclusionEvent) {
-        // Persist to discovery journal (JSON + SQLite).
+        // Persist to operation log (JSON + SQLite).
         {
             let mut journal = self.journal.lock().unwrap();
             journal.record_run(
@@ -212,7 +212,7 @@ impl EventSink for WebSocketSink {
             }
             let path = journal_path();
             if let Err(e) = journal.save(&path) {
-                tracing::warn!("Failed to save discovery journal: {e}");
+                tracing::warn!("Failed to save operation log: {e}");
             }
         }
 

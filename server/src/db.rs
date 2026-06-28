@@ -1,4 +1,4 @@
-//! SQLite persistence layer for the discovery journal.
+//! SQLite persistence layer for the operation log.
 //!
 //! # Rationale
 //! All journal state previously lived in a `Mutex<DiscoveryJournal>` and a

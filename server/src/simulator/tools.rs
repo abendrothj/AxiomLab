@@ -25,7 +25,7 @@ const AUTO_FINDING_R2_THRESHOLD: f64 = 0.80;
 /// Minimum number of distinct data points required before `analyze_series` will
 /// auto-record a system finding. A line through 2 points is R²=1 by construction
 /// and a 3-point fit is barely better, so we require a real series — this keeps
-/// the discovery journal honest (no trivially "perfect" fits as findings).
+/// the operation log honest (no trivially "perfect" fits as findings).
 const MIN_FINDING_POINTS: usize = 5;
 
 pub(crate) fn make_sandbox() -> Sandbox {
@@ -678,7 +678,7 @@ pub(crate) fn make_sim_tools(
 /// Register the `analyze_series` tool: fit OLS / Hill / Michaelis-Menten to (x,y) data.
 ///
 /// When a fit clears [`AUTO_FINDING_R2_THRESHOLD`], a structured finding with typed
-/// [`Measurement`] values is automatically written to the discovery journal (source =
+/// [`Measurement`] values is automatically written to the operation log (source =
 /// "system") and the audit chain — no LLM mediation required for quantitative results.
 fn register_analyze_series_tool(
     registry: &mut ToolRegistry,
@@ -916,14 +916,14 @@ fn register_analyze_series_tool(
     );
 }
 
-/// Register the `update_journal` tool: LLM-driven discovery journal mutations.
+/// Register the `update_journal` tool: LLM-driven operation log mutations.
 fn register_journal_tool(registry: &mut ToolRegistry, journal: Arc<Mutex<DiscoveryJournal>>, db: Arc<Db>) {
     let jpath = journal_path();
     registry.register(
         ToolSpec {
             name: "update_journal".into(),
-            description: "Record a scientific finding or manage a hypothesis in the \
-                persistent discovery journal. Actions: add_finding, add_hypothesis, \
+            description: "Record a quantitative finding or manage an execution directive in the \
+                persistent operation log. Actions: add_finding, add_hypothesis, \
                 confirm_hypothesis, reject_hypothesis, set_hypothesis_status.".into(),
             parameters_schema: serde_json::json!({
                 "type": "object",

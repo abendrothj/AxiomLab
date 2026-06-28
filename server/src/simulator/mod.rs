@@ -74,8 +74,8 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// True when the journal already has findings but nothing is actively being tested.
-fn should_idle_exploration(journal: &DiscoveryJournal) -> bool {
+/// True when the operation log has findings but no directive is active — seed from the commissioning agenda.
+fn needs_agenda_directive(journal: &DiscoveryJournal) -> bool {
     if journal.findings.is_empty() {
         return false;
     }
@@ -313,7 +313,7 @@ async fn pause_after_run(
         return;
     }
 
-    if should_idle_exploration(&sink.journal.lock().unwrap()) {
+    if needs_agenda_directive(&sink.journal.lock().unwrap()) {
         *consecutive_exhaustions = 0;
         let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
         if seeded {
@@ -456,7 +456,7 @@ pub async fn run_loop(
             let active_directive = queued_directive.or(journal_directive);
             if active_directive.is_none() {
                 // Nothing from queue or journal — check if we need to seed a new procedure.
-                if should_idle_exploration(&sink.journal.lock().unwrap()) {
+                if needs_agenda_directive(&sink.journal.lock().unwrap()) {
                     let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
                     if seeded {
                         sink.set_loop_status(
@@ -630,7 +630,7 @@ mod tests {
             source: "system".into(),
             first_observed_secs: 0,
         });
-        assert!(should_idle_exploration(&j));
+        assert!(needs_agenda_directive(&j));
 
         j.hypotheses.push(Hypothesis {
             id: "h1".into(),
@@ -639,7 +639,7 @@ mod tests {
             created_secs: 0,
             updated_secs: 0,
         });
-        assert!(!should_idle_exploration(&j));
+        assert!(!needs_agenda_directive(&j));
     }
 
     #[test]

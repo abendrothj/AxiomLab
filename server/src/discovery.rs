@@ -149,7 +149,7 @@ pub struct ParameterProbe {
     pub observed_at_secs: i64,
 }
 
-/// The persistent discovery journal.
+/// The persistent operation log — findings, directives, calibrations, and run history.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiscoveryJournal {
     pub schema_version: u32,

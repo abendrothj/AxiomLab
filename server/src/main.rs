@@ -121,7 +121,7 @@ async fn metrics_handler(State(s): State<AppState>) -> impl IntoResponse {
     s.metrics_handle.render()
 }
 
-/// The persistent discovery journal — findings, hypotheses, run history.
+/// The persistent operation log — findings, directives, run history.
 async fn journal_handler(State(s): State<AppState>) -> impl IntoResponse {
     let journal = s.journal.lock().unwrap().clone();
     axum::Json(journal)
@@ -259,7 +259,7 @@ async fn queue_remove_handler(
 // ── POST /api/emergency-stop ──────────────────────────────────────────────────
 
 async fn emergency_stop_handler(State(s): State<AppState>) -> impl IntoResponse {
-    // 1. Halt the software exploration loop immediately.
+    // 1. Halt the execution loop immediately.
     s.running.store(false, Ordering::SeqCst);
 
     // 2. Send hardware abort to all SiLA 2 instruments (if connected).
@@ -291,7 +291,7 @@ async fn emergency_stop_handler(State(s): State<AppState>) -> impl IntoResponse 
         String::new()
     });
 
-    tracing::warn!("EMERGENCY STOP triggered — exploration loop halted");
+    tracing::warn!("EMERGENCY STOP triggered — execution loop halted");
 
     axum::Json(serde_json::json!({
         "status": "stopped",
@@ -761,7 +761,7 @@ async fn main() {
         );
     }
 
-    // Load the persistent discovery journal (or start fresh).
+    // Load the persistent operation log (or start fresh).
     let path    = journal_path();
     let journal = Arc::new(Mutex::new(DiscoveryJournal::load(&path)));
     {
@@ -867,7 +867,7 @@ async fn main() {
         metrics_handle,
     };
 
-    // Auto-start the exploration loop immediately on server launch.
+    // Auto-start the execution loop immediately on server launch.
     {
         let sink = Arc::new(ws_sink::WebSocketSink {
             tx:       state.tx.clone(),
