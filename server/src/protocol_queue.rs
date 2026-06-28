@@ -182,6 +182,7 @@ impl ProtocolQueue {
 
     // ── Queries ───────────────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub fn has_pending(&self) -> bool {
         self.items.iter().any(|i| i.status == QueueStatus::Pending)
     }
@@ -190,6 +191,7 @@ impl ProtocolQueue {
         &self.items
     }
 
+    #[allow(dead_code)]
     pub fn pending_items(&self) -> impl Iterator<Item = &QueuedProtocol> {
         self.items.iter().filter(|i| i.status == QueueStatus::Pending)
     }

@@ -186,19 +186,16 @@ impl SlotManager {
 /// All state needed to run a single experiment in a task.
 /// Every field is either `Arc<…>` (shared) or owned (cloned per-task).
 struct ExperimentTask {
-    slot:               usize,
-    experiment_id:      String,
-    mandate:            String,
-    iteration:          u32,
-    config:             OrchestratorConfig,
-    sink:               Arc<WebSocketSink>,
-    sila_clients:       Option<Arc<agent_runtime::hardware::SiLA2Clients>>,
-    engine:             proof_artifacts::policy::RuntimePolicyEngine,
-    exec_ctx:           proof_artifacts::policy::ExecutionContext,
-    db:                 Arc<crate::db::Db>,
-    approval_queue:     Arc<PendingApprovalQueue>,
-    lab_state:          Arc<Mutex<LabState>>,
-    hypothesis_manager: Arc<Mutex<HypothesisManager>>,
+    slot:           usize,
+    experiment_id:  String,
+    mandate:        String,
+    config:         OrchestratorConfig,
+    sink:           Arc<WebSocketSink>,
+    sila_clients:   Option<Arc<agent_runtime::hardware::SiLA2Clients>>,
+    engine:         proof_artifacts::policy::RuntimePolicyEngine,
+    exec_ctx:       proof_artifacts::policy::ExecutionContext,
+    db:             Arc<crate::db::Db>,
+    lab_state:      Arc<Mutex<LabState>>,
 }
 
 /// Result returned from a completed experiment task.
@@ -562,18 +559,15 @@ pub async fn run_loop(
 
             let task = ExperimentTask {
                 slot,
-                experiment_id:      exp_id,
+                experiment_id: exp_id,
                 mandate,
-                iteration,
                 config,
-                sink:               Arc::clone(&sink),
-                sila_clients:       sila_clients.clone(),
-                engine:             engine.clone(),
-                exec_ctx:           exec_ctx.clone(),
-                db:                 Arc::clone(&db),
-                approval_queue:     Arc::clone(&approval_queue),
-                lab_state:          Arc::clone(&lab_state),
-                hypothesis_manager: Arc::clone(&hypothesis_manager),
+                sink:          Arc::clone(&sink),
+                sila_clients:  sila_clients.clone(),
+                engine:        engine.clone(),
+                exec_ctx:      exec_ctx.clone(),
+                db:            Arc::clone(&db),
+                lab_state:     Arc::clone(&lab_state),
             };
 
             tracing::info!(

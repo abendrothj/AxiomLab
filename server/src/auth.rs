@@ -43,6 +43,7 @@ pub struct JwtClaims {
 
 /// Request extension injected by `require_operator_jwt` for downstream handlers.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OperatorId(pub String);
 
 // ── Secret loading ────────────────────────────────────────────────────────────

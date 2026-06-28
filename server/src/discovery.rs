@@ -56,6 +56,7 @@ impl Measurement {
     /// If the unit is unknown, emits a `warn!` and replaces it with `"?"` so
     /// downstream code and displays can flag it rather than silently propagating
     /// a garbage unit through the journal.
+    #[allow(dead_code)]
     pub fn with_validated_unit(mut self) -> Self {
         if !agent_runtime::units::is_known_unit(&self.unit) {
             tracing::warn!(

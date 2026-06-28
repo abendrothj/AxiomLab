@@ -128,6 +128,7 @@ impl Db {
     ///
     /// `status_json` is the serialised `HypothesisStatus` enum; `confidence` is
     /// the fraction of supporting evidence.
+    #[allow(dead_code)]
     pub fn upsert_hyp_state(&self, h: &HypState) -> SqlResult<()> {
         let conn = self.conn.lock().expect("db mutex");
         let status_json = serde_json::to_string(&h.status)
@@ -148,6 +149,7 @@ impl Db {
     }
 
     /// Insert one piece of hypothesis evidence.
+    #[allow(dead_code)]
     pub fn insert_hyp_evidence(&self, hyp_id: &str, e: &HypEvidence) -> SqlResult<()> {
         let conn = self.conn.lock().expect("db mutex");
         let (stat_name, stat_value, stat_threshold) = match &e.key_statistic {

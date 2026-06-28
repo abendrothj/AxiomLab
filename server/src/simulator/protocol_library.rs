@@ -9,6 +9,7 @@
 use agent_runtime::protocol::ProtocolStep;
 
 /// A canonical protocol template registered in the library.
+#[allow(dead_code)]
 pub struct ProtocolTemplate {
     pub id:          &'static str,
     pub version:     &'static str,
@@ -93,6 +94,7 @@ pub static TEMPLATES: &[ProtocolTemplate] = &[
 ];
 
 /// Look up a template by ID. Returns `None` if the ID is not registered.
+#[allow(dead_code)]
 pub fn lookup(id: &str) -> Option<&'static ProtocolTemplate> {
     TEMPLATES.iter().find(|t| t.id == id)
 }
