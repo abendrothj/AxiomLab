@@ -332,6 +332,7 @@ QA sign-off computes `SHA-256(canonical_json(study_record))` and stores it as `q
 | GET | `/api/lab/reference-materials` | Reference materials |
 | GET | `/api/lab/calibration-status` | Per-instrument calibration validity |
 | GET | `/api/queue` | Protocol queue — all items (pending + history) |
+| GET | `/api/agenda` | Commissioning agenda with live completion status |
 | GET | `/api/literature/search?q=` | PubChem compound lookup |
 | GET | `/api/auth/oidc/start` | Initiate OIDC PKCE flow |
 | GET | `/api/auth/oidc/callback` | OIDC callback (issues JWT) |
@@ -590,9 +591,7 @@ Before running a session:
 6. Add Rekor submission retry queue for network outages at conclusion time.
 7. Validate string tool parameters (`pump_id`, `sensor_id`, `vessel_id`) against an allowed set at the capability stage.
 8. Add external audit mirror: periodically push chain-tip hashes to a Gist or orphan git branch to survive local disk failure.
-9. Add JWT auth to `POST /api/queue` and `DELETE /api/queue/:id` for production deployments (currently public).
-10. Migrate audit signing key to HSM or KMS for production; current `FileBackedSigner` only survives single-node restarts.
-11. Add `nominal_ph` values to the default reagent catalog so pH simulation works out-of-the-box without manual registration.
-12. Extend `run_doe_anova` to support multi-factor grouping (currently only groups by the first factor's low/high bracket).
-13. Add a real SiLA 2 instrument driver shim: `--feature hardware` that swaps the simulator for actual gRPC calls without changing orchestrator code.
-14. Expose the commissioning agenda via `GET /api/queue/agenda` so operators can see what auto-procedures are planned.
+9. Migrate audit signing key to HSM or KMS for production; current `FileBackedSigner` only survives single-node restarts.
+10. Add `nominal_ph` values to the default reagent catalog so pH simulation works out-of-the-box without manual registration.
+11. Extend `run_doe_anova` to support multi-factor grouping (currently only groups by the first factor's low/high bracket).
+12. Add a real SiLA 2 instrument driver shim: `--feature hardware` that swaps the simulator for actual gRPC calls without changing orchestrator code.

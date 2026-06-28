@@ -149,6 +149,37 @@ fn seed_follow_up_hypothesis(journal: &mut crate::discovery::DiscoveryJournal) -
     false
 }
 
+// ── Agenda status query (used by /api/agenda handler) ────────────────────────
+
+#[derive(serde::Serialize)]
+pub(crate) struct AgendaItem {
+    pub key:       &'static str,
+    pub statement: &'static str,
+    pub status:    &'static str, // "pending" | "proposed" | "testing" | "completed" | "rejected"
+}
+
+/// Return the commissioning agenda with live completion status derived from
+/// the operation journal.  Called by the GET /api/agenda handler.
+pub(crate) fn agenda_status(journal: &DiscoveryJournal) -> Vec<AgendaItem> {
+    SCIENCE_AGENDA
+        .iter()
+        .map(|(key, stmt)| {
+            let status = journal
+                .hypotheses
+                .iter()
+                .find(|h| h.statement.contains(key))
+                .map(|h| match h.status {
+                    HypothesisStatus::Proposed  => "proposed",
+                    HypothesisStatus::Testing   => "testing",
+                    HypothesisStatus::Confirmed => "completed",
+                    HypothesisStatus::Rejected  => "rejected",
+                })
+                .unwrap_or("pending");
+            AgendaItem { key, statement: stmt, status }
+        })
+        .collect()
+}
+
 // ── Slot manager ──────────────────────────────────────────────────────────────
 
 struct SlotManager {

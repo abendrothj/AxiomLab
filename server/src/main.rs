@@ -266,6 +266,21 @@ async fn queue_remove_handler(
     }
 }
 
+// ── GET /api/agenda ───────────────────────────────────────────────────────────
+
+/// `GET /api/agenda` — return the commissioning agenda with live completion status.
+async fn agenda_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let journal = s.journal.lock().unwrap();
+    let items   = simulator::agenda_status(&journal);
+    let completed = items.iter().filter(|i| i.status == "completed").count();
+    let total     = items.len();
+    axum::Json(serde_json::json!({
+        "items":           items,
+        "completed_count": completed,
+        "total_count":     total,
+    }))
+}
+
 // ── POST /api/emergency-stop ──────────────────────────────────────────────────
 
 async fn emergency_stop_handler(State(s): State<AppState>) -> impl IntoResponse {
@@ -412,6 +427,9 @@ pub(crate) fn build_router(approval_queue: Arc<PendingApprovalQueue>) -> Router<
         .route("/api/lab/reagents",                  post(lab_register_reagent_handler))
         .route("/api/lab/reagents/:id",             delete(lab_remove_reagent_handler))
         .route("/api/lab/vessels/:id/contents",     put(lab_set_vessel_contents_handler))
+        // Queue writes are operator actions — gated by JWT.
+        .route("/api/queue",                         post(queue_enqueue_handler))
+        .route("/api/queue/:id",                     delete(queue_remove_handler))
         // Auth layer — applies ONLY to the routes registered above.
         .route_layer(middleware::from_fn(auth::require_operator_jwt))
         // ── Open (unauthenticated) routes ────────────────────────────────────
@@ -429,10 +447,10 @@ pub(crate) fn build_router(approval_queue: Arc<PendingApprovalQueue>) -> Router<
         .route("/api/lab/reagents",                get(lab_reagents_handler))
         .route("/api/lab/vessels",                 get(lab_vessels_handler))
         .route("/api/lab/calibration-status",      get(lab_calibration_status_handler))
-        // Protocol queue — operator interface for directing lab execution.
+        // Protocol queue — read is open; writes are protected above.
         .route("/api/queue",                       get(queue_list_handler))
-        .route("/api/queue",                       post(queue_enqueue_handler))
-        .route("/api/queue/:id",                   delete(queue_remove_handler))
+        // Commissioning agenda — read-only view of planned procedures.
+        .route("/api/agenda",                      get(agenda_handler))
         // Approvals sub-router (own state, no auth middleware).
         .merge(approvals_router)
         .layer(CorsLayer::permissive())

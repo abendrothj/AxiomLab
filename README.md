@@ -211,6 +211,7 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 | GET | `/api/lab/vessels` | Vessel contents |
 | GET | `/api/lab/calibration-status` | Per-instrument calibration validity |
 | GET | `/api/queue` | Protocol queue — all items (pending + history) |
+| GET | `/api/agenda` | Commissioning agenda with live completion status |
 | GET | `/api/methods` | Method validation records |
 | GET | `/api/methods/{id}` | Single method validation |
 | GET | `/api/lab/reference-materials` | Certified reference materials |
