@@ -563,7 +563,7 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 
 ## 11) Operator Checklist
 
-Before running high-risk actions:
+Before running a session:
 
 1. Verify signed manifest (`proofctl verify`).
 2. Verify CI gate pass for required artifacts (`ArtifactStatus::Passed`).
@@ -575,6 +575,8 @@ Before running high-risk actions:
 8. Set `AXIOMLAB_ALERT_WEBHOOK_URL` so failures surface without dashboard monitoring.
 9. Pre-register protocols to a study record before execution for ISO 17025 traceability.
 10. Ensure calibration records exist for all quantitative instruments before starting protocols.
+11. Direct the execution loop via `POST /api/queue` — natural-language directives with a priority (0–255) are picked up in order before the commissioning agenda fires.
+12. Check `/api/status` for `hardware_mode: true` before assuming real instrument data (false = simulator).
 
 ---
 
@@ -588,7 +590,9 @@ Before running high-risk actions:
 6. Add Rekor submission retry queue for network outages at conclusion time.
 7. Validate string tool parameters (`pump_id`, `sensor_id`, `vessel_id`) against an allowed set at the capability stage.
 8. Add external audit mirror: periodically push chain-tip hashes to a Gist or orphan git branch to survive local disk failure.
-9. Implement full embedding-based RAG (vector DB + paper chunking) to replace the PubChem keyword stub in `literature.rs`.
+9. Add JWT auth to `POST /api/queue` and `DELETE /api/queue/:id` for production deployments (currently public).
 10. Migrate audit signing key to HSM or KMS for production; current `FileBackedSigner` only survives single-node restarts.
 11. Add `nominal_ph` values to the default reagent catalog so pH simulation works out-of-the-box without manual registration.
 12. Extend `run_doe_anova` to support multi-factor grouping (currently only groups by the first factor's low/high bracket).
+13. Add a real SiLA 2 instrument driver shim: `--feature hardware` that swaps the simulator for actual gRPC calls without changing orchestrator code.
+14. Expose the commissioning agenda via `GET /api/queue/agenda` so operators can see what auto-procedures are planned.
