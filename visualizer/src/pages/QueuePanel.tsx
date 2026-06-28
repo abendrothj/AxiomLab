@@ -51,6 +51,11 @@ export default function QueuePanel() {
     return () => clearInterval(t);
   }, [refresh]);
 
+  function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    const token = localStorage.getItem("axiomlab_token");
+    return token ? { Authorization: `Bearer ${token}`, ...extra } : extra;
+  }
+
   async function enqueue() {
     const stmt = statement.trim();
     if (!stmt) return;
@@ -58,7 +63,7 @@ export default function QueuePanel() {
     try {
       const res = await fetch(`${API}/queue`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ statement: stmt, priority }),
       });
       if (res.ok) {
@@ -67,6 +72,9 @@ export default function QueuePanel() {
         setStatement("");
         setTimeout(() => setSubmitMsg(null), 4000);
         refresh();
+      } else if (res.status === 401) {
+        setSubmitMsg("Auth required — set localStorage.axiomlab_token");
+        setTimeout(() => setSubmitMsg(null), 6000);
       } else {
         const err = await res.json().catch(() => ({}));
         setSubmitMsg(`Error: ${err.error ?? res.status}`);
@@ -78,7 +86,10 @@ export default function QueuePanel() {
   }
 
   async function removeItem(id: string) {
-    await fetch(`${API}/queue/${id}`, { method: "DELETE" });
+    await fetch(`${API}/queue/${id}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
     refresh();
   }
 

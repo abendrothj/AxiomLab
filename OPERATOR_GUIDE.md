@@ -251,6 +251,38 @@ Pending → Running (loop picks it up)
 
 Completed and failed items are retained as history (trimmed to the 50 most recent). The experiment ID assigned when running is stored in `experiment_id`; the outcome summary is in `result_summary`.
 
+### 4.4 JWT Protection for Queue Writes
+
+When `AXIOMLAB_JWT_SECRET` or `AXIOMLAB_TRUSTED_KEYS` is set, `POST /api/queue` and `DELETE /api/queue/:id` require a valid operator JWT in the `Authorization: Bearer` header. `GET /api/queue` is always unauthenticated (read-only). See Section 7 for token generation.
+
+### 4.5 Commissioning Agenda
+
+`GET /api/agenda` returns the five built-in commissioning procedures and their current status:
+
+```bash
+curl http://localhost:3000/api/agenda
+# Returns:
+# {
+#   "items": [
+#     { "key": "ph_linearity",       "statement": "...", "status": "pending" },
+#     { "key": "beer_lambert",        "statement": "...", "status": "completed" },
+#     { "key": "temperature_profile", "statement": "...", "status": "pending" },
+#     { "key": "ph_absorbance",       "statement": "...", "status": "pending" },
+#     { "key": "arm_boundary",        "statement": "...", "status": "pending" }
+#   ],
+#   "completed_count": 1,
+#   "total_count": 5
+# }
+```
+
+Status values: `pending` → `proposed` → `testing` → `completed` | `rejected`.
+
+When all five items reach `completed`, the `/api/status` response sets `"agenda_complete": true` and the dashboard header shows a **COMMISSIONED** badge.
+
+### 4.6 Live Finding Notifications
+
+When `analyze_series` records a scientific finding with R² ≥ 0.80 and ≥ 5 data points, the server broadcasts a `finding_recorded` WebSocket event. The visualizer displays a green toast overlay for 6 seconds showing the model type and R² value.
+
 ---
 
 ## 5) ISO 17025 Records

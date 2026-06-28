@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system deps (protoc for gRPC build)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -26,6 +29,9 @@ jobs:
 
       - name: Run server integration tests
         run: cargo test -p axiomlab-server
+
+      - name: Run pipeline rejection integration tests
+        run: cargo test -p agent_runtime --test pipeline_rejection
 
       - name: Run agent_runtime doc tests
         run: cargo test -p agent_runtime --doc
