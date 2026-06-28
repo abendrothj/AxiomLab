@@ -18,6 +18,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+use tokio::sync::broadcast;
 
 /// R² threshold above which `analyze_series` auto-records a system finding.
 const AUTO_FINDING_R2_THRESHOLD: f64 = 0.80;
@@ -48,6 +49,7 @@ pub(crate) fn make_sila2_tools(
     journal:   Arc<Mutex<DiscoveryJournal>>,
     db:        Arc<Db>,
     lab_state: Arc<Mutex<LabState>>,
+    ws_tx:     broadcast::Sender<String>,
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
 
@@ -282,7 +284,7 @@ pub(crate) fn make_sila2_tools(
         })),
     );
 
-    register_analyze_series_tool(&mut r, journal.clone(), Arc::clone(&db));
+    register_analyze_series_tool(&mut r, journal.clone(), Arc::clone(&db), ws_tx);
     register_journal_tool(&mut r, journal, db);
     register_doe_tool(&mut r);
     r
@@ -395,6 +397,7 @@ pub(crate) fn make_sim_tools(
     journal:   Arc<Mutex<DiscoveryJournal>>,
     db:        Arc<Db>,
     lab_state: Arc<Mutex<LabState>>,
+    ws_tx:     broadcast::Sender<String>,
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     agent_runtime::tools::register_lab_tools(&mut r);
@@ -669,7 +672,7 @@ pub(crate) fn make_sim_tools(
         })),
     );
 
-    register_analyze_series_tool(&mut r, journal.clone(), Arc::clone(&db));
+    register_analyze_series_tool(&mut r, journal.clone(), Arc::clone(&db), ws_tx);
     register_journal_tool(&mut r, journal, db);
     register_doe_tool(&mut r);
     r
@@ -682,8 +685,9 @@ pub(crate) fn make_sim_tools(
 /// "system") and the audit chain — no LLM mediation required for quantitative results.
 fn register_analyze_series_tool(
     registry: &mut ToolRegistry,
-    journal: Arc<Mutex<DiscoveryJournal>>,
-    db: Arc<Db>,
+    journal:  Arc<Mutex<DiscoveryJournal>>,
+    db:       Arc<Db>,
+    ws_tx:    broadcast::Sender<String>,
 ) {
     let jpath = journal_path();
     registry.register(
@@ -725,6 +729,7 @@ fn register_analyze_series_tool(
             let journal = Arc::clone(&journal);
             let jpath   = jpath.clone();
             let db      = Arc::clone(&db);
+            let ws_tx   = ws_tx.clone();
             Box::pin(async move {
                 let data = p["data"].as_array().ok_or("missing data array")?;
                 if data.is_empty() {
@@ -835,6 +840,7 @@ fn register_analyze_series_tool(
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                            broadcast_finding(&ws_tx, &id, &stmt, "linear", lf.r_squared);
                             recorded_findings.push(serde_json::json!({
                                 "id": id,
                                 "model": "linear",
@@ -862,6 +868,7 @@ fn register_analyze_series_tool(
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                            broadcast_finding(&ws_tx, &id, &stmt, "hill", r2);
                             recorded_findings.push(serde_json::json!({
                                 "id": id,
                                 "model": "hill",
@@ -888,6 +895,7 @@ fn register_analyze_series_tool(
                             if let Some(f) = j.findings.last() { db.insert_finding(f); }
                             j.save(&jpath).ok();
                             emit_journal_finding(&audit_path, &id, &stmt, "", &measurements_json, "system", None).ok();
+                            broadcast_finding(&ws_tx, &id, &stmt, "michaelis_menten", r2);
                             recorded_findings.push(serde_json::json!({
                                 "id": id,
                                 "model": "michaelis_menten",
@@ -914,6 +922,20 @@ fn register_analyze_series_tool(
             })
         }),
     );
+}
+
+/// Broadcast a `finding_recorded` event to all connected WebSocket clients.
+fn broadcast_finding(tx: &broadcast::Sender<String>, id: &str, statement: &str, model: &str, r_squared: f64) {
+    let msg = serde_json::json!({
+        "event": "finding_recorded",
+        "payload": {
+            "id":        id,
+            "statement": statement,
+            "model":     model,
+            "r_squared": r_squared,
+        }
+    });
+    tx.send(msg.to_string()).ok();
 }
 
 /// Register the `update_journal` tool: LLM-driven operation log mutations.

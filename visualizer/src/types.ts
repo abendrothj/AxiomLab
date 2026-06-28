@@ -79,12 +79,20 @@ export interface StirParams {
 // ── Event name constants ──────────────────────────────────────────
 
 export const EVENTS = {
-  LLM_TOKEN: "llm_token",
+  LLM_TOKEN:        "llm_token",
   STATE_TRANSITION: "state_transition",
-  TOOL_EXECUTION: "tool_execution",
-  NOTEBOOK_ENTRY: "notebook_entry",
-  LOOP_STATUS: "loop_status",
+  TOOL_EXECUTION:   "tool_execution",
+  NOTEBOOK_ENTRY:   "notebook_entry",
+  LOOP_STATUS:      "loop_status",
+  FINDING_RECORDED: "finding_recorded",
 } as const;
+
+export interface FindingRecordedEvent {
+  id:        string;
+  statement: string;
+  model:     string;
+  r_squared: number;
+}
 
 // ── Approval types ────────────────────────────────────────────────
 

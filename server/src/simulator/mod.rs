@@ -262,11 +262,13 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
             Arc::clone(&task.sink.journal),
             Arc::clone(&task.db),
             Arc::clone(&task.lab_state),
+            task.sink.tx.clone(),
         ),
         None => tools::make_sim_tools(
             Arc::clone(&task.sink.journal),
             Arc::clone(&task.db),
             Arc::clone(&task.lab_state),
+            task.sink.tx.clone(),
         ),
     };
 

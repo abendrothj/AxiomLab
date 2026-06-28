@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   EVENTS, StateTransitionEvent, ToolExecutionEvent, LlmTokenEvent,
   NotebookEntryEvent, Stage, STAGE_COLORS, PendingApprovalInfo,
-  LoopStatus, LOOP_PHASE_COLORS,
+  LoopStatus, LOOP_PHASE_COLORS, FindingRecordedEvent,
 } from "./types";
 import { eventBus } from "./eventBus";
 import BlueprintGraph from "./components/BlueprintGraph";
@@ -79,9 +79,11 @@ export default function App() {
   const [transitions, setTransitions]   = useState<StateTransitionEvent[]>([]);
   const [pendingCount, setPendingCount]   = useState(0);
   const [loopStatus, setLoopStatus]       = useState<LoopStatus | null>(null);
-  const [queuePending, setQueuePending]   = useState(0);
-  const [hardwareMode, setHardwareMode]   = useState(false);
-  const thinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [queuePending, setQueuePending]       = useState(0);
+  const [hardwareMode, setHardwareMode]       = useState(false);
+  const [findingToast, setFindingToast]       = useState<FindingRecordedEvent | null>(null);
+  const thinkTimer      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const findingTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshPending = useCallback(() => {
     apiPending().then((list) => setPendingCount(list.length));
@@ -153,6 +155,11 @@ export default function App() {
       eventBus.listen<LoopStatus>(EVENTS.LOOP_STATUS, (p) => {
         setLoopStatus(p);
       }),
+      eventBus.listen<FindingRecordedEvent>(EVENTS.FINDING_RECORDED, (p) => {
+        setFindingToast(p);
+        if (findingTimer.current) clearTimeout(findingTimer.current);
+        findingTimer.current = setTimeout(() => setFindingToast(null), 6000);
+      }),
     ];
     return () => unsubs.forEach((fn) => fn());
   }, []);
@@ -176,6 +183,35 @@ export default function App() {
         queuePending={queuePending}
         hardwareMode={hardwareMode}
       />
+
+      {/* Finding toast — shown for 6 s when analyze_series records a result */}
+      {findingToast && (
+        <div
+          onClick={() => setFindingToast(null)}
+          style={{
+            position: "fixed", bottom: 24, right: 24, zIndex: 9999,
+            background: "#0a1f12", border: "1px solid #00ff9d44",
+            borderLeft: "3px solid #00ff9d",
+            borderRadius: "0 6px 6px 0",
+            padding: "12px 16px", maxWidth: 380, cursor: "pointer",
+            boxShadow: "0 4px 24px #00ff9d18",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 8, letterSpacing: "0.14em", color: "#00ff9d", fontWeight: 700 }}>
+              FINDING RECORDED
+            </span>
+            <span style={{ fontSize: 8, color: "#1a4a2a", letterSpacing: "0.1em" }}>
+              {findingToast.model.toUpperCase()} · R²={findingToast.r_squared.toFixed(3)}
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: "#4a8a6a", lineHeight: 1.6 }}>
+            {findingToast.statement.length > 120
+              ? findingToast.statement.slice(0, 117) + "…"
+              : findingToast.statement}
+          </div>
+        </div>
+      )}
 
       {tab === "dashboard" && (
         <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
