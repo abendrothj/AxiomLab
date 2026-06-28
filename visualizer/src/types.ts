@@ -31,7 +31,7 @@ export interface NotebookEntryEvent {
   outcome: "discovery" | "rejection" | "inconclusive";
 }
 
-/** Live exploration-loop pacing — wait until next experiment, backoff, idle, etc. */
+/** Live execution-loop pacing — wait until next experiment, backoff, idle, etc. */
 export interface LoopStatus {
   phase: "running" | "paused" | "idle" | "backoff" | "converged" | string;
   reason: string;
@@ -140,6 +140,20 @@ export interface CalibrationEntry {
   valid: boolean;
   performed_at_secs?: number;
   valid_until_secs?: number;
+}
+
+// ── Protocol queue types ──────────────────────────────────────────
+
+export type QueueStatus = "pending" | "running" | "completed" | "failed";
+
+export interface QueuedProtocol {
+  id: string;
+  statement: string;
+  priority: number;
+  added_at_secs: number;
+  status: QueueStatus;
+  experiment_id?: string;
+  result_summary?: string;
 }
 
 // ── Stage display helpers ─────────────────────────────────────────

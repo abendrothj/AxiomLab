@@ -10,8 +10,9 @@ import BlueprintGraph from "./components/BlueprintGraph";
 import ChainExplorer from "./pages/ChainExplorer";
 import ApprovalsPanel from "./pages/ApprovalsPanel";
 import LabPanel from "./pages/LabPanel";
+import QueuePanel from "./pages/QueuePanel";
 
-type Tab = "dashboard" | "chain" | "approvals" | "lab";
+type Tab = "dashboard" | "chain" | "approvals" | "lab" | "queue";
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
@@ -198,6 +199,7 @@ export default function App() {
       {tab === "chain"     && <ChainExplorer />}
       {tab === "approvals" && <ApprovalsPanel />}
       {tab === "lab"       && <LabPanel />}
+      {tab === "queue"     && <QueuePanel />}
     </div>
   );
 }
@@ -209,6 +211,7 @@ const TAB_LABELS: Record<Tab, string> = {
   chain: "CHAIN EXPLORER",
   approvals: "APPROVALS",
   lab: "LAB STATE",
+  queue: "QUEUE",
 };
 
 function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount }: {
@@ -268,7 +271,7 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pen
 
       {/* Tab bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        {(["dashboard", "chain", "approvals", "lab"] as Tab[]).map((t) => (
+        {(["dashboard", "chain", "approvals", "lab", "queue"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => onTabChange(t)}
@@ -472,7 +475,7 @@ function LoopStatusPanel({ status }: { status: LoopStatus | null }) {
   if (!status) {
     return (
       <div style={{ padding: "14px 22px", borderBottom: "1px solid #0e1520", flexShrink: 0 }}>
-        <SectionLabel>EXPLORATION LOOP</SectionLabel>
+        <SectionLabel>EXECUTION LOOP</SectionLabel>
         <div style={{ marginTop: 8, fontSize: 10, color: "#1a3040" }}>connecting…</div>
       </div>
     );
@@ -496,7 +499,7 @@ function LoopStatusPanel({ status }: { status: LoopStatus | null }) {
       background: `${phaseColor}06`,
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <SectionLabel>EXPLORATION LOOP</SectionLabel>
+        <SectionLabel>EXECUTION LOOP</SectionLabel>
         <span style={{
           fontSize: 8, letterSpacing: "0.12em", fontWeight: 700,
           color: phaseColor,
@@ -781,10 +784,10 @@ function EmptyState() {
         <path d="M16 10v6l4 2" stroke="#00d4ff" strokeWidth="1.5" strokeLinecap="round" />
       </svg>
       <div style={{ fontSize: 11, letterSpacing: "0.08em" }}>
-        Waiting for discoveries...
+        Awaiting execution results...
       </div>
       <div style={{ fontSize: 10, color: "#122030", maxWidth: 240, textAlign: "center", lineHeight: 1.6 }}>
-        The AI will document its findings here as it explores the constraint space.
+        Push a directive via the Queue tab or let the commissioning agenda run.
       </div>
     </div>
   );
