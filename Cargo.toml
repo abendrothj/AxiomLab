@@ -1,5 +1,9 @@
 [workspace]
 members = [
+    # ── New architecture (REWRITE.md) — added as each crate is built ──
+    "crates/types",
+
+    # ── Legacy crates (deleted in the final rewrite step) ──
     "scientific_compute",
     "agent_runtime",
     "proof_artifacts",
@@ -34,3 +38,25 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
 metrics = "0.23"
+
+# Crypto / encoding (audit chain, proof signatures)
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+dirs = "5"
+
+# gRPC (SiLA 2 clients)
+tonic = "0.12"
+prost = "0.13"
+tonic-build = "0.12"
+prost-build = "0.13"
+
+# ── New-architecture internal crates ──
+axiom-types = { path = "crates/types" }
+axiom-audit = { path = "crates/audit" }
+axiom-chemistry = { path = "crates/chemistry" }
+axiom-sila = { path = "crates/sila" }
+axiom-proofs = { path = "crates/proofs" }
+axiom-gate = { path = "crates/gate" }
+axiom-llm = { path = "crates/llm" }
