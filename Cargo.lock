@@ -628,6 +628,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-sila"
+version = "0.1.0"
+dependencies = [
+ "axiom-types",
+ "prost",
+ "prost-build",
+ "rand",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "tracing",
+]
+
+[[package]]
 name = "axiom-types"
 version = "0.1.0"
 dependencies = [

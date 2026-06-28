@@ -1,0 +1,24 @@
+[package]
+name = "axiom-sila"
+description = "SiLA 2 gRPC instrument clients + offline physics simulator."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axiom-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+prost-build = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

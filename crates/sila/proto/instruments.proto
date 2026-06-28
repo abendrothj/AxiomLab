@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package axiomlab.hardware;
+
+// Liquid dispenser for aspirate/dispense operations
+service LiquidDispenser {
+  rpc DispenseLiquid(DispenseRequest) returns (DispenseResponse);
+  rpc AspirateFluid(AspirateRequest) returns (AspirateResponse);
+}
+
+message DispenseRequest {
+  string target_container = 1;      // vessel ID (e.g., "Beaker_A")
+  float volume_ul = 2;               // volume in microliters
+  string source_reagent = 3;         // what substance (optional)
+}
+
+message DispenseResponse {
+  bool success = 1;
+  string error_message = 2;
+  float actual_volume_dispensed = 3; // confirmed by hardware
+}
+
+message AspirateRequest {
+  string source_container = 1;
+  float volume_ul = 2;
+}
+
+message AspirateResponse {
+  bool success = 1;
+  string error_message = 2;
+  float actual_volume_aspirated = 3;
+}
+
+// Spectrophotometer for absorbance measurement
+service Spectrophotometer {
+  rpc ReadAbsorbance(SpectroRequest) returns (SpectroResponse);
+}
+
+message SpectroRequest {
+  string target_container = 1;
+  float wavelength_nm = 2;           // wavelength in nanometers (200–1000)
+}
+
+message SpectroResponse {
+  bool success = 1;
+  string error_message = 2;
+  float absorbance_value = 3;        // optical density (AU)
+  float actual_wavelength_nm = 4;    // confirmed wavelength
+}
+
+// Thermal controller (hotplate, incubator, etc.)
+service ThermalController {
+  rpc SetTemperature(TemperatureSetRequest) returns (TemperatureResponse);
+  rpc ReadTemperature(TemperatureReadRequest) returns (TemperatureResponse);
+}
+
+message TemperatureSetRequest {
+  string target_plate = 1;           // device ID
+  float target_temp_c = 2;           // Celsius
+  float ramp_rate_c_per_min = 3;     // optional ramp (default = max)
+}
+
+message TemperatureReadRequest {
+  string target_plate = 1;
+}
+
+message TemperatureResponse {
+  bool success = 1;
+  string error_message = 2;
+  float final_temp_c = 3;            // confirmed temperature
+  float current_temp_c = 4;          // current reading (for read ops)
+}
