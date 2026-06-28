@@ -328,7 +328,7 @@ When the new workspace compiles and all tests pass, delete in one commit:
 Each crate is independently compilable and tested before the next is started. No skipping ahead.
 
 - [x] 1. `crates/types/` — domain types, zero deps **(done — 8 tests pass)**
-- [ ] 2. `crates/audit/` — chain + Rekor, depends on types
+- [x] 2. `crates/audit/` — chain + Rekor, depends on types **(done — 15 tests pass)**
 - [ ] 3. `crates/chemistry/` — compatibility table, depends on types
 - [ ] 4. `crates/sila/` — proto codegen + clients, depends on types
 - [ ] 5. `crates/proofs/` — artifact loading + predicates, depends on types

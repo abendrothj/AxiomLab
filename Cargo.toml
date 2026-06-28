@@ -2,6 +2,7 @@
 members = [
     # ── New architecture (REWRITE.md) — added as each crate is built ──
     "crates/types",
+    "crates/audit",
 
     # ── Legacy crates (deleted in the final rewrite step) ──
     "scientific_compute",
