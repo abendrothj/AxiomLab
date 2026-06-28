@@ -40,11 +40,12 @@ export interface LoopStatus {
 }
 
 export const LOOP_PHASE_COLORS: Record<string, string> = {
-  running: "#00d4ff",
-  paused: "#6c8a9a",
-  idle: "#a78bfa",
-  backoff: "#fd7e14",
-  converged: "#00ff9d",
+  running:       "#00d4ff",
+  paused:        "#6c8a9a",
+  idle:          "#a78bfa",
+  backoff:       "#fd7e14",
+  converged:     "#00ff9d",
+  commissioning: "#3b82f6",
 };
 
 // ── Typed param shapes ────────────────────────────────────────────

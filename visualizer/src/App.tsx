@@ -456,11 +456,12 @@ function formatCountdown(secs: number): string {
 }
 
 const PHASE_LABELS: Record<string, string> = {
-  running: "RUNNING",
-  paused: "COOL-DOWN",
-  idle: "IDLE",
-  backoff: "BACKOFF",
-  converged: "CONVERGED",
+  running:       "RUNNING",
+  paused:        "COOL-DOWN",
+  idle:          "IDLE",
+  backoff:       "BACKOFF",
+  converged:     "CONVERGED",
+  commissioning: "COMMISSIONING",
 };
 
 function LoopStatusPanel({ status }: { status: LoopStatus | null }) {

@@ -317,7 +317,7 @@ async fn pause_after_run(
         *consecutive_exhaustions = 0;
         let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
         if seeded {
-            sink.set_loop_status("exploring", "New hypothesis seeded — queuing next experiment", 0);
+            sink.set_loop_status("commissioning", "Agenda directive seeded — queuing next experiment", 0);
             return;
         }
         let pause = loop_cfg.idle_pause_secs;
@@ -327,7 +327,7 @@ async fn pause_after_run(
         );
         sink.set_loop_status(
             "idle",
-            "All planned experiments complete — idling for new questions",
+            "Commissioning agenda complete — awaiting operator directives via /api/queue",
             pause,
         );
         sleep(Duration::from_secs(pause)).await;
