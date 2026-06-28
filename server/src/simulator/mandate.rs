@@ -1,9 +1,9 @@
 use crate::discovery::DiscoveryJournal;
 use crate::simulator::protocol_library;
-use crate::ws_sink::ExplorationLog;
+use crate::ws_sink::ExecutionLog;
 use agent_runtime::capabilities::CapabilityPolicy;
 
-/// Maximum number of entries from each ExplorationLog list injected into the
+/// Maximum number of entries from each ExecutionLog list injected into the
 /// mandate. Keeps the prompt size bounded during long autonomous runs.
 const MAX_MANDATE_FINDINGS: usize   = 20;
 const MAX_MANDATE_REJECTIONS: usize = 10;
@@ -61,7 +61,7 @@ and never re-run a completed procedure.";
 /// Otherwise the agent operates in open commissioning mode.
 pub(crate) fn build_mandate(
     iteration: u32,
-    log: &ExplorationLog,
+    log: &ExecutionLog,
     journal: &DiscoveryJournal,
     policy: &CapabilityPolicy,
     active_directive: Option<&(String, String)>, // (id, statement)

@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::ServeDir};
-use ws_sink::{EventBuffer, ExplorationLog};
+use ws_sink::{EventBuffer, ExecutionLog};
 use metrics_exporter_prometheus::PrometheusHandle;
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ pub(crate) struct AppState {
     running:         Arc<AtomicBool>,
     iteration:       Arc<AtomicU32>,
     notebook:        Arc<Mutex<Vec<serde_json::Value>>>,
-    log:             Arc<Mutex<ExplorationLog>>,
+    log:             Arc<Mutex<ExecutionLog>>,
     events:          EventBuffer,
     journal:         Arc<Mutex<DiscoveryJournal>>,
     /// SQLite persistence — dual-write target for all journal mutations.
@@ -96,6 +96,7 @@ async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
         let running = q.items().iter().filter(|i| i.status == protocol_queue::QueueStatus::Running).count();
         (pending, running)
     };
+    let hardware_mode = s.sila_clients.is_some();
     axum::Json(serde_json::json!({
         "running":       s.running.load(Ordering::SeqCst),
         "iteration":     s.iteration.load(Ordering::SeqCst),
@@ -104,6 +105,7 @@ async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
         "loop_status":   loop_status,
         "queue_pending": queue_pending,
         "queue_running": queue_running,
+        "hardware_mode": hardware_mode,
     }))
 }
 
@@ -502,7 +504,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<String>(16);
         let events  = EventBuffer::default();
         let journal = Arc::new(Mutex::new(DiscoveryJournal::default()));
-        let log     = Arc::new(Mutex::new(ws_sink::ExplorationLog::default()));
+        let log     = Arc::new(Mutex::new(ws_sink::ExecutionLog::default()));
         let approval_queue = PendingApprovalQueue::new();
 
         let state = AppState {
@@ -857,7 +859,7 @@ async fn main() {
         running:        Arc::new(AtomicBool::new(false)),
         iteration:      Arc::new(AtomicU32::new(0)),
         notebook:       Arc::new(Mutex::new(Vec::new())),
-        log:            Arc::new(Mutex::new(ExplorationLog::from_journal(&journal.lock().unwrap()))),
+        log:            Arc::new(Mutex::new(ExecutionLog::from_journal(&journal.lock().unwrap()))),
         events:         events.clone(),
         journal:        Arc::clone(&journal),
         db:             Arc::clone(&sqlite_db),

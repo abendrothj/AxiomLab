@@ -33,7 +33,7 @@ export interface NotebookEntryEvent {
 
 /** Live execution-loop pacing — wait until next experiment, backoff, idle, etc. */
 export interface LoopStatus {
-  phase: "running" | "paused" | "idle" | "backoff" | "converged" | string;
+  phase: "running" | "paused" | "idle" | "backoff" | "converged" | "commissioning" | string;
   reason: string;
   wait_secs: number;
   resume_at_ms: number;

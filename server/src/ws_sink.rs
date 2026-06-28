@@ -45,18 +45,18 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-// ── Exploration log ───────────────────────────────────────────────────────────
+// ── Execution log ─────────────────────────────────────────────────────────────
 
 #[derive(Default)]
-pub struct ExplorationLog {
+pub struct ExecutionLog {
     pub findings:   Vec<String>,
     pub rejections: Vec<(String, String)>, // (tool, reason)
     pub successes:  Vec<String>,
 }
 
-impl ExplorationLog {
-    /// Seed findings from a persisted `DiscoveryJournal` so the mandate
-    /// correctly shows "already discovered" after a server restart.
+impl ExecutionLog {
+    /// Seed findings from a persisted operation log so the mandate
+    /// correctly reflects completed procedures after a server restart.
     pub fn from_journal(journal: &DiscoveryJournal) -> Self {
         Self {
             findings: journal.findings.iter().map(|f| f.statement.clone()).collect(),
@@ -119,7 +119,7 @@ impl EventBuffer {
 /// to the operation log (JSON + SQLite).
 pub struct WebSocketSink {
     pub tx:       broadcast::Sender<String>,
-    pub log:      Arc<Mutex<ExplorationLog>>,
+    pub log:      Arc<Mutex<ExecutionLog>>,
     pub notebook: Arc<Mutex<Vec<serde_json::Value>>>,
     pub events:   EventBuffer,
     pub journal:  Arc<Mutex<DiscoveryJournal>>,

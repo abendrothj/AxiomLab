@@ -80,6 +80,7 @@ export default function App() {
   const [pendingCount, setPendingCount]   = useState(0);
   const [loopStatus, setLoopStatus]       = useState<LoopStatus | null>(null);
   const [queuePending, setQueuePending]   = useState(0);
+  const [hardwareMode, setHardwareMode]   = useState(false);
   const thinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshPending = useCallback(() => {
@@ -99,6 +100,7 @@ export default function App() {
       if (s.iteration) setIteration(s.iteration);
       if (s.loop_status) setLoopStatus(s.loop_status as LoopStatus);
       if (typeof s.queue_pending === "number") setQueuePending(s.queue_pending);
+      if (typeof s.hardware_mode === "boolean") setHardwareMode(s.hardware_mode);
     });
 
     // Pending approvals count for tab badge
@@ -172,6 +174,7 @@ export default function App() {
         tab={tab} onTabChange={setTab}
         pendingCount={pendingCount}
         queuePending={queuePending}
+        hardwareMode={hardwareMode}
       />
 
       {tab === "dashboard" && (
@@ -217,9 +220,9 @@ const TAB_LABELS: Record<Tab, string> = {
   queue: "QUEUE",
 };
 
-function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount, queuePending }: {
+function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount, queuePending, hardwareMode }: {
   stage: string; stageColor: string; iteration: number; connected: boolean;
-  tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number; queuePending: number;
+  tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number; queuePending: number; hardwareMode: boolean;
 }) {
   const [stopping, setStopping] = useState(false);
   const [stopMsg, setStopMsg]   = useState<string | null>(null);
@@ -368,6 +371,23 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pen
         >
           {stopMsg ?? (stopping ? "STOPPING…" : "⬛ E-STOP")}
         </button>
+
+        {/* Hardware mode indicator */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 5,
+          fontSize: 8, letterSpacing: "0.1em",
+          color: hardwareMode ? "#00ff9d" : "#2a4a5a",
+          padding: "2px 8px",
+          border: `1px solid ${hardwareMode ? "#00ff9d22" : "#1a2a3a"}`,
+          borderRadius: 2,
+        }}>
+          <span style={{
+            width: 5, height: 5, borderRadius: "50%",
+            background: hardwareMode ? "#00ff9d" : "#2a4a5a",
+            boxShadow: hardwareMode ? "0 0 4px #00ff9d" : "none",
+          }} />
+          {hardwareMode ? "SILA 2" : "SIMULATOR"}
+        </div>
 
         {/* Connection indicator */}
         <div style={{

@@ -180,7 +180,7 @@ function PendingCard({
         <span style={{ fontSize: 9, color: "#1a3040" }}>{reltime(info.queued_at)}</span>
       </div>
 
-      {/* Hypothesis */}
+      {/* Active directive */}
       {info.hypothesis && (
         <div style={{ fontSize: 11, color: "#5a8090", marginBottom: 10, lineHeight: 1.5 }}>
           {info.hypothesis}
