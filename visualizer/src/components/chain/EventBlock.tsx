@@ -1,10 +1,11 @@
 /// Card representing a single audit event in the chain view.
 ///
 /// Left border colour:
-///   green  = allow
+///   cyan   = allow
 ///   red    = deny
-///   amber  = stalled / pending_dispatch
-///   slate  = other (session_start, rekor_checkpoint, …)
+///   amber  = stalled / pending_dispatch / safety gate denial
+///   indigo = rekor_checkpoint
+///   slate  = other (session_start, …)
 ///
 /// Click to expand the full JSON payload.
 
@@ -20,10 +21,8 @@ export interface AuditEntry {
   reason?: string;
   entry_hash?: string;
   prev_hash?: string;
-  sig?: string;
+  entry_sig_b64?: string;
   rekor_uuid?: string;
-  zk_tx_hash?: string;
-  zk_status?: string;
   [key: string]: unknown;
 }
 
@@ -34,8 +33,26 @@ interface EventBlockProps {
   onClick: (lineIndex: number) => void;
 }
 
+function isSafetyGateDeny(entry: AuditEntry): boolean {
+  if (entry.decision !== "deny") return false;
+  const r = (entry.reason ?? "").toLowerCase();
+  return (
+    r.includes("sandbox") ||
+    r.includes("calibration_required") ||
+    r.includes("calibration for") ||
+    r.includes("high-risk action denied") ||
+    r.includes("approval violation") ||
+    r.includes("operator denied") ||
+    r.includes("revoked") ||
+    r.includes("proof policy") ||
+    r.includes("fail-closed")
+  );
+}
+
 function borderColor(entry: AuditEntry): string {
+  if (entry.action === "rekor_checkpoint") return "#6366f1";
   if (entry.action === "pending_dispatch" || entry.action === "stalled_dispatch") return "#c97a00";
+  if (isSafetyGateDeny(entry)) return "#f59e0b";
   switch (entry.decision) {
     case "allow": return "#00d4ff";
     case "deny":  return "#ff4444";
@@ -45,8 +62,9 @@ function borderColor(entry: AuditEntry): string {
 
 function decisionBadge(entry: AuditEntry) {
   if (!entry.decision) return null;
-  const color = entry.decision === "allow" ? "#00d4ff" : "#ff4444";
-  const bg    = entry.decision === "allow" ? "#001a22" : "#220000";
+  const gate = isSafetyGateDeny(entry);
+  const color = entry.decision === "allow" ? "#00d4ff" : gate ? "#f59e0b" : "#ff4444";
+  const bg    = entry.decision === "allow" ? "#001a22" : gate ? "#1a0e00" : "#220000";
   return (
     <span style={{
       fontSize: 8, letterSpacing: "0.1em",
@@ -68,11 +86,11 @@ function formatTime(unix_secs?: number): string {
 export default function EventBlock({ entry, lineIndex, highlighted, onClick }: EventBlockProps) {
   const [expanded, setExpanded] = useState(false);
   const bc = borderColor(entry);
+  const gate = isSafetyGateDeny(entry);
 
-  const hasSig    = Boolean(entry.sig);
+  const hasSig    = Boolean(entry.entry_sig_b64);
   const rekorUuid = entry.rekor_uuid as string | undefined;
-  const zkTxHash  = entry.zk_tx_hash as string | undefined;
-  const zkStatus  = entry.zk_status as string | undefined;
+  const isRekorCheckpoint = entry.action === "rekor_checkpoint";
 
   return (
     <div
@@ -93,6 +111,15 @@ export default function EventBlock({ entry, lineIndex, highlighted, onClick }: E
       {/* Top row */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         {decisionBadge(entry)}
+        {gate && (
+          <span style={{
+            fontSize: 8, color: "#f59e0b", background: "#1a0e00",
+            border: "1px solid #f59e0b40", padding: "1px 5px", borderRadius: 2,
+            letterSpacing: "0.1em",
+          }}>
+            SAFETY GATE
+          </span>
+        )}
         <span style={{ fontSize: 10, color: "#5a8090", letterSpacing: "0.08em" }}>
           {entry.action ?? "event"}
         </span>
@@ -118,42 +145,30 @@ export default function EventBlock({ entry, lineIndex, highlighted, onClick }: E
       </div>
 
       {/* Badge row */}
-      {(hasSig || rekorUuid || zkTxHash || zkStatus) && (
+      {(hasSig || rekorUuid || isRekorCheckpoint) && (
         <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
           {hasSig && (
             <span style={{ fontSize: 8, color: "#00aa80", background: "#001a14",
               border: "1px solid #00aa8030", padding: "1px 5px", borderRadius: 2 }}>
-              ✓ sig
+              ✓ signed
             </span>
           )}
           {rekorUuid && (
             <a
-              href={`https://rekor.sigstore.dev/api/v1/log/entries?logIndex=${rekorUuid}`}
+              href={`https://rekor.sigstore.dev/api/v1/log/entries/${rekorUuid}`}
               target="_blank" rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
-              style={{ fontSize: 8, color: "#8080ff", background: "#0d0d2a",
-                border: "1px solid #8080ff30", padding: "1px 5px", borderRadius: 2,
+              style={{ fontSize: 8, color: "#818cf8", background: "#0d0d2a",
+                border: "1px solid #818cf830", padding: "1px 5px", borderRadius: 2,
                 textDecoration: "none" }}
             >
-              Rekor {rekorUuid.slice(0, 8)}…
+              ⬡ Rekor {rekorUuid.slice(0, 8)}…
             </a>
           )}
-          {zkTxHash && (
-            <a
-              href={`https://basescan.org/tx/${zkTxHash}`}
-              target="_blank" rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              style={{ fontSize: 8, color: "#a060ff", background: "#15002a",
-                border: "1px solid #a060ff30", padding: "1px 5px", borderRadius: 2,
-                textDecoration: "none" }}
-            >
-              ✓ ZK on-chain
-            </a>
-          )}
-          {!zkTxHash && zkStatus === "pending" && (
-            <span style={{ fontSize: 8, color: "#808040", background: "#1a1a00",
-              border: "1px solid #808040", padding: "1px 5px", borderRadius: 2 }}>
-              ⏳ ZK pending
+          {isRekorCheckpoint && !rekorUuid && (
+            <span style={{ fontSize: 8, color: "#6366f1", background: "#0d0d2a",
+              border: "1px solid #6366f130", padding: "1px 5px", borderRadius: 2 }}>
+              ⬡ rekor checkpoint
             </span>
           )}
         </div>

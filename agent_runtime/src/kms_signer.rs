@@ -105,7 +105,7 @@ mod inner {
                         .key_id(&self.key_id)
                         .message(aws_sdk_kms::primitives::Blob::new(data.to_vec()))
                         .message_type(aws_sdk_kms::types::MessageType::Raw)
-                        .signing_algorithm(aws_sdk_kms::types::SigningAlgorithmSpec::EcdsaSha256)
+                        .signing_algorithm(aws_sdk_kms::types::SigningAlgorithmSpec::EdDsa)
                         .send()
                         .await;
 

@@ -682,6 +682,10 @@ struct PersistedAuditEvent<'a> {
     /// Base64-encoded Ed25519 public key that produced `entry_sig_b64`.
     #[serde(skip_serializing_if = "Option::is_none")]
     entry_pubkey_b64: Option<String>,
+    /// Sigstore Rekor entry UUID — present only on `rekor_checkpoint` entries.
+    /// Allows UIs to construct the Rekor lookup URL without parsing `reason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rekor_uuid: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -770,6 +774,7 @@ pub fn emit_jsonl(
         entry_hash,
         entry_sig_b64,
         entry_pubkey_b64,
+        rekor_uuid: None,
     };
 
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
@@ -1142,27 +1147,66 @@ pub async fn rekor_submit(
 }
 
 /// Write a `rekor_checkpoint` entry into the audit log after a successful anchor.
+///
+/// The `rekor_uuid` is written as a top-level field in addition to `reason` so
+/// that the Chain Explorer UI can construct the Rekor lookup link without
+/// parsing the `reason` JSON.
 pub fn emit_rekor_checkpoint(
     path: &str,
     anchor: &RekorAnchor,
     signer: Option<&dyn AuditSigner>,
 ) -> Result<String, std::io::Error> {
+    if let Some(parent) = Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    try_set_append_only(path);
+
     let details = serde_json::json!({
         "uuid": anchor.uuid,
         "integrated_time": anchor.integrated_time,
         "artifact_hash": anchor.artifact_hash,
     });
+    let reason_str = details.to_string();
+    let trace_id_str = format!("rekor_checkpoint-{}", &anchor.uuid[..8.min(anchor.uuid.len())]);
+
     let event = AuditEvent {
         unix_secs: unix_secs_now(),
-        trace_id: format!("rekor_checkpoint-{}", &anchor.uuid[..8.min(anchor.uuid.len())]),
+        trace_id: trace_id_str.clone(),
         action: "rekor_checkpoint".into(),
         decision: "allow".into(),
-        reason: details.to_string(),
+        reason: reason_str.clone(),
         success: true,
         approval_ids: None,
         reasoning_text: None,
     };
-    emit_jsonl(path, &event, signer)
+
+    let prev_hash = last_entry_hash(path)?;
+    let (entry_hash, canonical_bytes) = compute_entry_hash_with_bytes(&event, prev_hash.as_deref())?;
+    let (entry_sig_b64, entry_pubkey_b64) = signer
+        .map(|s| (Some(s.sign(&canonical_bytes)), Some(s.public_key_b64())))
+        .unwrap_or((None, None));
+
+    let persisted = PersistedAuditEvent {
+        unix_secs: event.unix_secs,
+        trace_id: &trace_id_str,
+        action: "rekor_checkpoint",
+        decision: "allow",
+        reason: &reason_str,
+        success: true,
+        approval_ids: None,
+        reasoning_text: None,
+        prev_hash: prev_hash.as_deref(),
+        entry_hash,
+        entry_sig_b64,
+        entry_pubkey_b64,
+        rekor_uuid: Some(anchor.uuid.clone()),
+    };
+
+    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    let line = serde_json::to_string(&persisted)
+        .map_err(|e| std::io::Error::other(format!("serialize rekor_checkpoint: {e}")))?;
+    writeln!(f, "{}", line)?;
+    Ok(line)
 }
 
 // ── Protocol state scanner ────────────────────────────────────────────────────
