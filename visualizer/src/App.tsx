@@ -77,8 +77,9 @@ export default function App() {
   const [toolEvents, setToolEvents]     = useState<ToolExecutionEvent[]>([]);
   const [notebook, setNotebook]         = useState<NotebookEntryEvent[]>([]);
   const [transitions, setTransitions]   = useState<StateTransitionEvent[]>([]);
-  const [pendingCount, setPendingCount] = useState(0);
+  const [pendingCount, setPendingCount]   = useState(0);
   const [loopStatus, setLoopStatus]       = useState<LoopStatus | null>(null);
+  const [queuePending, setQueuePending]   = useState(0);
   const thinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshPending = useCallback(() => {
@@ -97,6 +98,7 @@ export default function App() {
     apiStatus().then((s) => {
       if (s.iteration) setIteration(s.iteration);
       if (s.loop_status) setLoopStatus(s.loop_status as LoopStatus);
+      if (typeof s.queue_pending === "number") setQueuePending(s.queue_pending);
     });
 
     // Pending approvals count for tab badge
@@ -169,6 +171,7 @@ export default function App() {
         iteration={iteration} connected={connected}
         tab={tab} onTabChange={setTab}
         pendingCount={pendingCount}
+        queuePending={queuePending}
       />
 
       {tab === "dashboard" && (
@@ -214,9 +217,9 @@ const TAB_LABELS: Record<Tab, string> = {
   queue: "QUEUE",
 };
 
-function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount }: {
+function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount, queuePending }: {
   stage: string; stageColor: string; iteration: number; connected: boolean;
-  tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number;
+  tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number; queuePending: number;
 }) {
   const [stopping, setStopping] = useState(false);
   const [stopMsg, setStopMsg]   = useState<string | null>(null);
@@ -280,7 +283,7 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pen
               background: tab === t ? "#0f1a26" : "transparent",
               border: `1px solid ${tab === t ? "#1a3a50" : "transparent"}`,
               borderRadius: 3,
-              color: tab === t ? "#00d4ff" : t === "approvals" && pendingCount > 0 ? "#fd7e14" : "#2a4a5a",
+              color: tab === t ? "#00d4ff" : (t === "approvals" && pendingCount > 0) || (t === "queue" && queuePending > 0) ? "#a78bfa" : "#2a4a5a",
               fontSize: 9, letterSpacing: "0.12em",
               padding: "4px 12px",
               cursor: "pointer",
@@ -298,6 +301,17 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pen
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 {pendingCount > 9 ? "9+" : pendingCount}
+              </span>
+            )}
+            {t === "queue" && queuePending > 0 && (
+              <span style={{
+                position: "absolute", top: -4, right: -4,
+                background: "#a78bfa", color: "#070912",
+                fontSize: 7, fontWeight: 700,
+                width: 13, height: 13, borderRadius: "50%",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {queuePending > 9 ? "9+" : queuePending}
               </span>
             )}
           </button>

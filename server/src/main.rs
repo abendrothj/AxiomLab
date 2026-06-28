@@ -90,12 +90,20 @@ async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
         .unwrap_or(1)
         .clamp(1, 4);
     let loop_status = s.loop_status.lock().unwrap().clone();
+    let (queue_pending, queue_running) = {
+        let q = s.protocol_queue.lock().unwrap();
+        let pending = q.items().iter().filter(|i| i.status == protocol_queue::QueueStatus::Pending).count();
+        let running = q.items().iter().filter(|i| i.status == protocol_queue::QueueStatus::Running).count();
+        (pending, running)
+    };
     axum::Json(serde_json::json!({
-        "running":     s.running.load(Ordering::SeqCst),
-        "iteration":   s.iteration.load(Ordering::SeqCst),
-        "notebook":    notebook,
-        "slot_count":  slot_count,
-        "loop_status": loop_status,
+        "running":       s.running.load(Ordering::SeqCst),
+        "iteration":     s.iteration.load(Ordering::SeqCst),
+        "notebook":      notebook,
+        "slot_count":    slot_count,
+        "loop_status":   loop_status,
+        "queue_pending": queue_pending,
+        "queue_running": queue_running,
     }))
 }
 
