@@ -4,6 +4,7 @@ mod audit_query;
 mod auth;
 mod db;
 mod discovery;
+mod protocol_queue;
 mod simulator;
 mod ws_sink;
 
@@ -27,6 +28,7 @@ use agent_runtime::audit::{
 use agent_runtime::hardware::SiLA2Clients;
 use agent_runtime::lab_state::{LabState, Reagent};
 use discovery::{journal_path, DiscoveryJournal};
+use protocol_queue::ProtocolQueue;
 use std::{
     net::SocketAddr,
     sync::{
@@ -60,7 +62,9 @@ pub(crate) struct AppState {
     pub lab_state: Arc<Mutex<LabState>>,
     /// Rich hypothesis state machine — shared with the orchestrator.
     pub hypothesis_manager: Arc<Mutex<HypothesisManager>>,
-    /// Live exploration-loop pacing status (wait-until-next-experiment, etc.).
+    /// Operator protocol queue — the primary interface for directing lab execution.
+    pub protocol_queue: Arc<Mutex<ProtocolQueue>>,
+    /// Live execution-loop pacing status (wait-until-next-experiment, etc.).
     loop_status: Arc<Mutex<ws_sink::LoopStatus>>,
     /// Prometheus metrics handle — rendered by GET /metrics.
     metrics_handle: PrometheusHandle,
@@ -206,6 +210,50 @@ async fn lab_calibration_status_handler(State(s): State<AppState>) -> impl IntoR
         })
     }).collect();
     axum::Json(serde_json::json!({"calibration_status": statuses, "checked_at_secs": now_secs}))
+}
+
+// ── Protocol queue routes ─────────────────────────────────────────────────────
+
+/// `GET /api/queue` — list all queue items (pending + recent history).
+async fn queue_list_handler(State(s): State<AppState>) -> impl IntoResponse {
+    let items = s.protocol_queue.lock().unwrap().items().to_vec();
+    axum::Json(serde_json::json!({ "items": items }))
+}
+
+#[derive(serde::Deserialize)]
+struct EnqueueRequest {
+    statement: String,
+    #[serde(default)]
+    priority:  u8,
+}
+
+/// `POST /api/queue` — push a new protocol directive onto the queue.
+async fn queue_enqueue_handler(
+    State(s): State<AppState>,
+    Json(body): Json<EnqueueRequest>,
+) -> impl IntoResponse {
+    if body.statement.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            axum::Json(serde_json::json!({"error": "statement must not be empty"})),
+        ).into_response();
+    }
+    let id = s.protocol_queue.lock().unwrap().enqueue(body.statement, body.priority);
+    tracing::info!(queue_id = %id, priority = body.priority, "Protocol queued by operator");
+    (StatusCode::CREATED, axum::Json(serde_json::json!({"id": id}))).into_response()
+}
+
+/// `DELETE /api/queue/:id` — remove a queued item (any status).
+async fn queue_remove_handler(
+    Path(id): Path<String>,
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let removed = s.protocol_queue.lock().unwrap().remove(&id);
+    if removed {
+        axum::Json(serde_json::json!({"status": "removed", "id": id})).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "not found"}))).into_response()
+    }
 }
 
 // ── POST /api/emergency-stop ──────────────────────────────────────────────────
@@ -371,6 +419,10 @@ pub(crate) fn build_router(approval_queue: Arc<PendingApprovalQueue>) -> Router<
         .route("/api/lab/reagents",                get(lab_reagents_handler))
         .route("/api/lab/vessels",                 get(lab_vessels_handler))
         .route("/api/lab/calibration-status",      get(lab_calibration_status_handler))
+        // Protocol queue — operator interface for directing lab execution.
+        .route("/api/queue",                       get(queue_list_handler))
+        .route("/api/queue",                       post(queue_enqueue_handler))
+        .route("/api/queue/:id",                   delete(queue_remove_handler))
         // Approvals sub-router (own state, no auth middleware).
         .merge(approvals_router)
         .layer(CorsLayer::permissive())
@@ -459,6 +511,9 @@ mod tests {
             sila_clients:       None,
             lab_state:          Arc::new(Mutex::new(LabState::default())),
             hypothesis_manager: Arc::new(Mutex::new(HypothesisManager::default())),
+            protocol_queue:     Arc::new(Mutex::new(ProtocolQueue::load(
+                                    &ProtocolQueue::default_path()
+                                ))),
             loop_status: Arc::new(Mutex::new(ws_sink::LoopStatus::default())),
             metrics_handle:     metrics_exporter_prometheus::PrometheusBuilder::new()
                                     .build_recorder()
@@ -805,6 +860,9 @@ async fn main() {
         hypothesis_manager: Arc::new(Mutex::new(
             sqlite_db.load_hypothesis_manager().unwrap_or_default()
         )),
+        protocol_queue: Arc::new(Mutex::new(ProtocolQueue::load(
+            &ProtocolQueue::default_path()
+        ))),
         loop_status: Arc::new(Mutex::new(ws_sink::LoopStatus::default())),
         metrics_handle,
     };
@@ -827,8 +885,9 @@ async fn main() {
         let sila_for_loop      = sila_clients.clone();
         let lab_for_loop       = Arc::clone(&state.lab_state);
         let hyp_mgr_for_loop   = Arc::clone(&state.hypothesis_manager);
+        let pq_for_loop        = Arc::clone(&state.protocol_queue);
         tokio::spawn(async move {
-            simulator::run_loop(sink, running.clone(), iteration, approval_queue, db_for_loop, sila_for_loop, lab_for_loop, hyp_mgr_for_loop).await;
+            simulator::run_loop(sink, running.clone(), iteration, approval_queue, db_for_loop, sila_for_loop, lab_for_loop, hyp_mgr_for_loop, pq_for_loop).await;
             running.store(false, Ordering::SeqCst);
         });
     }

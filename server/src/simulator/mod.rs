@@ -4,6 +4,7 @@ pub mod protocol_library;
 mod tools;
 
 use crate::discovery::HypothesisStatus;
+use crate::protocol_queue::ProtocolQueue;
 use crate::ws_sink::WebSocketSink;
 use agent_runtime::{
     approval_queue::PendingApprovalQueue,
@@ -17,6 +18,7 @@ use agent_runtime::{
     revocation::RevocationList,
 };
 use crate::discovery::DiscoveryJournal;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -25,9 +27,9 @@ use std::sync::{
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
 
-// ── Loop pacing ───────────────────────────────────────────────────────────────
+// ── Execution loop pacing ─────────────────────────────────────────────────────
 
-/// Tunable exploration-loop pacing (all overridable via env).
+/// Tunable execution-loop pacing (all overridable via env).
 struct LoopConfig {
     max_iterations:        u32,
     inter_run_pause_secs:  u64,
@@ -202,6 +204,7 @@ struct ExperimentTask {
 /// Result returned from a completed experiment task.
 struct TaskResult {
     slot:                  usize,
+    experiment_id:         String,
     converged:             bool,
     exhausted_iterations:  bool,
 }
@@ -215,6 +218,7 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
             tracing::error!("LLM init failed for slot {}: {e}", task.slot);
             return TaskResult {
                 slot: task.slot,
+                experiment_id: task.experiment_id.clone(),
                 converged: false,
                 exhausted_iterations: false,
             };
@@ -260,6 +264,7 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
 
     TaskResult {
         slot: task.slot,
+        experiment_id: task.experiment_id.clone(),
         converged,
         exhausted_iterations: experiment_exhausted_iterations(&experiment),
     }
@@ -278,10 +283,10 @@ async fn pause_after_run(
 
     if res.converged {
         *consecutive_exhaustions = 0;
-        tracing::info!("All hypotheses settled — exploration converged. Pausing 60 s.");
+        tracing::info!("Execution cycle converged — all directives settled. Pausing 60 s.");
         sink.set_loop_status(
             "converged",
-            "All hypotheses settled — pausing before next cycle",
+            "All directives settled — pausing before next cycle",
             60,
         );
         sleep(Duration::from_secs(60)).await;
@@ -339,7 +344,16 @@ async fn pause_after_run(
     sleep(Duration::from_secs(pause)).await;
 }
 
-// ── Exploration loop ───────────────────────────────────────────────────────────
+// ── Execution loop ────────────────────────────────────────────────────────────
+//
+// Priority order for each cycle:
+//   1. Pending items in the operator protocol queue (highest priority)
+//   2. Proposed directives in the journal (from the commissioning agenda)
+//   3. Seed the next commissioning procedure from the science agenda
+//
+// The queue is the primary interface: operators push work here and the loop
+// executes it. The science agenda is fallback commissioning that keeps the
+// system characterizing instruments when no operator work is queued.
 
 pub async fn run_loop(
     sink:               Arc<WebSocketSink>,
@@ -350,6 +364,7 @@ pub async fn run_loop(
     sila_clients:       Option<Arc<agent_runtime::hardware::SiLA2Clients>>,
     lab_state:          Arc<Mutex<LabState>>,
     hypothesis_manager: Arc<Mutex<HypothesisManager>>,
+    protocol_queue:     Arc<Mutex<ProtocolQueue>>,
 ) {
     let policy     = CapabilityPolicy::default_lab();
     let scheduler  = SlotManager::from_env();
@@ -360,7 +375,7 @@ pub async fn run_loop(
         max_iterations = loop_cfg.max_iterations,
         inter_run_pause_secs = loop_cfg.inter_run_pause_secs,
         idle_pause_secs = loop_cfg.idle_pause_secs,
-        "Exploration loop starting ({} concurrent experiment slot(s))",
+        "Execution loop starting ({} concurrent experiment slot(s))",
         scheduler.slot_count,
     );
 
@@ -379,6 +394,8 @@ pub async fn run_loop(
     let mut iteration               = 0u32;
     let mut consecutive_exhaustions = 0u32;
     let mut join_set: JoinSet<TaskResult> = JoinSet::new();
+    // Maps experiment_id → queued-item-id for items that came from the protocol queue.
+    let mut queued_experiment_map: HashMap<String, String> = HashMap::new();
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -394,6 +411,17 @@ pub async fn run_loop(
                     continue;
                 }
             };
+            // Update the protocol queue if this experiment served a queued item.
+            if let Some(queue_id) = queued_experiment_map.remove(&res.experiment_id) {
+                let mut q = protocol_queue.lock().unwrap();
+                if res.converged {
+                    q.mark_completed(&queue_id, "Execution converged — quantitative finding recorded".into());
+                } else if res.exhausted_iterations {
+                    q.mark_failed(&queue_id, "Max iterations reached without converging".into());
+                } else {
+                    q.mark_completed(&queue_id, "Execution cycle finished".into());
+                }
+            }
             scheduler.release(res.slot, &[]);
             tracing::debug!(slot = res.slot, converged = res.converged, "Slot freed");
             pause_after_run(
@@ -408,27 +436,48 @@ pub async fn run_loop(
 
         // ── Fill available slots ───────────────────────────────────────────────
         while scheduler.available_slots() > 0 && running.load(Ordering::SeqCst) {
-            if should_idle_exploration(&sink.journal.lock().unwrap()) {
-                let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
-                if seeded {
-                    sink.set_loop_status(
-                        "exploring",
-                        "New hypothesis seeded — starting next experiment",
-                        0,
+            // Priority 1: operator-queued protocols take precedence over everything.
+            let queued_directive = {
+                let q = protocol_queue.lock().unwrap();
+                q.next_pending().map(|item| (item.id.clone(), item.statement.clone()))
+            };
+
+            // Priority 2: proposed journal directives (from the commissioning agenda).
+            let journal_directive = if queued_directive.is_none() {
+                let j = sink.journal.lock().unwrap();
+                j.hypotheses.iter()
+                    .find(|h| h.status == HypothesisStatus::Proposed)
+                    .map(|h| (h.id.clone(), h.statement.clone()))
+            } else {
+                None
+            };
+
+            // Priority 3: seed the next commissioning procedure when nothing is queued.
+            let active_directive = queued_directive.or(journal_directive);
+            if active_directive.is_none() {
+                // Nothing from queue or journal — check if we need to seed a new procedure.
+                if should_idle_exploration(&sink.journal.lock().unwrap()) {
+                    let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
+                    if seeded {
+                        sink.set_loop_status(
+                            "commissioning",
+                            "Commissioning procedure seeded — starting execution",
+                            0,
+                        );
+                        continue;
+                    }
+                    tracing::info!(
+                        pause_secs = loop_cfg.idle_pause_secs,
+                        "Commissioning agenda complete — idling until new operator directives arrive"
                     );
-                    continue;
+                    sink.set_loop_status(
+                        "idle",
+                        "Commissioning complete — awaiting operator directives via /api/queue",
+                        loop_cfg.idle_pause_secs,
+                    );
+                    sleep(Duration::from_secs(loop_cfg.idle_pause_secs)).await;
+                    break;
                 }
-                tracing::info!(
-                    pause_secs = loop_cfg.idle_pause_secs,
-                    "Science agenda exhausted — all planned experiments complete, extended idle"
-                );
-                sink.set_loop_status(
-                    "idle",
-                    "All planned experiments complete — idling for new questions",
-                    loop_cfg.idle_pause_secs,
-                );
-                sleep(Duration::from_secs(loop_cfg.idle_pause_secs)).await;
-                break;
             }
 
             iteration += 1;
@@ -438,27 +487,28 @@ pub async fn run_loop(
             let instruments: &[&str] = &[];
             let exp_id = format!("exp-{iteration}-{}", uuid::Uuid::new_v4());
 
+            // If this experiment serves a queued item, record the mapping.
+            if let Some((ref qid, _)) = active_directive {
+                // Only queue items have UUIDs without the "hyp-" prefix used by journal hypotheses.
+                let is_queue_item = !qid.starts_with("hyp-");
+                if is_queue_item {
+                    protocol_queue.lock().unwrap().mark_running(qid, &exp_id);
+                    queued_experiment_map.insert(exp_id.clone(), qid.clone());
+                    tracing::info!(queue_id = %qid, exp_id = %exp_id, "Executing operator-queued protocol");
+                } else {
+                    tracing::info!(directive = %qid, slot = 0, "Executing commissioning directive");
+                }
+            }
+
             let slot = match scheduler.try_acquire(&exp_id, instruments) {
                 Some(s) => s,
                 None    => break, // all slots busy (shouldn't happen here, but guard)
             };
 
-            // Pick the oldest proposed hypothesis for guided mode.
-            let active_hypothesis = {
-                let j = sink.journal.lock().unwrap();
-                j.hypotheses.iter()
-                    .find(|h| h.status == HypothesisStatus::Proposed)
-                    .map(|h| (h.id.clone(), h.statement.clone()))
-            };
-
-            if let Some((_, ref stmt)) = active_hypothesis {
-                tracing::info!(hypothesis = %stmt, slot, "Slot {slot}: guided mode");
-            }
-
             let (mandate, journal_summary, findings_at_start, calibration_status) = {
                 let log     = sink.log.lock().unwrap();
                 let journal = sink.journal.lock().unwrap();
-                let m = mandate::build_mandate(iteration, &log, &journal, &policy, active_hypothesis.as_ref());
+                let m = mandate::build_mandate(iteration, &log, &journal, &policy, active_directive.as_ref());
                 let s = journal.summary_for_llm();
                 let f = journal.findings.len() as u32;
                 let now = std::time::SystemTime::now()
