@@ -83,6 +83,7 @@ export default function App() {
   const [hardwareMode, setHardwareMode]       = useState(false);
   const [agendaComplete, setAgendaComplete]   = useState(false);
   const [findingToast, setFindingToast]       = useState<FindingRecordedEvent | null>(null);
+  const [chainOk, setChainOk]               = useState<boolean | null>(null);
   const thinkTimer      = useRef<ReturnType<typeof setTimeout> | null>(null);
   const findingTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -107,6 +108,15 @@ export default function App() {
       if (typeof s.agenda_complete === "boolean") setAgendaComplete(s.agenda_complete);
     });
 
+    // Chain verification — poll every 60 s (verify_chain reads the full log)
+    const checkChain = () =>
+      fetch(`${API}/audit/verify`)
+        .then((r) => r.json())
+        .then((b) => setChainOk(b.verified === true))
+        .catch(() => {});
+    checkChain();
+    const chainPoll = setInterval(checkChain, 60_000);
+
     // Pending approvals count for tab badge
     refreshPending();
     const pendingPoll = setInterval(refreshPending, 5000);
@@ -118,6 +128,7 @@ export default function App() {
     return () => {
       clearInterval(connPoll);
       clearInterval(pendingPoll);
+      clearInterval(chainPoll);
     };
   }, []);
 
@@ -192,6 +203,7 @@ export default function App() {
         queuePending={queuePending}
         hardwareMode={hardwareMode}
         agendaComplete={agendaComplete}
+        chainOk={chainOk}
       />
 
       {/* Finding toast — shown for 6 s when analyze_series records a result */}
@@ -266,9 +278,10 @@ const TAB_LABELS: Record<Tab, string> = {
   queue: "QUEUE",
 };
 
-function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount, queuePending, hardwareMode, agendaComplete }: {
+function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount, queuePending, hardwareMode, agendaComplete, chainOk }: {
   stage: string; stageColor: string; iteration: number; connected: boolean;
   tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number; queuePending: number; hardwareMode: boolean; agendaComplete: boolean;
+  chainOk: boolean | null;
 }) {
   const [stopping, setStopping] = useState(false);
   const [stopMsg, setStopMsg]   = useState<string | null>(null);
@@ -448,6 +461,30 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pen
           }}>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#00ff9d", boxShadow: "0 0 4px #00ff9d" }} />
             COMMISSIONED
+          </div>
+        )}
+
+        {/* Chain integrity indicator */}
+        {chainOk !== null && (
+          <div
+            title={chainOk ? "Audit chain hash-verified" : "Audit chain integrity check FAILED"}
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              fontSize: 8, letterSpacing: "0.1em",
+              color: chainOk ? "#00aa70" : "#ff4444",
+              padding: "2px 8px",
+              border: `1px solid ${chainOk ? "#00aa7020" : "#ff444430"}`,
+              borderRadius: 2,
+              background: chainOk ? "#00aa7008" : "#ff000010",
+              cursor: "default",
+            }}
+          >
+            <span style={{
+              width: 5, height: 5, borderRadius: "50%",
+              background: chainOk ? "#00aa70" : "#ff4444",
+              boxShadow: chainOk ? "0 0 4px #00aa70" : "0 0 4px #ff4444",
+            }} />
+            {chainOk ? "CHAIN OK" : "CHAIN BROKEN"}
           </div>
         )}
 

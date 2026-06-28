@@ -26,6 +26,8 @@ function isChainBroken(a: AuditEntry, b: AuditEntry): boolean {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+type VerifyStatus = "ok" | "broken" | "empty" | "unknown";
+
 export default function ChainExplorer() {
   const [entries, setEntries]         = useState<AuditEntry[]>([]);
   const [loading, setLoading]         = useState(true);
@@ -33,8 +35,43 @@ export default function ChainExplorer() {
   const [filterDecision, setFilterDecision] = useState("");
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
   const [rawLog, setRawLog]           = useState<string[]>([]);
+  const [verifyStatus, setVerifyStatus] = useState<VerifyStatus>("unknown");
+  const [verifyError, setVerifyError]   = useState<string | null>(null);
   const logRef   = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // ── Verify helper ──────────────────────────────────────────────────────────
+  const verifyChain = useCallback(() => {
+    fetch(`${API}/audit/verify`)
+      .then(async (r) => {
+        const body = await r.json();
+        if (body.verified) {
+          setVerifyStatus("ok");
+          setVerifyError(null);
+        } else {
+          setVerifyStatus("broken");
+          setVerifyError(body.error ?? "Chain integrity check failed");
+        }
+      })
+      .catch(() => setVerifyStatus("unknown"));
+  }, []);
+
+  // ── Refresh helper ──────────────────────────────────────────────────────────
+  const refresh = useCallback(() => {
+    const params = new URLSearchParams({ limit: "200" });
+    fetch(`${API}/audit?${params}`)
+      .then((r) => r.json())
+      .then((data: AuditEntry[]) => {
+        setEntries(data);
+        if (data.length === 0) setVerifyStatus("empty");
+      })
+      .catch(() => {});
+    fetch(`${API}/audit/raw`)
+      .then((r) => r.text())
+      .then((text) => setRawLog(text.split("\n").filter((l) => l.trim().length > 0)))
+      .catch(() => {});
+    verifyChain();
+  }, [verifyChain]);
 
   // ── Load initial audit data ─────────────────────────────────────────────────
   useEffect(() => {
@@ -43,36 +80,23 @@ export default function ChainExplorer() {
       .then((r) => r.json())
       .then((data: AuditEntry[]) => {
         setEntries(data);
+        if (data.length === 0) setVerifyStatus("empty");
         setLoading(false);
       })
       .catch(() => setLoading(false));
 
-    // Raw log for right panel
     fetch(`${API}/audit/raw`)
       .then((r) => r.text())
       .then((text) => {
         setRawLog(text.split("\n").filter((l) => l.trim().length > 0));
       })
       .catch(() => {});
-  }, []);
 
-  // ── Refresh helper ──────────────────────────────────────────────────────────
-  const refresh = useCallback(() => {
-    const params = new URLSearchParams({ limit: "200" });
-    fetch(`${API}/audit?${params}`)
-      .then((r) => r.json())
-      .then((data: AuditEntry[]) => setEntries(data))
-      .catch(() => {});
-    fetch(`${API}/audit/raw`)
-      .then((r) => r.text())
-      .then((text) => setRawLog(text.split("\n").filter((l) => l.trim().length > 0)))
-      .catch(() => {});
-  }, []);
+    verifyChain();
+  }, [verifyChain]);
 
   // ── Subscribe to WebSocket tool events → refresh audit data ─────────────────
   useEffect(() => {
-    // Whenever a tool executes or a state transition happens, new audit entries
-    // may have been written. Re-fetch the audit log from the API.
     const unsubs = [
       eventBus.listen(EVENTS.TOOL_EXECUTION, () => refresh()),
       eventBus.listen(EVENTS.STATE_TRANSITION, () => refresh()),
@@ -126,6 +150,52 @@ export default function ChainExplorer() {
         width: "52%", display: "flex", flexDirection: "column",
         overflow: "hidden", borderRight: "1px solid #111824",
       }}>
+        {/* Integrity banner */}
+        {verifyStatus !== "unknown" && (
+          <div style={{
+            padding: "8px 18px",
+            borderBottom: "1px solid #0e1520",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            background: verifyStatus === "ok" ? "#00ff9d08"
+              : verifyStatus === "broken" ? "#ff000012"
+              : "#0a0e18",
+            flexShrink: 0,
+          }}>
+            <span style={{
+              fontSize: 7,
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: verifyStatus === "ok" ? "#00ff9d"
+                : verifyStatus === "broken" ? "#ff4444"
+                : "#2a4a5a",
+              boxShadow: verifyStatus === "ok" ? "0 0 5px #00ff9d88"
+                : verifyStatus === "broken" ? "0 0 5px #ff444488"
+                : "none",
+              flexShrink: 0,
+            }} />
+            <span style={{
+              fontSize: 9,
+              letterSpacing: "0.1em",
+              color: verifyStatus === "ok" ? "#00cc7a"
+                : verifyStatus === "broken" ? "#ff4444"
+                : "#2a4a5a",
+              fontWeight: 600,
+            }}>
+              {verifyStatus === "ok" ? "CHAIN VERIFIED"
+                : verifyStatus === "broken" ? "CHAIN BROKEN"
+                : "NO ENTRIES"}
+            </span>
+            {verifyError && (
+              <span style={{ fontSize: 9, color: "#7a2020", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                — {verifyError}
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Filter bar */}
         <div style={{
           padding: "12px 18px", borderBottom: "1px solid #0e1520",
