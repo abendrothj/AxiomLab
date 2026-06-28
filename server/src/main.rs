@@ -719,6 +719,29 @@ async fn main() {
         );
     }
 
+    // Seed perpetual calibrations for instruments that have no calibrate tool.
+    // The pH meter is calibratable by the agent via `calibrate_ph`, but the
+    // spectrophotometer and incubator have no such tool — so without a seeded
+    // record their quantitative reads (e.g. read_absorbance) would be gated
+    // off forever. Only seeds when missing, so it's a no-op after first launch.
+    {
+        let mut j = journal.lock().unwrap();
+        let mut seeded = false;
+        for (inst, standard) in [
+            ("spectrophotometer", "factory reference: 0 AU blank + 1.0 AU standard"),
+            ("incubator",         "factory reference: 25 C / 37 C set-points"),
+        ] {
+            if j.last_calibration_for(inst).is_none() {
+                j.record_calibration(inst, standard, 0.0);
+                tracing::info!(instrument = inst, "seeded perpetual instrument calibration");
+                seeded = true;
+            }
+        }
+        if seeded {
+            let _ = j.save(&path);
+        }
+    }
+
     // ── SQLite setup ──────────────────────────────────────────────────────────
     let sqlite_db = match db::Db::open(&db::db_path()) {
         Ok(d) => {
