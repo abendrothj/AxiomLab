@@ -486,7 +486,7 @@ Runs: build, manifest generation, signing, policy enforcement, sandbox/capabilit
 
 **Session continuity:** `session_start` entry written on every startup containing session UUID, Ed25519 public key, and git commit. Chains to previous file's last `entry_hash` via `prev_hash`.
 
-**Rekor checkpoints:** *(planned)* Periodic chain-tip submission to Sigstore Rekor is not yet implemented.
+**Rekor checkpoints:** After each protocol conclusion, the chain-tip hash is submitted to Sigstore Rekor as a `hashedrekord`. The returned UUID is written back into the audit log as a `rekor_checkpoint` entry. Enabled when `AXIOMLAB_REKOR_ENABLED=1` (opt-in; no-op without it). Override the endpoint with `AXIOMLAB_REKOR_URL`.
 
 **Streaming raw log (zero-copy):**
 
@@ -522,9 +522,20 @@ cargo run -p proof_artifacts --bin proofctl -- verify \
   --public-key .artifacts/proof/manifest_signing_key.public.b64
 ```
 
-### 8.6 Verify Rekor Anchor *(planned)*
+### 8.6 Verify Rekor Anchor
 
-Rekor submission is not yet implemented. When built, anchoring will POST the chain-tip hash to Sigstore Rekor after each experiment concludes and write the returned UUID back into the audit log.
+After a protocol run with `AXIOMLAB_REKOR_ENABLED=1`, the audit log will contain a `rekor_checkpoint` entry with a `rekor_uuid` field. Verify against Sigstore:
+
+```bash
+# Get the Rekor UUID from the audit log
+REKOR_UUID=$(jq -r 'select(.action == "rekor_checkpoint") | .rekor_uuid' \
+  .artifacts/audit/runtime_audit.jsonl | tail -1)
+
+# Verify it exists in the public transparency log
+curl "https://rekor.sigstore.dev/api/v1/log/entries/${REKOR_UUID}"
+```
+
+The response contains the integrated timestamp and the artifact hash. Confirm the artifact hash matches your chain-tip: `sha256sum` of the chain-tip `entry_hash` hex bytes.
 
 ### 8.7 ELN Export (Benchling)
 
@@ -556,7 +567,8 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 | `AXIOMLAB_WS_AUTH` | `1` | Set to `0` to disable JWT check on WebSocket upgrade |
 | `AXIOMLAB_EXPERIMENT_SLOTS` | `1` | Parallel experiment slots (1–4) |
 | `AXIOMLAB_ALERT_WEBHOOK_URL` | — | Slack/Discord/generic webhook for failure alerts |
-| `AXIOMLAB_REKOR_ENABLED` | — | *(planned)* Set to `1` to enable Sigstore Rekor chain-tip submission |
+| `AXIOMLAB_REKOR_ENABLED` | — | Set to `1` to enable Sigstore Rekor chain-tip submission after each protocol conclusion |
+| `AXIOMLAB_REKOR_URL` | `https://rekor.sigstore.dev/api/v1/log/entries` | Rekor endpoint override (air-gapped Rekor instances) |
 | `AXIOMLAB_BENCHLING_TOKEN` | — | Benchling API token |
 | `AXIOMLAB_BENCHLING_TENANT` | — | Benchling tenant (e.g. `myorg.benchling.com`) |
 | `AXIOMLAB_BENCHLING_PROJECT_ID` | — | Benchling project for new entries |
@@ -580,7 +592,7 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 
 - Code: [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — `FileBackedSigner::load_or_create()`
 - Status: **Resolved for single-node deployments.** `audit_signer_from_env()` loads in priority order: `AXIOMLAB_AUDIT_SIGNING_KEY` env var → `AXIOMLAB_AUDIT_SIGNING_KEY_PATH` file → auto-generate at `~/.config/axiomlab/audit_signing.key`. The key survives restarts.
-- Remaining risk: Key is on local disk. A complete chain rewrite from the same host with the same persisted key passes local checks. An external transparency witness (Rekor — planned) or HSM/KMS custody is needed for production.
+- Remaining risk: Key is on local disk. A complete chain rewrite from the same host with the same persisted key passes local checks. Enable `AXIOMLAB_REKOR_ENABLED=1` for an external timestamp anchor (Sigstore Rekor), or use `AXIOMLAB_KMS_KEY_ID` with the `kms` feature for HSM-backed key custody.
 
 ### 10.3 Medium: Hardware is simulated
 
@@ -623,7 +635,7 @@ Before running a session:
 3. Extend integration tests to enforce signed-manifest-only authorization path; add rejection tests for all 6 pipeline stages.
 4. Make approval sidecar write + dispatch atomic (write sidecar → dispatch → delete on success).
 5. Add CI gate that verifies committed `vessel_physics_manifest.json` was generated from current `verus_verified/*.rs` sources.
-6. Implement Rekor submission: POST chain-tip hash to Sigstore Rekor after experiment conclusion; write UUID back to audit log. Add retry queue for network outages.
+6. Add Rekor retry queue: current Rekor submission is fire-and-forget with a `warn` on failure. Add a persistent retry queue so anchors don't silently drop on network outages.
 7. Validate string tool parameters (`pump_id`, `sensor_id`, `vessel_id`) against an allowed set at the capability stage.
 8. Add external audit mirror: periodically push chain-tip hashes to a Gist or orphan git branch to survive local disk failure.
 9. Migrate audit signing key to AWS KMS for production (`kms` feature flag on `agent_runtime`; `AuditSigner` trait already designed for this). Current `FileBackedSigner` only survives single-node restarts.

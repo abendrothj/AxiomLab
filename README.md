@@ -47,7 +47,7 @@ The Verus proofs gate high-risk actions at runtime: `proved_add`/`proved_sub` op
 - **Hash-chained JSONL audit log** — every event is individually Ed25519-signed and chained; log rotation (100 MB / daily) with cross-restart session continuity
 - **Sigstore Rekor anchoring** — protocol conclusions and 15-minute chain-tip checkpoints are submitted to the public Rekor transparency log
 - **Streaming audit query API** — `GET /api/audit` reads line-by-line via `BufReader` (never loads the full file into RAM); `GET /api/audit/raw` streams via `tokio::fs::File` + `ReaderStream` for zero-copy delivery of large logs
-- **ZK audit proof layer** — `zk_audit` crate proves chain properties (event count, violation count, chain validity) without disclosing log content; use cases are `ConfidentialRegulatory` (IP protection with regulators) or `ConfidentialAudit` (compliance proof to sponsor). `GET /api/audit/zk-status` reports configuration. The ZK layer complements, not replaces, Rekor (Rekor provides public timestamping; ZK adds content confidentiality).
+- **ZK audit proof layer** — *(planned)* Proves chain properties without disclosing log content. Rekor provides public timestamping; ZK would add content confidentiality for regulatory submissions. Not yet implemented.
 
 ### Authentication and Access Control
 
@@ -134,7 +134,7 @@ All records are persisted in the discovery journal (`journal.json`) and survive 
 | **Benchling export** | `BenchlingAdapter` constructs correctly-shaped API requests; not tested against the live Benchling API (requires a real token). |
 | **PubChem integration** | `search_pubchem()` makes live HTTP requests; requires network access and is subject to PubChem rate limits. |
 | **OIDC** | PKCE flow is implemented and tested in unit tests; requires a real OpenID Connect identity provider (Google, Keycloak, etc.) to function end-to-end. |
-| **ZK proofs** | `zk_audit` crate defines types and use-case semantics; proof generation requires RISC Zero + on-chain contract deployment. |
+| **ZK proofs** | *(planned)* Not yet implemented. Rekor provides the external timestamp anchor in current builds. |
 | **Multi-agent contention** | `LabScheduler` enforces slot and instrument locks correctly (unit-tested); not validated against real concurrent SiLA 2 hardware. |
 
 ---
@@ -183,7 +183,6 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 | `agent_runtime` | Orchestrator (6-stage pipeline), protocol executor, SiLA 2 clients, approvals, audit, Rekor, lab state, chemistry, notifications | ✓ |
 | `proof_artifacts` | Manifest schema, RuntimePolicyEngine, Ed25519 signing, CI gate | ✓ |
 | `scientific_compute` | DoE (full factorial, CCD, LHC), OLS regression, Hill/MM fitting, ANOVA, FFT, GUM uncertainty propagation | ✓ |
-| `zk_audit` | ZK proof types and use-case semantics | ✓ |
 | `vessel_physics` | Formally verified VesselRegistry (u64 nl) + PyO3 Python bindings | external |
 | `physical_types` | Compile-time dimensional analysis via `uom` | external |
 | `verus_proofs` | Verus-compatible specs + dual-compilation shim | external |
@@ -205,7 +204,6 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 | GET | `/api/journal/findings` | Findings array |
 | GET | `/api/audit` | Filtered JSONL query (`?action=&decision=&since=&limit=`) |
 | GET | `/api/audit/verify` | Hash-chain integrity check |
-| GET | `/api/audit/zk-status` | ZK proof configuration and use-case |
 | GET | `/api/approvals/stalled` | Stalled approval IDs |
 | GET | `/api/lab/reagents` | Reagent inventory |
 | GET | `/api/lab/vessels` | Vessel contents |
@@ -282,10 +280,9 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 | `AXIOMLAB_EXPERIMENT_SLOTS` | `1` | Concurrent experiment slots (1–4) |
 | `AXIOMLAB_ALERT_WEBHOOK_URL` | — | Slack / Discord / generic webhook for failure alerts |
 | `AXIOMLAB_AUDIT_SIGNING_KEY` | — | Ed25519 private key (hex) for per-event audit signatures |
-| `AXIOMLAB_BASE_RPC_URL` | — | Base L2 RPC endpoint for ZK proof anchoring |
-| `AXIOMLAB_BASE_CONTRACT_ADDR` | — | Deployed `AuditVerifier` contract address |
-| `AXIOMLAB_BASE_WALLET_KEY` | — | Hex private key for on-chain transaction submission |
-| `AXIOMLAB_ZK_USE_CASE` | `confidential_audit` | `confidential_regulatory` or `confidential_audit` |
+| `AXIOMLAB_REKOR_ENABLED` | — | Set to `1` to submit chain-tip hashes to Sigstore Rekor after each protocol conclusion |
+| `AXIOMLAB_REKOR_URL` | `https://rekor.sigstore.dev/api/v1/log/entries` | Rekor endpoint override |
+| `AXIOMLAB_KMS_KEY_ID` | — | AWS KMS Ed25519 key ARN/ID for production signing (requires `--features kms`) |
 | `AXIOMLAB_BENCHLING_TOKEN` | — | Benchling API token |
 | `AXIOMLAB_BENCHLING_TENANT` | — | Benchling tenant (e.g. `myorg.benchling.com`) |
 | `AXIOMLAB_BENCHLING_PROJECT_ID` | — | Benchling project for entry creation |
@@ -305,7 +302,7 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 cargo build
 
 # Run pure-Rust unit tests (no external dependencies)
-cargo test --workspace --exclude zk_audit
+cargo test --workspace
 
 # Run integration tests (requires SiLA 2 mock server)
 cd sila_sim && python3 -m axiomlab_sim --insecure -p 50052 &
@@ -407,7 +404,6 @@ AxiomLab/
 │   └── src/stats.rs            # anova_one_way, linear_regression, propagate_uncertainty
 ├── proof_artifacts/            # Manifest schema, RuntimePolicyEngine, Ed25519, CI gate
 │   └── vessel_physics_manifest.json  # Real Verus compiler output (committed)
-├── zk_audit/                   # ZK proof types (ZkUseCase, AuditSummary, ZkConfig)
 ├── vessel_physics/             # u64 nl VesselRegistry + PyO3 bindings + proved_add/sub
 ├── verus_verified/             # Verus source files (30 theorems, 0 errors)
 ├── verus_proofs/               # Dual rustc/Verus compilation shim + specs
@@ -415,7 +411,7 @@ AxiomLab/
 ├── physical_types/             # uom dimensional analysis
 ├── sila_sim/                  # Python SiLA 2 server (6 instruments, vessel_physics via PyO3)
 ├── visualizer/                 # React + Vite web dashboard
-└── contracts/AuditVerifier.sol # On-chain audit verification (Base L2)
+└── contracts/AuditVerifier.sol # On-chain ZK audit verification (Base L2 — planned; Rekor is current external anchor)
 ```
 
 ## License
