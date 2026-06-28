@@ -729,6 +729,118 @@ mod tests {
         assert!(arr.iter().any(|r| r["id"] == "r-test-001"));
     }
 
+    // ── Protocol queue ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn queue_enqueue_and_list() {
+        let _env = env_guard();
+        std::env::remove_var("AXIOMLAB_JWT_SECRET");
+        let (state, aq) = test_state().await;
+        let app = build_router(Arc::clone(&aq)).with_state(state);
+
+        // Enqueue a directive.
+        let post_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/queue")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "statement": "Measure pH at 5 NaOH volumes and fit linear model.",
+                    "priority":  200,
+                })).unwrap()
+            ))
+            .unwrap();
+
+        let resp = app.clone().oneshot(post_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = body_json(resp.into_body()).await;
+        let id = body["id"].as_str().expect("id missing").to_owned();
+
+        // List — should contain the new item.
+        let get_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/queue")
+            .body(Body::empty())
+            .unwrap();
+
+        let list_resp = app.clone().oneshot(get_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list = body_json(list_resp.into_body()).await;
+        let items = list["items"].as_array().unwrap();
+        assert!(items.iter().any(|i| i["id"] == id));
+
+        // Remove it.
+        let del_req = axum::http::Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/queue/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let del_resp = app.oneshot(del_req).await.unwrap();
+        assert_eq!(del_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn queue_empty_statement_rejected() {
+        let _env = env_guard();
+        std::env::remove_var("AXIOMLAB_JWT_SECRET");
+        let (state, aq) = test_state().await;
+        let app = build_router(aq).with_state(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/queue")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "statement": "  ", "priority": 0 })).unwrap()
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn queue_delete_missing_returns_404() {
+        let _env = env_guard();
+        std::env::remove_var("AXIOMLAB_JWT_SECRET");
+        let (state, aq) = test_state().await;
+        let app = build_router(aq).with_state(state);
+
+        let req = axum::http::Request::builder()
+            .method("DELETE")
+            .uri("/api/queue/nonexistent-id-xyz")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Agenda ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn agenda_returns_five_items() {
+        let _env = env_guard();
+        std::env::remove_var("AXIOMLAB_JWT_SECRET");
+        let (state, aq) = test_state().await;
+        let app = build_router(aq).with_state(state);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/agenda")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp.into_body()).await;
+        assert_eq!(json["total_count"], 5);
+        let items = json["items"].as_array().unwrap();
+        assert_eq!(items.len(), 5);
+        // Fresh journal — all items should be pending.
+        assert!(items.iter().all(|i| i["status"] == "pending"));
+    }
+
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
