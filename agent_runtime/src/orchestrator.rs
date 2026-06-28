@@ -10,7 +10,7 @@
 use crate::approval_queue::{ApprovalContext, PendingApprovalQueue, ProtocolStepInfo};
 use crate::audit::{
     AuditEvent, AuditSigner, audit_signer_from_env, emit_jsonl, emit_protocol_conclusion, emit_protocol_step,
-    emit_remote_with_retry, trace_id,
+    emit_rekor_checkpoint, emit_remote_with_retry, rekor_submit, trace_id,
 };
 use crate::approvals::{ApprovalPolicy, risk_class_for_action};
 use crate::capabilities::CapabilityPolicy;
@@ -946,6 +946,16 @@ impl<L: LlmBackend> Orchestrator<L> {
                 protocol.template_id.as_deref(),
                 self.config.audit_signer.as_deref(),
             ).ok();
+            // Anchor chain-tip to Sigstore Rekor (no-op unless AXIOMLAB_REKOR_ENABLED=1).
+            if let Some(signer) = self.config.audit_signer.as_deref() {
+                match rekor_submit(path, signer).await {
+                    Ok(Some(anchor)) => {
+                        emit_rekor_checkpoint(path, &anchor, Some(signer)).ok();
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, "Rekor anchor failed — audit chain intact"),
+                }
+            }
         }
 
         // Emit conclusion event.
@@ -1154,6 +1164,15 @@ impl<L: LlmBackend> Orchestrator<L> {
                 step_count, steps_succeeded,
                 protocol.template_id.as_deref(), self.config.audit_signer.as_deref(),
             ).ok();
+            if let Some(signer) = self.config.audit_signer.as_deref() {
+                match rekor_submit(path, signer).await {
+                    Ok(Some(anchor)) => {
+                        emit_rekor_checkpoint(path, &anchor, Some(signer)).ok();
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, "Rekor anchor failed — audit chain intact"),
+                }
+            }
         }
 
         let uncertainty_budgets = self.build_uncertainty_budgets(&all_step_results);

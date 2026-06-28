@@ -685,20 +685,46 @@ function LoopStatusPanel({ status }: { status: LoopStatus | null }) {
 
 // ── Tool card ─────────────────────────────────────────────────────────────────
 
+function isSafetyGateRejection(ev: ToolExecutionEvent): boolean {
+  if (ev.status !== "rejected") return false;
+  const r = ev.reason.toLowerCase();
+  return (
+    r.includes("sandbox") ||
+    r.includes("calibration_required") ||
+    r.includes("calibration for") ||
+    r.includes("high-risk action denied") ||
+    r.includes("approval violation") ||
+    r.includes("operator denied") ||
+    r.includes("revoked") ||
+    r.includes("proof policy") ||
+    r.includes("fail-closed")
+  );
+}
+
 function ToolCard({ event: ev, prominent = false }: { event: ToolExecutionEvent; prominent?: boolean }) {
   const ok = ev.status === "success";
+  const gate = isSafetyGateRejection(ev);
   const label = TOOL_LABELS[ev.tool] ?? ev.tool.toUpperCase();
   const summary = summarise(ev.tool, ev.params, ev.status);
-  const dotColor = ok ? "#00d4ff" : "#ff4444";
+
+  const dotColor = ok ? "#00d4ff" : gate ? "#f59e0b" : "#ff4444";
+  const borderColor = ok ? "#00d4ff" : gate ? "#f59e0b" : "#ff4444";
+  const textColor = ok
+    ? (prominent ? "#a0ccd8" : "#5a8090")
+    : gate
+    ? (prominent ? "#d4a040" : "#8a6020")
+    : (prominent ? "#b07070" : "#7a4a4a");
+  const labelColor = ok ? "#1a5a6a" : gate ? "#6a4010" : "#5a2020";
 
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 10,
       padding: prominent ? "10px 12px" : "7px 0",
       marginBottom: prominent ? "8px" : 0,
-      background: prominent ? "#0c1018" : "transparent",
-      border: prominent ? `1px solid ${ok ? "#00d4ff18" : "#ff444420"}` : "none",
-      borderBottom: prominent ? `1px solid ${ok ? "#00d4ff18" : "#ff444420"}` : "1px solid #0a1018",
+      background: prominent ? (gate ? "#120e04" : "#0c1018") : "transparent",
+      border: prominent ? `1px solid ${borderColor}20` : "none",
+      borderBottom: prominent ? `1px solid ${borderColor}20` : "1px solid #0a1018",
+      borderLeft: gate && prominent ? `3px solid #f59e0b` : undefined,
       borderRadius: prominent ? 4 : 0,
       animation: prominent ? "fadeSlideIn 0.2s ease-out" : "none",
       flexShrink: 0,
@@ -713,16 +739,30 @@ function ToolCard({ event: ev, prominent = false }: { event: ToolExecutionEvent;
       }} />
       <span style={{
         fontSize: 9,
-        color: ok ? "#1a5a6a" : "#5a2020",
+        color: labelColor,
         letterSpacing: "0.08em",
         minWidth: 76,
         flexShrink: 0,
       }}>
         {label}
       </span>
+      {gate && (
+        <span style={{
+          fontSize: 8,
+          color: "#f59e0b",
+          background: "#f59e0b18",
+          border: "1px solid #f59e0b40",
+          borderRadius: 3,
+          padding: "1px 5px",
+          letterSpacing: "0.1em",
+          flexShrink: 0,
+        }}>
+          SAFETY GATE
+        </span>
+      )}
       <span style={{
         fontSize: prominent ? 12 : 11,
-        color: ok ? (prominent ? "#a0ccd8" : "#5a8090") : (prominent ? "#b07070" : "#7a4a4a"),
+        color: textColor,
         flex: 1,
         overflow: "hidden",
         textOverflow: "ellipsis",

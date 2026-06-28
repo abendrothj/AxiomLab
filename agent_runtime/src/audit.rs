@@ -1020,6 +1020,151 @@ pub fn trace_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4())
 }
 
+// ── Rekor transparency log submission ────────────────────────────────────────
+
+/// Result of a Rekor chain-tip submission.
+#[derive(Debug)]
+pub struct RekorAnchor {
+    /// Rekor entry UUID returned by the log.
+    pub uuid: String,
+    /// Integrated timestamp (Unix seconds) returned by the log.
+    pub integrated_time: i64,
+    /// SHA-256 hex of the artifact we submitted (the chain-tip `entry_hash`).
+    pub artifact_hash: String,
+}
+
+/// Submit the current chain-tip hash to Sigstore Rekor as a `hashedrekord`.
+///
+/// Enabled only when `AXIOMLAB_REKOR_ENABLED=1`.  When disabled, returns `Ok(None)`
+/// so callers do not need to special-case the unconfigured path.
+///
+/// The "artifact" is the UTF-8 bytes of the last `entry_hash` hex string from the
+/// audit log.  We SHA-256 those bytes, sign them with the audit key, and submit the
+/// triple (hash, signature, public key PEM) as a hashedrekord.  Rekor returns a
+/// timestamped UUID that is written back into the audit log as a `rekor_checkpoint`
+/// entry, giving an external immutable witness to the chain state at that moment.
+pub async fn rekor_submit(
+    audit_path: &str,
+    signer: &dyn AuditSigner,
+) -> Result<Option<RekorAnchor>, String> {
+    if std::env::var("AXIOMLAB_REKOR_ENABLED").as_deref() != Ok("1") {
+        return Ok(None);
+    }
+
+    let chain_tip = last_entry_hash(audit_path)
+        .map_err(|e| format!("read audit log for Rekor: {e}"))?
+        .ok_or_else(|| "audit log is empty — nothing to anchor".to_string())?;
+
+    // Artifact = SHA-256(chain_tip_hex_utf8)
+    let artifact_bytes = chain_tip.as_bytes();
+    let artifact_sha256 = format!("{:x}", Sha256::digest(artifact_bytes));
+
+    // Sign the artifact bytes with the audit key.
+    let sig_b64 = signer.sign(artifact_bytes);
+
+    // Encode Ed25519 public key as PEM SubjectPublicKeyInfo.
+    let raw_key = signer.verifying_key_bytes();
+    let der_prefix: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+    let mut der = der_prefix.to_vec();
+    der.extend_from_slice(&raw_key);
+    let pem_body = STANDARD.encode(&der);
+    let pem = format!("-----BEGIN PUBLIC KEY-----\n{pem_body}\n-----END PUBLIC KEY-----\n");
+    let pem_b64 = STANDARD.encode(pem.as_bytes());
+
+    let body = serde_json::json!({
+        "apiVersion": "0.0.1",
+        "kind": "hashedrekord",
+        "spec": {
+            "data": {
+                "hash": {
+                    "algorithm": "sha256",
+                    "value": artifact_sha256,
+                }
+            },
+            "signature": {
+                "content": sig_b64,
+                "publicKey": {
+                    "content": pem_b64,
+                }
+            }
+        }
+    });
+
+    let rekor_url = std::env::var("AXIOMLAB_REKOR_URL")
+        .unwrap_or_else(|_| "https://rekor.sigstore.dev/api/v1/log/entries".to_string());
+
+    let client = reqwest::Client::builder()
+        .timeout(tokio::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("build Rekor HTTP client: {e}"))?;
+
+    let resp = client
+        .post(&rekor_url)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Rekor POST failed: {e}"))?;
+
+    let status = resp.status();
+    let resp_body = resp.text().await.map_err(|e| format!("Rekor read response: {e}"))?;
+
+    if !status.is_success() {
+        return Err(format!("Rekor returned HTTP {status}: {resp_body}"));
+    }
+
+    // The response is a JSON object keyed by the entry UUID.
+    let parsed: serde_json::Value = serde_json::from_str(&resp_body)
+        .map_err(|e| format!("Rekor parse response: {e}"))?;
+
+    let (uuid, entry) = parsed
+        .as_object()
+        .and_then(|m| m.iter().next())
+        .ok_or_else(|| "Rekor response had no entries".to_string())?;
+
+    let integrated_time = entry
+        .pointer("/integratedTime")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    tracing::info!(
+        uuid = %uuid,
+        integrated_time,
+        artifact_hash = %artifact_sha256,
+        "Rekor chain-tip anchor submitted"
+    );
+
+    Ok(Some(RekorAnchor {
+        uuid: uuid.clone(),
+        integrated_time,
+        artifact_hash: artifact_sha256,
+    }))
+}
+
+/// Write a `rekor_checkpoint` entry into the audit log after a successful anchor.
+pub fn emit_rekor_checkpoint(
+    path: &str,
+    anchor: &RekorAnchor,
+    signer: Option<&dyn AuditSigner>,
+) -> Result<String, std::io::Error> {
+    let details = serde_json::json!({
+        "uuid": anchor.uuid,
+        "integrated_time": anchor.integrated_time,
+        "artifact_hash": anchor.artifact_hash,
+    });
+    let event = AuditEvent {
+        unix_secs: unix_secs_now(),
+        trace_id: format!("rekor_checkpoint-{}", &anchor.uuid[..8.min(anchor.uuid.len())]),
+        action: "rekor_checkpoint".into(),
+        decision: "allow".into(),
+        reason: details.to_string(),
+        success: true,
+        approval_ids: None,
+        reasoning_text: None,
+    };
+    emit_jsonl(path, &event, signer)
+}
+
 // ── Protocol state scanner ────────────────────────────────────────────────────
 
 /// Scan the audit log for the execution state of a specific protocol.

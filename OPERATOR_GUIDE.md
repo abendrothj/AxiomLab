@@ -34,7 +34,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
   - [agent_runtime/src/sandbox.rs](agent_runtime/src/sandbox.rs) — Path/command allowlist
   - [agent_runtime/src/capabilities.rs](agent_runtime/src/capabilities.rs) — Numeric parameter bounds
   - [agent_runtime/src/approvals.rs](agent_runtime/src/approvals.rs) — Two-person Ed25519 approval records
-  - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — Hash-chained JSONL audit log, per-event Ed25519 signatures, log rotation (100 MB / daily), Rekor checkpointing
+  - [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — Hash-chained JSONL audit log, per-event Ed25519 signatures, log rotation (100 MB / daily)
 
 - **proof_artifacts** — Proof manifest schema and runtime policy engine.
   - [proof_artifacts/src/policy.rs](proof_artifacts/src/policy.rs) — `RuntimePolicyEngine`: maps tool actions → risk classes → required artifacts
@@ -47,7 +47,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 
 - **scientific_compute** — Pure-Rust numerics: OLS regression, Hill equation fitting, Michaelis-Menten kinetics, Welch t-test, AIC model selection, DoE generators (full-factorial, central-composite, Latin hypercube), ANOVA, linear regression, GUM uncertainty propagation.
 
-- **zk_audit** — ZK proof for audit chain confidentiality. Proves event count, violation count, and chain validity without revealing log contents. Complements (does not replace) Rekor timestamping. Configured via `ZkUseCase`: `confidential_regulatory` or `confidential_audit`.
+- **zk_audit** — *(planned)* ZK proof layer for audit chain confidentiality. Not yet implemented.
 
 ### 1.2 The 6-Stage Validation Pipeline
 
@@ -178,7 +178,6 @@ When `AXIOMLAB_ALERT_WEBHOOK_URL` is set, `WebhookNotifier` fires on:
 - Approval timeout
 - Audit chain invalid
 - Calibration expired
-- Rekor anchor failed
 
 The payload is auto-formatted for Slack (if URL contains `hooks.slack.com`), Discord (if `discord.com/api/webhooks`), or generic JSON otherwise.
 
@@ -438,7 +437,7 @@ Runs: build, manifest generation, signing, policy enforcement, sandbox/capabilit
 
 **Session continuity:** `session_start` entry written on every startup containing session UUID, Ed25519 public key, and git commit. Chains to previous file's last `entry_hash` via `prev_hash`.
 
-**Rekor checkpoints:** Every 15 minutes (when `AXIOMLAB_AUDIT_SIGNING_KEY` is set), chain tip is signed and submitted to Sigstore Rekor. UUID + integrated timestamp written back as `rekor_checkpoint`.
+**Rekor checkpoints:** *(planned)* Periodic chain-tip submission to Sigstore Rekor is not yet implemented.
 
 **Streaming raw log (zero-copy):**
 
@@ -464,9 +463,6 @@ curl "http://localhost:3000/api/audit?decision=deny&since=1700000000&limit=50"
 
 # Hash-chain integrity
 curl "http://localhost:3000/api/audit/verify"
-
-# ZK proof status
-curl "http://localhost:3000/api/audit/zk-status"
 ```
 
 ### 8.5 Verify Signed Manifest
@@ -477,15 +473,9 @@ cargo run -p proof_artifacts --bin proofctl -- verify \
   --public-key .artifacts/proof/manifest_signing_key.public.b64
 ```
 
-### 8.6 Verify Rekor Anchor
+### 8.6 Verify Rekor Anchor *(planned)*
 
-```bash
-# Via rekor-cli
-rekor-cli verify --uuid <uuid> --artifact-hash <sha256_hex>
-
-# Via REST API
-curl https://rekor.sigstore.dev/api/v1/log/entries/<uuid>
-```
+Rekor submission is not yet implemented. When built, anchoring will POST the chain-tip hash to Sigstore Rekor after each experiment concludes and write the returned UUID back into the audit log.
 
 ### 8.7 ELN Export (Benchling)
 
@@ -510,17 +500,14 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 | `PORT` | `3000` | HTTP server port |
 | `AXIOMLAB_DATA_DIR` | `.artifacts` | Root directory for runtime data (audit log, journal) |
 | `AXIOMLAB_AUDIT_LOG` | `$DATA_DIR/audit/runtime_audit.jsonl` | Full path override for audit log |
-| `AXIOMLAB_AUDIT_SIGNING_KEY` | — | Base64 Ed25519 private key for per-event signatures and Rekor. Unsigned if unset. |
+| `AXIOMLAB_AUDIT_SIGNING_KEY` | — | Base64 Ed25519 private key for per-event audit signatures. Unsigned if unset. |
 | `AXIOMLAB_GIT_COMMIT` | `dev` | Git SHA embedded in `session_start` and proof manifest |
 | `AXIOMLAB_TRUSTED_KEYS` | — | Colon-separated base64 Ed25519 public keys for JWT verification |
 | `AXIOMLAB_OPERATOR_SIGNING_KEY` | — | Ed25519 private key for `tokengen` JWT signing |
 | `AXIOMLAB_WS_AUTH` | `1` | Set to `0` to disable JWT check on WebSocket upgrade |
 | `AXIOMLAB_EXPERIMENT_SLOTS` | `1` | Parallel experiment slots (1–4) |
 | `AXIOMLAB_ALERT_WEBHOOK_URL` | — | Slack/Discord/generic webhook for failure alerts |
-| `AXIOMLAB_BASE_RPC_URL` | — | Base L2 RPC endpoint for ZK proof anchoring |
-| `AXIOMLAB_BASE_CONTRACT_ADDR` | — | `AuditVerifier` contract address on Base |
-| `AXIOMLAB_BASE_WALLET_KEY` | — | Hex-encoded private key for Base transactions |
-| `AXIOMLAB_ZK_USE_CASE` | `confidential_audit` | `confidential_regulatory` or `confidential_audit` |
+| `AXIOMLAB_REKOR_ENABLED` | — | *(planned)* Set to `1` to enable Sigstore Rekor chain-tip submission |
 | `AXIOMLAB_BENCHLING_TOKEN` | — | Benchling API token |
 | `AXIOMLAB_BENCHLING_TENANT` | — | Benchling tenant (e.g. `myorg.benchling.com`) |
 | `AXIOMLAB_BENCHLING_PROJECT_ID` | — | Benchling project for new entries |
@@ -544,7 +531,7 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 
 - Code: [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — `FileBackedSigner::load_or_create()`
 - Status: **Resolved for single-node deployments.** `audit_signer_from_env()` loads in priority order: `AXIOMLAB_AUDIT_SIGNING_KEY` env var → `AXIOMLAB_AUDIT_SIGNING_KEY_PATH` file → auto-generate at `~/.config/axiomlab/audit_signing.key`. The key survives restarts.
-- Remaining risk: Key is on local disk. A complete chain rewrite from the same host with the same persisted key passes local checks. Rekor anchors remain the external witness. HSM or KMS custody is needed for production.
+- Remaining risk: Key is on local disk. A complete chain rewrite from the same host with the same persisted key passes local checks. An external transparency witness (Rekor — planned) or HSM/KMS custody is needed for production.
 
 ### 10.3 Medium: Hardware is simulated
 
@@ -570,8 +557,7 @@ Before running a session:
 2. Verify CI gate pass for required artifacts (`ArtifactStatus::Passed`).
 3. Verify approval bundle for Actuation or Destructive actions.
 4. Verify audit chain integrity after execution (`/api/audit/verify`).
-5. Confirm Rekor anchor UUID logged for any protocol conclusion.
-6. Set `AXIOMLAB_AUDIT_SIGNING_KEY` to a persistent key (events are unsigned and Rekor disabled without it).
+5. Set `AXIOMLAB_AUDIT_SIGNING_KEY` to a persistent key (events are unsigned without it).
 7. Point `AXIOMLAB_DATA_DIR` at a durable mount for audit log persistence across restarts.
 8. Set `AXIOMLAB_ALERT_WEBHOOK_URL` so failures surface without dashboard monitoring.
 9. Pre-register protocols to a study record before execution for ISO 17025 traceability.
@@ -588,10 +574,10 @@ Before running a session:
 3. Extend integration tests to enforce signed-manifest-only authorization path; add rejection tests for all 6 pipeline stages.
 4. Make approval sidecar write + dispatch atomic (write sidecar → dispatch → delete on success).
 5. Add CI gate that verifies committed `vessel_physics_manifest.json` was generated from current `verus_verified/*.rs` sources.
-6. Add Rekor submission retry queue for network outages at conclusion time.
+6. Implement Rekor submission: POST chain-tip hash to Sigstore Rekor after experiment conclusion; write UUID back to audit log. Add retry queue for network outages.
 7. Validate string tool parameters (`pump_id`, `sensor_id`, `vessel_id`) against an allowed set at the capability stage.
 8. Add external audit mirror: periodically push chain-tip hashes to a Gist or orphan git branch to survive local disk failure.
-9. Migrate audit signing key to HSM or KMS for production; current `FileBackedSigner` only survives single-node restarts.
+9. Migrate audit signing key to AWS KMS for production (`kms` feature flag on `agent_runtime`; `AuditSigner` trait already designed for this). Current `FileBackedSigner` only survives single-node restarts.
 10. Add `nominal_ph` values to the default reagent catalog so pH simulation works out-of-the-box without manual registration.
 11. Extend `run_doe_anova` to support multi-factor grouping (currently only groups by the first factor's low/high bracket).
 12. Add a real SiLA 2 instrument driver shim: `--feature hardware` that swaps the simulator for actual gRPC calls without changing orchestrator code.

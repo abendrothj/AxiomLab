@@ -2,15 +2,8 @@ name: Verus Proof Verification
 
 on:
   push:
-    paths:
-      - 'verus_verified/**'
-      - 'vessel_physics/**'
-      - 'proof_artifacts/**'
+    branches: [ main ]
   pull_request:
-    paths:
-      - 'verus_verified/**'
-      - 'vessel_physics/**'
-      - 'proof_artifacts/**'
 
 jobs:
   verify:

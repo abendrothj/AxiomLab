@@ -858,6 +858,178 @@ mod tests {
         assert!(items.iter().all(|i| i["status"] == "pending"));
     }
 
+    // ── Queue JWT auth ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn queue_post_without_token_returns_401_when_secret_set() {
+        let _env = env_guard();
+        std::env::set_var("AXIOMLAB_JWT_SECRET", test_secret_b64());
+        let (state, aq) = test_state().await;
+        let app = build_router(aq).with_state(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/queue")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "statement": "Run a calibration sweep.",
+                    "priority": 100,
+                })).unwrap()
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn queue_delete_without_token_returns_401_when_secret_set() {
+        let _env = env_guard();
+        std::env::set_var("AXIOMLAB_JWT_SECRET", test_secret_b64());
+        let (state, aq) = test_state().await;
+        let app = build_router(aq).with_state(state);
+
+        let req = axum::http::Request::builder()
+            .method("DELETE")
+            .uri("/api/queue/some-id")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn queue_post_with_valid_token_succeeds_when_secret_set() {
+        let _env = env_guard();
+        std::env::set_var("AXIOMLAB_JWT_SECRET", test_secret_b64());
+        let (state, aq) = test_state().await;
+        let app = build_router(aq).with_state(state);
+
+        let token = make_token(3600);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/queue")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "statement": "Measure absorbance at 650 nm across 8 concentrations.",
+                    "priority": 150,
+                })).unwrap()
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // ── Approval gate integration ─────────────────────────────────────────────
+
+    fn approval_ctx() -> agent_runtime::approval_queue::ApprovalContext {
+        agent_runtime::approval_queue::ApprovalContext {
+            hypothesis:                 "absorbance scales with concentration".into(),
+            experiment_id:              "exp-gate-test".into(),
+            iteration:                  1,
+            risk_class:                 Some("LiquidHandling".into()),
+            recent_actions:             vec![],
+            journal_summary:            String::new(),
+            protocol_step:              None,
+            findings_before_experiment: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_gate_pending_appears_in_list() {
+        let _env = env_guard();
+        std::env::remove_var("AXIOMLAB_JWT_SECRET");
+        let (state, aq) = test_state().await;
+
+        let (pending_id, _rx) = aq.enqueue(
+            "dispense",
+            serde_json::json!({"pump_id": "p1", "volume_ul": 500}),
+            None,
+            approval_ctx(),
+        );
+
+        let app = build_router(Arc::clone(&aq)).with_state(state);
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/approvals/pending")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        let items = body.as_array().expect("expected array");
+        assert!(
+            items.iter().any(|i| i["pending_id"] == pending_id),
+            "enqueued pending_id not found in list"
+        );
+
+        aq.remove(&pending_id);
+    }
+
+    #[tokio::test]
+    async fn approval_gate_deny_returns_ok_and_clears_entry() {
+        let _env = env_guard();
+        std::env::remove_var("AXIOMLAB_JWT_SECRET");
+        let (state, aq) = test_state().await;
+
+        let (pending_id, _rx) = aq.enqueue(
+            "move_arm",
+            serde_json::json!({"x": 10, "y": 20, "z": 5}),
+            None,
+            approval_ctx(),
+        );
+
+        let app = build_router(Arc::clone(&aq)).with_state(state);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/approvals/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "pending_id": pending_id,
+                    "bundle": null,
+                })).unwrap()
+            ))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["status"], "submitted");
+        assert_eq!(body["pending_id"], pending_id);
+
+        aq.remove(&pending_id);
+    }
+
+    #[tokio::test]
+    async fn approval_gate_submit_unknown_id_returns_404() {
+        let _env = env_guard();
+        std::env::remove_var("AXIOMLAB_JWT_SECRET");
+        let (state, aq) = test_state().await;
+        let app = build_router(aq).with_state(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/approvals/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "pending_id": "nonexistent-uuid-abc",
+                    "bundle": null,
+                })).unwrap()
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
