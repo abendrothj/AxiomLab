@@ -362,7 +362,7 @@ impl DiscoveryJournal {
             .collect();
 
         let mut out = format!(
-            "\n## Discovery journal ({} runs · {} findings · {} active hypotheses)\n",
+            "\n## Operation log ({} runs · {} findings · {} active directives)\n",
             self.runs.len(),
             self.findings.len(),
             active_hyps.len(),
@@ -391,7 +391,7 @@ impl DiscoveryJournal {
         }
 
         if !active_hyps.is_empty() {
-            out.push_str("\n### Active hypotheses:\n");
+            out.push_str("\n### Active execution directives:\n");
             for h in &active_hyps {
                 out.push_str(&format!("• [{}] {} (id: {})\n", h.status, h.statement, h.id));
             }
