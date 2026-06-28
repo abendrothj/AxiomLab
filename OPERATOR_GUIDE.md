@@ -11,7 +11,7 @@ AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web d
 **Production path (server + agent_runtime + proof_artifacts + vessel_physics):**
 
 - **server** — Axum HTTP server with WebSocket event streaming, SQLite-indexed audit log, multi-slot experiment scheduler, protocol queue, and the continuous execution loop that drives the agent.
-  - [server/src/main.rs](server/src/main.rs) — HTTP router (see §5 for full API surface), JWT middleware, OIDC handlers, experiment scheduler initialization, ZK status route
+  - [server/src/main.rs](server/src/main.rs) — HTTP router (see §6 for full API surface), JWT middleware, OIDC handlers, experiment scheduler initialization
   - [server/src/simulator/mod.rs](server/src/simulator/mod.rs) — `JoinSet`-based parallel execution loop; drains protocol queue (priority → FIFO), falls back to commissioning agenda; 1–4 concurrent experiment slots via `LabScheduler`; convergence gated on `source: "system"` findings
   - [server/src/protocol_queue.rs](server/src/protocol_queue.rs) — Persistent, priority-ordered queue of operator protocol directives; survives restarts; trimmed to 50 completed/failed items
   - [server/src/lab_scheduler.rs](server/src/lab_scheduler.rs) — Slot pool + instrument contention tracking
@@ -357,7 +357,6 @@ QA sign-off computes `SHA-256(canonical_json(study_record))` and stores it as `q
 | GET | `/api/audit` | Filtered audit log (`?action=`, `?decision=`, `?since=`, `?limit=`) |
 | GET | `/api/audit/verify` | Hash-chain integrity check |
 | GET | `/api/audit/raw` | Full audit log stream (zero-copy JSONL) |
-| GET | `/api/audit/zk-status` | Last ZK proof status |
 | GET | `/api/methods` | Method validation records |
 | GET | `/api/methods/:id` | Single method validation |
 | GET | `/api/lab/reference-materials` | Reference materials |
@@ -408,28 +407,46 @@ curl http://localhost:3000/api/status
 
 ## 8) Runbook
 
-### 8.1 Local Development
+### 8.1 Quickstart (Simulator Mode)
+
+The fastest path to a running demo requires only Rust and Node:
 
 ```bash
-# Build all crates
+# 1. Build all crates
 cargo build
 
+# 2. Run the server (simulator mode — no real hardware)
+cargo run -p axiomlab-server
+
+# 3. In a second terminal, start the visualizer
+cd visualizer && npm install && npm run dev
+# Open http://localhost:5173
+```
+
+The server starts in simulator mode automatically when `SILA2_ENDPOINT` is unreachable. The commissioning agenda runs immediately; the first finding typically appears within 60–90 seconds.
+
+```bash
+# Run the full test suite
+cargo test --workspace --lib          # unit tests (134+)
+cargo test -p axiomlab-server         # HTTP integration tests (38)
+cargo test -p agent_runtime --test pipeline_rejection  # safety gate tests
+
+# Run the release gate (signs manifest, verifies chain, exports replay bundle)
+./scripts/proof_release_gate.sh
+```
+
+### 8.1.1 Optional: SiLA 2 Hardware Mode
+
+```bash
 # Build PyO3 vessel_physics module (required for Python SiLA 2 server)
 pip install maturin
 maturin develop --manifest-path vessel_physics/Cargo.toml
 
-# Run pure-Rust unit tests
-cargo test -p agent_runtime
-cargo test -p server
-cargo test -p scientific_compute
-cargo test -p zk_audit
-
 # Start SiLA 2 mock server
-cd sila_sim && python3 -m axiomlab_sim --insecure -p 50052 &
+cd sila_sim && python3 -m axiomlab_sim --insecure -p 50052
 
-# Run integration tests
-cargo test -p agent_runtime --test vessel_simulation_e2e -- --ignored --test-threads=1
-cargo test -p agent_runtime --test sila2_e2e -- --ignored --test-threads=1
+# In another terminal, start server with hardware mode
+SILA2_ENDPOINT=http://127.0.0.1:50052 cargo run -p axiomlab-server
 ```
 
 ### 8.2 Verus Proof Workflow
