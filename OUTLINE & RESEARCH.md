@@ -152,7 +152,7 @@ This section maps the research plan above to what has actually been built and te
 
 | Component | Status | Detail |
 |---|---|---|
-| Web visualizer | **Done** | React + Vite dashboard with WebSocket live events, activity feed, state graph, discovery journal. |
+| Web visualizer | **Done** | React + Vite dashboard with WebSocket live events, activity feed, state graph, execution log. |
 | SQLite event persistence | **Done** | Append-only WAL-mode database. Survives server restarts. |
 | Docker Compose (3 services) | **Done** | Ollama (LLM) + SiLA 2 mock (hardware) + AxiomLab server. Health checks, auto-start. |
 | SiLA 2 standard compliance | **Done** | FDL XML service definitions for all 6 instruments. Proto files generated from standard. |
@@ -171,12 +171,12 @@ This section maps the research plan above to what has actually been built and te
 
 ### What This Project Does NOT Demonstrate (Yet)
 
-1. **Actual scientific discovery.** The agent explores constraint bounds of mock instruments. It hasn't produced a novel scientific result.
+1. **Real hardware safety.** Mock instruments can't hurt anyone. The safety guarantees are only as good as the SiLA 2 driver on the other end.
 
-2. **Real hardware safety.** Mock instruments can't hurt anyone. The safety guarantees are only as good as the SiLA 2 driver on the other end.
+2. **Frontier-model reasoning.** qwen2.5-coder:7b is a capable local model but not GPT-4 or Claude. Execution quality scales with model quality.
 
-3. **Frontier-model reasoning.** qwen2.5-coder:7b is a capable local model but not GPT-4 or Claude. Discovery quality scales with model quality.
+3. **Production key management.** Ed25519 signatures work, but key custody is manual (KMS integration is feature-gated).
 
-4. **Production key management.** Ed25519 signatures work, but key custody is manual.
+4. **Complete formal verification.** Verus verifies specific Rust functions (lab_safety, dilution_protocol). The whole system is not formally verified end-to-end.
 
-5. **Complete formal verification.** Verus verifies specific Rust functions (lab_safety, dilution_protocol). The whole system is not formally verified end-to-end.
+5. **Open-ended scientific discovery.** The system is a safe execution platform; the agent executes sound procedures and records quantitative results. Generating novel research hypotheses is out of scope.
