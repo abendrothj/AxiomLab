@@ -5,6 +5,7 @@ members = [
     "crates/audit",
     "crates/chemistry",
     "crates/sila",
+    "crates/proofs",
 
     # ── Legacy crates (deleted in the final rewrite step) ──
     "scientific_compute",

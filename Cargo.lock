@@ -628,6 +628,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-proofs"
+version = "0.1.0"
+dependencies = [
+ "axiom-types",
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "axiom-sila"
 version = "0.1.0"
 dependencies = [
