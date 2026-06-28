@@ -207,6 +207,8 @@ struct TaskResult {
     experiment_id:         String,
     converged:             bool,
     exhausted_iterations:  bool,
+    /// The most recent system-recorded finding from this experiment, if any.
+    finding_summary:       Option<String>,
 }
 
 // ── Single-experiment runner ───────────────────────────────────────────────────
@@ -221,6 +223,7 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
                 experiment_id: task.experiment_id.clone(),
                 converged: false,
                 exhausted_iterations: false,
+                finding_summary: None,
             };
         }
     };
@@ -250,16 +253,21 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
     // Convergence check — all hypotheses settled + at least one system-generated finding.
     // A "system" finding is auto-recorded by `analyze_series` (R² ≥ 0.80); the LLM
     // cannot fake convergence by calling `confirm_hypothesis` without measured data.
-    let converged = {
+    let (converged, finding_summary) = {
         let j = task.sink.journal.lock().unwrap();
         let has_system_finding = j.findings.iter()
             .any(|f| f.source == "system");
-        has_system_finding
+        let settled = has_system_finding
             && !j.hypotheses.is_empty()
             && j.hypotheses.iter().all(|h| {
                 h.status == HypothesisStatus::Confirmed
                     || h.status == HypothesisStatus::Rejected
-            })
+            });
+        // Extract the most recent finding from this experiment for the queue result summary.
+        let summary = j.findings.iter().rev()
+            .find(|f| f.experiment_id.as_deref() == Some(&task.experiment_id))
+            .map(|f| f.statement.clone());
+        (settled, summary)
     };
 
     TaskResult {
@@ -267,6 +275,7 @@ async fn run_one_experiment(task: ExperimentTask) -> TaskResult {
         experiment_id: task.experiment_id.clone(),
         converged,
         exhausted_iterations: experiment_exhausted_iterations(&experiment),
+        finding_summary,
     }
 }
 
@@ -415,11 +424,19 @@ pub async fn run_loop(
             if let Some(queue_id) = queued_experiment_map.remove(&res.experiment_id) {
                 let mut q = protocol_queue.lock().unwrap();
                 if res.converged {
-                    q.mark_completed(&queue_id, "Execution converged — quantitative finding recorded".into());
+                    let summary = res.finding_summary
+                        .as_deref()
+                        .unwrap_or("Converged — quantitative finding recorded")
+                        .to_owned();
+                    q.mark_completed(&queue_id, summary);
                 } else if res.exhausted_iterations {
                     q.mark_failed(&queue_id, "Max iterations reached without converging".into());
                 } else {
-                    q.mark_completed(&queue_id, "Execution cycle finished".into());
+                    let summary = res.finding_summary
+                        .as_deref()
+                        .map(|f| format!("Execution cycle finished — {f}"))
+                        .unwrap_or_else(|| "Execution cycle finished".into());
+                    q.mark_completed(&queue_id, summary);
                 }
             }
             scheduler.release(res.slot, &[]);
