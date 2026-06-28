@@ -84,15 +84,7 @@ export const EVENTS = {
   TOOL_EXECUTION:   "tool_execution",
   NOTEBOOK_ENTRY:   "notebook_entry",
   LOOP_STATUS:      "loop_status",
-  FINDING_RECORDED: "finding_recorded",
 } as const;
-
-export interface FindingRecordedEvent {
-  id:        string;
-  statement: string;
-  model:     string;
-  r_squared: number;
-}
 
 // ── Approval types ────────────────────────────────────────────────
 
@@ -108,14 +100,12 @@ export interface PendingApprovalInfo {
   params: Record<string, unknown>;
   queued_at: number;
   session_nonce?: string;
-  hypothesis: string;
+  directive: string;
   experiment_id: string;
   iteration: number;
   risk_class?: string;
   recent_actions: unknown[];
-  journal_summary: string;
   protocol_step?: ProtocolStepInfo;
-  findings_before_experiment: number;
 }
 
 export interface StalledResponse {

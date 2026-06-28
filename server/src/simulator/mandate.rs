@@ -41,15 +41,10 @@ A defensible result requires a well-determined fit over sufficient points; a two
 three-point line is not a result and will not be recorded.\n\
 \n\
 ## Execution directives and honest conclusions\n\
-When given a directive, mark it 'testing', collect and fit data, then 'confirm' or 'reject' \
-it based on fitted parameters and their uncertainty. Record only substantive, data-backed \
-findings with `update_journal` (add_finding) — no speculation, no restating the tool list. \
-When the directive is settled, conclude with \
+When given a directive, collect and fit data, then conclude based on fitted parameters \
+and their uncertainty. `analyze_series` auto-records quantitative findings when R² ≥ 0.80. \
+When the directive is complete, conclude with \
 {\"done\": true, \"summary\": \"<concise, honest, quantitative result>\"}.\n\
-\n\
-Convergence requires at least one quantitative finding auto-recorded by `analyze_series` \
-(R² ≥ 0.80 over a sufficient series). You cannot converge by asserting a conclusion without \
-measured, fitted data.\n\
 \n\
 Your operation log (below) persists across runs — build on what is already established \
 and never re-run a completed procedure.";
@@ -74,10 +69,9 @@ pub(crate) fn build_mandate(
             "## Execution directive (ID: {id})\n\
              \"{stmt}\"\n\n\
              Design and execute a protocol to carry out this directive.\n\
-             - Call update_journal set_hypothesis_status → 'testing' before you start.\n\
-             - Call update_journal confirm_hypothesis or reject_hypothesis when you conclude.\n\
              - Use propose_protocol for the procedure steps.\n\
-             - Record your quantitative result with update_journal add_finding.\n\n"
+             - Call analyze_series to fit a model and record a quantitative result.\n\
+             - Conclude with {{\"done\": true, \"summary\": \"<quantitative result>\"}} when done.\n\n"
         ));
     }
 

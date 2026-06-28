@@ -322,76 +322,29 @@ impl DiscoveryJournal {
 
 impl DiscoveryJournal {
     /// Render a compact summary block for injection into the LLM mandate.
-    ///
-    /// Kept under ~600 tokens: all findings (capped at 10), active hypotheses,
-    /// and the 5 most recent runs.  Structured measurements are shown inline.
+    /// Shows the 5 most recent protocol runs and parameter coverage.
     pub fn summary_for_llm(&self) -> String {
-        if self.runs.is_empty() && self.findings.is_empty() && self.hypotheses.is_empty() {
+        if self.runs.is_empty() {
             return String::new();
         }
 
-        let active_hyps: Vec<&Hypothesis> = self
-            .hypotheses
-            .iter()
-            .filter(|h| {
-                h.status == HypothesisStatus::Proposed || h.status == HypothesisStatus::Testing
-            })
-            .collect();
-
         let mut out = format!(
-            "\n## Operation log ({} runs · {} findings · {} active directives)\n",
+            "\n## Operation log ({} completed runs)\n",
             self.runs.len(),
-            self.findings.len(),
-            active_hyps.len(),
         );
 
-        if !self.findings.is_empty() {
-            out.push_str("\n### Confirmed findings:\n");
-            for (i, f) in self.findings.iter().take(10).enumerate() {
-                let src_tag = if f.source == "system" { " [auto]" } else { "" };
-                out.push_str(&format!("{}. {}{}\n", i + 1, f.statement, src_tag));
-                for ev in f.evidence.iter().take(2) {
-                    out.push_str(&format!("   evidence: {ev}\n"));
-                }
-                // Show up to 4 typed measurements
-                for m in f.measurements.iter().take(4) {
-                    let unc = m.uncertainty
-                        .map(|u| format!(" ±{u:.4}"))
-                        .unwrap_or_default();
-                    let unit = if m.unit.is_empty() { String::new() } else { format!(" {}", m.unit) };
-                    out.push_str(&format!(
-                        "   {}: {:.4}{}{}\n",
-                        m.parameter, m.value, unit, unc
-                    ));
-                }
-            }
+        out.push_str("\n### Recent runs (newest first):\n");
+        for run in self.runs.iter().rev().take(5) {
+            let frac = format!("{}/{}", run.steps_succeeded, run.steps_total);
+            out.push_str(&format!(
+                "• \"{}\": {frac} steps — {}\n",
+                run.protocol_name,
+                truncate(&run.conclusion, 120),
+            ));
         }
 
-        if !active_hyps.is_empty() {
-            out.push_str("\n### Active execution directives:\n");
-            for h in &active_hyps {
-                out.push_str(&format!("• [{}] {} (id: {})\n", h.status, h.statement, h.id));
-            }
-        }
+        out.push_str("\n(Build on what is known — don't repeat completed procedures.)\n");
 
-        if !self.runs.is_empty() {
-            out.push_str("\n### Recent runs (newest first):\n");
-            for run in self.runs.iter().rev().take(5) {
-                let frac = format!("{}/{}", run.steps_succeeded, run.steps_total);
-                out.push_str(&format!(
-                    "• \"{}\": {frac} steps — {}\n",
-                    run.protocol_name,
-                    truncate(&run.conclusion, 120),
-                ));
-            }
-        }
-
-        out.push_str(
-            "\n(Call update_journal to record a finding or manage a hypothesis. \
-             Build on what is known — don't repeat completed experiments.)\n",
-        );
-
-        // Append parameter coverage
         let coverage = self.coverage_summary_for_llm();
         if !coverage.is_empty() {
             out.push('\n');

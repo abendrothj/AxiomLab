@@ -181,9 +181,9 @@ function PendingCard({
       </div>
 
       {/* Active directive */}
-      {info.hypothesis && (
+      {info.directive && (
         <div style={{ fontSize: 11, color: "#5a8090", marginBottom: 10, lineHeight: 1.5 }}>
-          {info.hypothesis}
+          {info.directive}
         </div>
       )}
 
