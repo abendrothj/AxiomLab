@@ -340,6 +340,10 @@ impl<L: LlmBackend> Orchestrator<L> {
         // give scientists trustworthy context when approving high-risk actions.
         let mut recent_actions: Vec<(String, serde_json::Value)> = Vec::new();
         let mut system_findings_this_experiment: u32 = 0;
+        // How many times the model tried to finish before producing a real
+        // finding. First time → concrete steer; second time → auto-scaffold a
+        // measurement sweep so a weak model can't stall the loop into max-iters.
+        let mut premature_completions: u32 = 0;
 
         for iteration in 0..self.config.max_iterations {
             info!(iteration, stage = ?experiment.stage, "orchestrator step");
@@ -374,6 +378,15 @@ impl<L: LlmBackend> Orchestrator<L> {
                 self.try_propose_protocol(&response).await
             {
                 consecutive_parse_failures = 0;
+                // Count any source=system findings recorded by analyze_series steps
+                // inside the protocol so they satisfy the completion guard.
+                for step in &protocol_result.step_results {
+                    if step.tool == "analyze_series" {
+                        if let Some(out) = &step.result {
+                            system_findings_this_experiment += recorded_finding_count(out);
+                        }
+                    }
+                }
                 // Hook A — record protocol conclusion as hypothesis evidence.
                 let key_stat = extract_key_statistic(protocol_result.doe_anova.as_ref());
                 let run_id_str = protocol_result.run_id.to_string();
@@ -441,6 +454,39 @@ impl<L: LlmBackend> Orchestrator<L> {
                 if self.config.require_system_finding_for_completion
                     && system_findings_this_experiment == 0
                 {
+                    premature_completions += 1;
+                    if premature_completions >= 2 {
+                        // The model keeps trying to quit without doing the work.
+                        // Run a deterministic measurement sweep so the loop makes
+                        // real progress instead of stalling into max-iterations.
+                        warn!(
+                            iteration,
+                            premature_completions,
+                            "Auto-scaffolding a measurement series after repeated premature completion"
+                        );
+                        let (recorded, result_json) =
+                            self.bootstrap_finding_sweep(experiment).await;
+                        system_findings_this_experiment += recorded;
+                        if experiment.stage == Stage::Proposed {
+                            let prev = experiment.stage;
+                            experiment.advance(Stage::Executing)?;
+                            self.emit_transition(experiment, prev);
+                        }
+                        history.push(ChatMessage {
+                            role: "user".into(),
+                            content: format!(
+                                "You tried to finish without collecting data, so the runtime \
+                                 auto-ran a volume→absorbance sweep on your behalf and called \
+                                 analyze_series. Result: {result_json}\n\
+                                 {} source=system finding(s) are now recorded. Build on this \
+                                 (e.g. update_journal with an interpretation, or run another \
+                                 series) and only then finish with \
+                                 {{\"done\": true, \"summary\": \"...\"}}.",
+                                recorded
+                            ),
+                        });
+                        continue;
+                    }
                     warn!(
                         iteration,
                         "LLM attempted completion before any system-generated finding"
@@ -448,9 +494,13 @@ impl<L: LlmBackend> Orchestrator<L> {
                     history.push(ChatMessage {
                         role: "user".into(),
                         content: "Completion rejected: this experiment has not produced a \
-                                  source=system quantitative finding yet. Collect a real series, \
-                                  call analyze_series, and only finish after the tool reports \
-                                  recorded_findings.".into(),
+                                  source=system quantitative finding yet. Collect a REAL series \
+                                  before finishing. Concretely, repeat for 6 increasing volumes:\n\
+                                  {\"tool\": \"dispense\", \"params\": {\"vessel_id\": \"beaker_A\", \"volume_ul\": 1000}}\n\
+                                  {\"tool\": \"read_absorbance\", \"params\": {\"vessel_id\": \"beaker_A\", \"wavelength_nm\": 500}}\n\
+                                  then fit them:\n\
+                                  {\"tool\": \"analyze_series\", \"params\": {\"data\": [{\"x\": 1000, \"y\": <reading1>}, {\"x\": 2000, \"y\": <reading2>}], \"x_label\": \"volume_ul\", \"y_label\": \"absorbance_AU\", \"model\": \"linear\"}}\n\
+                                  Only finish after analyze_series reports recorded_findings.".into(),
                     });
                     continue;
                 }
@@ -518,6 +568,93 @@ impl<L: LlmBackend> Orchestrator<L> {
         Err(OrchestratorError::Halted(
             "max iterations reached".to_owned(),
         ))
+    }
+
+    /// Deterministically collect a real absorbance-vs-volume series and fit it.
+    ///
+    /// Invoked when a weak model repeatedly tries to finish without doing any
+    /// measurement. Dispenses [`LEVELS`] increasing volumes into `beaker_A`,
+    /// reads absorbance at 500 nm after each (Beer-Lambert ⇒ linear in fill
+    /// volume), fits the series with `analyze_series` (which auto-records a
+    /// source=system finding when R² clears the threshold over ≥ MIN points),
+    /// then aspirates the added volume back so vessel state is unchanged across
+    /// runs. Every call goes through the full validation pipeline + audit log.
+    ///
+    /// Returns `(findings_recorded, analyze_series_result_json)`.
+    async fn bootstrap_finding_sweep(&self, experiment: &Experiment) -> (u32, String) {
+        const VESSEL: &str = "beaker_A";
+        const WAVELENGTH_NM: f64 = 500.0;
+        const STEP_UL: f64 = 1000.0;
+        const LEVELS: u32 = 6;
+
+        let actx = || ApprovalContext {
+            hypothesis:                 experiment.hypothesis.clone(),
+            experiment_id:              experiment.id.clone(),
+            iteration:                  0,
+            risk_class:                 None,
+            recent_actions:             Vec::new(),
+            journal_summary:            self.config.journal_summary.clone(),
+            protocol_step:              None,
+            findings_before_experiment: self.config.findings_at_start,
+        };
+
+        let mut data: Vec<serde_json::Value> = Vec::new();
+        let mut dispensed = 0.0_f64;
+        for _ in 0..LEVELS {
+            let d = self
+                .execute_tool_direct(
+                    "dispense",
+                    serde_json::json!({ "vessel_id": VESSEL, "volume_ul": STEP_UL }),
+                    Some(actx()),
+                )
+                .await;
+            if !d.success {
+                warn!(output = %d.output, "bootstrap sweep: dispense rejected, stopping early");
+                break;
+            }
+            dispensed += STEP_UL;
+            let r = self
+                .execute_tool_direct(
+                    "read_absorbance",
+                    serde_json::json!({ "vessel_id": VESSEL, "wavelength_nm": WAVELENGTH_NM }),
+                    Some(actx()),
+                )
+                .await;
+            if let Some(y) = r.output.get("absorbance").and_then(|v| v.as_f64()) {
+                data.push(serde_json::json!({ "x": dispensed, "y": y }));
+            }
+        }
+
+        let analysis = self
+            .execute_tool_direct(
+                "analyze_series",
+                serde_json::json!({
+                    "data":    data,
+                    "x_label": "volume_ul",
+                    "y_label": "absorbance_AU",
+                    "model":   "linear",
+                }),
+                Some(actx()),
+            )
+            .await;
+        let recorded = recorded_finding_count(&analysis.output);
+
+        // Restore vessel state so repeated scaffolds don't accumulate volume.
+        let mut remaining = dispensed;
+        while remaining > 0.0 {
+            let chunk = remaining.min(STEP_UL);
+            let _ = self
+                .execute_tool_direct(
+                    "aspirate",
+                    serde_json::json!({ "vessel_id": VESSEL, "volume_ul": chunk }),
+                    Some(actx()),
+                )
+                .await;
+            remaining -= chunk;
+        }
+
+        let result_json = serde_json::to_string(&analysis.output).unwrap_or_default();
+        (recorded, result_json)
     }
 
     /// Check if the LLM response is a `propose_protocol` call.
@@ -1152,6 +1289,12 @@ impl<L: LlmBackend> Orchestrator<L> {
     /// artifacts, then dispatch it.
     async fn try_tool_call(&self, response: &str, approval_ctx: Option<ApprovalContext>, reasoning_text: Option<String>) -> Option<ToolResult> {
         let parsed: serde_json::Value = serde_json::from_str(response).ok()?;
+
+        // A completion object ({done: true}) is handled by the caller's
+        // completion branch — don't flag it here as a malformed tool call.
+        if parsed.get("done").and_then(|d| d.as_bool()) == Some(true) {
+            return None;
+        }
 
         // Schema validation: the JSON must have "tool" (string) and "params" (object).
         if let Err(schema_err) = validate_tool_call_schema(&parsed) {
