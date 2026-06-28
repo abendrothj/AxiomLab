@@ -101,8 +101,8 @@ async function load() {
           <span class="risk ${riskClass(item.risk_class)}">${item.risk_class || 'unknown risk'}</span>
         </div>
         <div class="age">${ago(item.queued_at)} &nbsp;·&nbsp; ID: ${item.pending_id}</div>
-        <div class="section-label">Hypothesis</div>
-        <div class="value">${item.hypothesis || '(none)'}</div>
+        <div class="section-label">Directive</div>
+        <div class="value">${item.directive || '(none)'}</div>
         <div class="section-label">Parameters</div>
         <div class="value">${JSON.stringify(item.params, null, 2)}</div>
         ${item.recent_actions && item.recent_actions.length ? `

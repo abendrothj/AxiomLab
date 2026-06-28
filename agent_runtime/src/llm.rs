@@ -75,7 +75,7 @@ fn orchestrator_response_format() -> serde_json::Value {
                                 "read_ph", "read_absorbance", "read_temperature", "read_sensor",
                                 "dispense", "aspirate", "set_temperature", "move_arm",
                                 "spin_centrifuge", "incubate", "calibrate_ph",
-                                "propose_protocol", "analyze_series", "update_journal",
+                                "propose_protocol", "analyze_series",
                                 "design_experiment"
                             ] },
                             "params": { "type": "object" }

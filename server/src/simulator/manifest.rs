@@ -105,12 +105,6 @@ fn build_proof_manifest() -> (ProofManifest, ExecutionContext) {
                 rationale: "Incubation requires verified thermal bounds".into(),
             },
             ActionPolicy {
-                action: "update_journal".into(),
-                risk_class: RiskClass::ReadOnly,
-                required_artifacts: vec![],
-                rationale: "Journal writes are in-process, no hardware proof required".into(),
-            },
-            ActionPolicy {
                 action: "analyze_series".into(),
                 risk_class: RiskClass::ReadOnly,
                 required_artifacts: vec![],
