@@ -122,10 +122,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    return eventBus.listen<{ running: boolean; iteration: number; notebook: NotebookEntryEvent[]; loop_status?: LoopStatus }>(
+    return eventBus.listen<{
+      running: boolean; iteration: number;
+      notebook: NotebookEntryEvent[]; loop_status?: LoopStatus;
+      queue_pending?: number; hardware_mode?: boolean; agenda_complete?: boolean;
+    }>(
       "snapshot", (snap) => {
         setIteration(snap.iteration);
         if (snap.loop_status) setLoopStatus(snap.loop_status);
+        if (typeof snap.queue_pending === "number") setQueuePending(snap.queue_pending);
+        if (typeof snap.hardware_mode === "boolean") setHardwareMode(snap.hardware_mode);
+        if (typeof snap.agenda_complete === "boolean") setAgendaComplete(snap.agenda_complete);
         // DB history is already loaded — only fall back to snapshot if DB was empty
         setNotebook((prev) => prev.length > 0 ? prev : (snap.notebook ?? []));
         setConnected(true);

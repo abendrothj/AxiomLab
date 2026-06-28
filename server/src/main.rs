@@ -366,13 +366,24 @@ async fn ws_handler(
 
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
     // Send current state snapshot to the new viewer immediately.
+    let queue_pending_snap = state.protocol_queue.lock().unwrap()
+        .items().iter()
+        .filter(|i| i.status == protocol_queue::QueueStatus::Pending)
+        .count();
+    let agenda_complete_snap = {
+        let j = state.journal.lock().unwrap();
+        simulator::agenda_status(&j).iter().all(|i| i.status == "completed")
+    };
     let snapshot = serde_json::json!({
         "event": "snapshot",
         "payload": {
-            "running":     state.running.load(Ordering::SeqCst),
-            "iteration":   state.iteration.load(Ordering::SeqCst),
-            "notebook":    *state.notebook.lock().unwrap(),
-            "loop_status": *state.loop_status.lock().unwrap(),
+            "running":          state.running.load(Ordering::SeqCst),
+            "iteration":        state.iteration.load(Ordering::SeqCst),
+            "notebook":         *state.notebook.lock().unwrap(),
+            "loop_status":      *state.loop_status.lock().unwrap(),
+            "queue_pending":    queue_pending_snap,
+            "hardware_mode":    state.sila_clients.is_some(),
+            "agenda_complete":  agenda_complete_snap,
         }
     });
     if socket.send(Message::Text(snapshot.to_string())).await.is_err() {
