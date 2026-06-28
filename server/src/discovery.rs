@@ -1,8 +1,8 @@
-//! Persistent discovery journal — cross-run scientific memory.
+//! Persistent operation log — cross-run execution record.
 //!
-//! Every protocol conclusion and LLM-recorded finding is stored here.
-//! On the next run the journal summary is injected into the LLM mandate,
-//! turning isolated experiments into an accumulating knowledge base.
+//! Every protocol conclusion and recorded finding is stored here.
+//! On each execution cycle the log summary is injected into the LLM mandate
+//! so the agent references prior results and does not repeat completed procedures.
 //!
 //! # Storage
 //! The journal is written to `.artifacts/discovery/journal.json` (relative to

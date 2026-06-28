@@ -1,12 +1,14 @@
 # AxiomLab
 
-> A memory-safe Rust runtime for autonomous AI-driven lab exploration, with formal verification, SiLA 2 hardware integration, and ISO 17025 compliance infrastructure.
+> A memory-safe Rust runtime for safe autonomous agentic lab execution — formal verification, SiLA 2 hardware integration, and ISO 17025 compliance infrastructure.
 
 ## What This Is
 
-AxiomLab is a working prototype of an autonomous science agent. An LLM continuously proposes lab experiments. A Rust orchestrator validates every proposed action through a multi-stage safety pipeline before dispatching it to lab hardware over SiLA 2 gRPC. Hardware physics — volumes, capacities, overflow prevention — are enforced by formally verified Rust code proved correct by the Verus SMT solver. Multi-step experiments are expressed as structured protocols with cryptographically signed audit records anchored to the Sigstore Rekor transparency log.
+AxiomLab is a **safe execution platform for autonomous agentic laboratory operation** — not an AI discovery engine. Operators (humans, higher-level systems, or a Telegram overseer) push protocol directives into a persistent queue. An execution loop drains the queue in priority order, validates every proposed action through a 6-stage safety pipeline, dispatches to lab hardware over SiLA 2 gRPC, and writes a tamper-evident audit record of every step.
 
-The system is designed to be grounded in real practice: GUM-compliant uncertainty budgets, ISO 17025 method validation records, QA sign-off with tamper-evident hashes, and reagent inventory tracking with chemical compatibility checks.
+Hardware physics — volumes, capacities, overflow prevention — are enforced by formally verified Rust proved correct by the Verus SMT solver. The product is the safety stack: the proof gate, Ed25519 audit chain, and operator approval queue. The science output is evidence the safety stack works, not the point itself.
+
+The system is grounded in real practice: GUM-compliant uncertainty budgets, ISO 17025 method validation records, QA sign-off with tamper-evident hashes, reagent inventory tracking, and chemical compatibility checks. SiLA 2 real-hardware integration is the north star.
 
 ---
 
@@ -109,11 +111,12 @@ All records are persisted in the discovery journal (`journal.json`) and survive 
 - **PubChem proxy** — `GET /api/literature/search?q=<compound>` proxies to PubChem PUG REST API; returns CID, IUPAC name, molecular formula, MW, canonical SMILES; `fetch_protocol_hints()` extracts compound properties from a hypothesis string for LLM mandate injection
 - **ELN adapter** — `ELNAdapter` trait + `BenchlingAdapter`; `POST /api/export/benchling/{study_id}` (JWT required) maps a `StudyRecord` to a Benchling notebook entry and returns the entry URL; returns 503 when `AXIOMLAB_BENCHLING_*` vars are not set
 
-### Discovery and Experiment Management
+### Execution and Experiment Management
 
-- **Continuous autonomous loop** — LLM proposes → orchestrator validates → hardware executes → results feed back → journal records → LLM proposes next; convergence detection slows the loop when all hypotheses are settled
+- **Protocol queue** — operators push natural-language directives via `POST /api/queue`; the execution loop drains in priority order (highest priority first, FIFO within same priority); falls back to built-in commissioning agenda when queue is empty
+- **Continuous execution loop** — operator directive (or commissioning agenda fallback) → LLM executes → orchestrator validates → hardware dispatches → results record → next directive; convergence detection slows the loop when all directives are settled
 - **Multi-slot JoinSet loop** — up to 4 independent experiments run concurrently, each with its own iteration context
-- **Hypothesis lifecycle** — proposed → testing → confirmed / rejected; journal tracks all transitions with timestamps
+- **Directive lifecycle** — proposed → testing → confirmed / rejected; operation log tracks all transitions with timestamps
 - **Auto-findings from curve fits** — when `analyze_series` produces R² ≥ 0.80 (linear) or valid Hill fit, a `source: "system"` finding with typed `Measurement` structs is auto-recorded in the discovery journal and signed into the audit chain
 - **Evidence-gated convergence** — the loop only marks an experiment converged when at least one `source: "system"` finding exists (written by `analyze_series` at R² ≥ 0.80). The LLM cannot fake convergence by calling `confirm_hypothesis` with no data.
 - **Chain-of-thought in audit** — `reasoning_text` extracted from every LLM response is forwarded to all `audit_decision` calls across all 6 pipeline stages, making the LLM's rationale part of the tamper-evident audit record.
@@ -126,7 +129,7 @@ All records are persisted in the discovery journal (`journal.json`) and survive 
 | Item | Reality |
 |------|---------|
 | **Physical hardware** | Python SiLA 2 mock server returns simulated values. No real instruments connected. |
-| **LLM** | OpenAI-compatible API; tested with local Ollama (`qwen2.5-coder:7b`). Not a frontier reasoning model. Discovery quality is model-dependent. |
+| **LLM** | OpenAI-compatible API; tested with local Ollama (`qwen2.5-coder:7b`). Not a frontier reasoning model. Protocol execution quality is model-dependent. |
 | **Key management** | Ed25519 audit signing key is persisted across restarts via `FileBackedSigner` (env var → file → auto-generate at `~/.config/axiomlab/`). HSM storage and rotation policy are external. |
 | **Benchling export** | `BenchlingAdapter` constructs correctly-shaped API requests; not tested against the live Benchling API (requires a real token). |
 | **PubChem integration** | `search_pubchem()` makes live HTTP requests; requires network access and is subject to PubChem rate limits. |
@@ -176,7 +179,7 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 
 | Crate | Purpose | Workspace |
 |-------|---------|-----------|
-| `server` | Axum HTTP + WebSocket server, exploration loop (JoinSet multi-slot), all API routes | ✓ |
+| `server` | Axum HTTP + WebSocket server, execution loop (JoinSet multi-slot), protocol queue, all API routes | ✓ |
 | `agent_runtime` | Orchestrator (6-stage pipeline), protocol executor, SiLA 2 clients, approvals, audit, Rekor, lab state, chemistry, notifications | ✓ |
 | `proof_artifacts` | Manifest schema, RuntimePolicyEngine, Ed25519 signing, CI gate | ✓ |
 | `scientific_compute` | DoE (full factorial, CCD, LHC), OLS regression, Hill/MM fitting, ANOVA, FFT, GUM uncertainty propagation | ✓ |
@@ -207,6 +210,7 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 | GET | `/api/lab/reagents` | Reagent inventory |
 | GET | `/api/lab/vessels` | Vessel contents |
 | GET | `/api/lab/calibration-status` | Per-instrument calibration validity |
+| GET | `/api/queue` | Protocol queue — all items (pending + history) |
 | GET | `/api/methods` | Method validation records |
 | GET | `/api/methods/{id}` | Single method validation |
 | GET | `/api/lab/reference-materials` | Certified reference materials |
@@ -223,6 +227,8 @@ LLM emits ProtocolPlan JSON  (optionally with doe_design_json)
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/emergency-stop` | Halt loop + abort all SiLA 2 instruments |
+| POST | `/api/queue` | Push a protocol directive onto the execution queue |
+| DELETE | `/api/queue/:id` | Remove a queued item |
 | GET | `/api/audit/raw` | Stream full JSONL audit log |
 | POST | `/api/approvals/recover/{id}` | Clear stalled dispatch |
 | POST | `/api/approvals/recover/{id}/cancel` | Cancel stalled dispatch |
@@ -369,10 +375,11 @@ Step count ≤ 20, total volume ≤ 200 mL, dilution series correctness.
 
 ```text
 AxiomLab/
-├── server/                     # Axum HTTP/WS server, exploration loop (JoinSet), all routes
+├── server/                     # Axum HTTP/WS server, execution loop (JoinSet), all routes
 │   ├── src/main.rs             # Route registration, AppState, startup
-│   ├── src/simulator/mod.rs    # JoinSet multi-slot exploration loop
-│   ├── src/simulator/mandate.rs  # LLM system prompt (mandate) builder
+│   ├── src/simulator/mod.rs    # JoinSet multi-slot execution loop (queue → journal → commissioning agenda)
+│   ├── src/protocol_queue.rs   # Operator protocol queue (persisted, priority-ordered)
+│   ├── src/simulator/mandate.rs  # LLM execution mandate builder
 │   ├── src/simulator/tools.rs    # Tool schema definitions for LLM (physics pH, sensor dispatch)
 │   ├── src/approvals_ui.rs     # GET /approvals — serves static approval page
 │   ├── src/approvals.html      # Vanilla HTML approval dashboard (auto-refresh, Deny/Approve)

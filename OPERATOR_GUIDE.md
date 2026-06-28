@@ -4,15 +4,16 @@ Operational reference for running, testing, and understanding the system. This d
 
 ## 1) System Architecture
 
-AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web dashboard. The core loop: an LLM proposes lab experiments → a 6-stage validation pipeline checks every proposed action → validated actions execute over SiLA 2 gRPC → results feed back to the LLM.
+AxiomLab is a Rust workspace (9 crates) + a Python SiLA 2 server + a React web dashboard. It is a **safe execution platform for autonomous agentic lab operation** — not an AI discovery engine. The core loop: operators push protocol directives into a priority queue → the execution loop drains the queue → an LLM executes each directive → a 6-stage validation pipeline checks every proposed action → validated actions execute over SiLA 2 gRPC → results are recorded in the operation log and audit chain.
 
 ### 1.1 Crate Roles
 
 **Production path (server + agent_runtime + proof_artifacts + vessel_physics):**
 
-- **server** — Axum HTTP server with WebSocket event streaming, SQLite-indexed audit log, multi-slot experiment scheduler, and the continuous exploration loop that drives the agent.
+- **server** — Axum HTTP server with WebSocket event streaming, SQLite-indexed audit log, multi-slot experiment scheduler, protocol queue, and the continuous execution loop that drives the agent.
   - [server/src/main.rs](server/src/main.rs) — HTTP router (see §5 for full API surface), JWT middleware, OIDC handlers, experiment scheduler initialization, ZK status route
-  - [server/src/simulator/mod.rs](server/src/simulator/mod.rs) — `JoinSet`-based parallel exploration loop; 1–4 concurrent experiment slots via `LabScheduler`; convergence gated on `source: "system"` findings
+  - [server/src/simulator/mod.rs](server/src/simulator/mod.rs) — `JoinSet`-based parallel execution loop; drains protocol queue (priority → FIFO), falls back to commissioning agenda; 1–4 concurrent experiment slots via `LabScheduler`; convergence gated on `source: "system"` findings
+  - [server/src/protocol_queue.rs](server/src/protocol_queue.rs) — Persistent, priority-ordered queue of operator protocol directives; survives restarts; trimmed to 50 completed/failed items
   - [server/src/lab_scheduler.rs](server/src/lab_scheduler.rs) — Slot pool + instrument contention tracking
   - [server/src/approvals_ui.rs](server/src/approvals_ui.rs) — `GET /approvals` handler; serves `approvals.html` via `include_str!`
   - [server/src/approvals.html](server/src/approvals.html) — Vanilla HTML approval dashboard: auto-refreshes every 5 s, shows pending action cards with Deny/Approve buttons
@@ -163,7 +164,7 @@ curl -X POST http://localhost:3000/api/emergency-stop \
 
 This:
 
-1. Sets `running = false` (stops the exploration loop)
+1. Sets `running = false` (stops the execution loop)
 2. Calls `SiLA2Clients::abort_all()` — sends SiLA 2 `Abort` gRPC to all 6 instruments concurrently
 3. Emits an `emergency_stop` audit event with operator identity
 4. Returns `{ "status": "stopped", "instrument_results": [...] }` with per-instrument results
@@ -210,7 +211,50 @@ curl -X POST http://localhost:3000/api/approvals/submit \
 
 ---
 
-## 4) ISO 17025 Records
+## 4) Protocol Queue
+
+The protocol queue is the **primary interface** between operators and the execution loop. Push a natural-language directive; the loop picks it up in priority order and executes it as the next experiment mandate.
+
+### 4.1 Queue Priority Model
+
+Items are sorted: **highest `priority` first**, FIFO within the same priority. Range: 0 (normal) to 255 (urgent).
+
+When the queue is empty the loop falls back to the built-in **commissioning agenda** — a fixed series of instrument characterisation runs (pH titration, Beer-Lambert extended range, incubator temperature uniformity, pH-absorbance coupling, arm workspace boundary). These fire automatically and never block operator-pushed work.
+
+### 4.2 Using the Queue
+
+```bash
+# Push a directive (no JWT required — reading queue is public)
+curl -X POST http://localhost:3000/api/queue \
+  -H "Content-Type: application/json" \
+  -d '{
+    "statement": "Characterise the pH meter linearity from pH 4 to pH 10 using buffer standards. Report slope ± std-error and R².",
+    "priority": 100
+  }'
+# Returns: {"id": "<uuid>"}
+
+# List all items (pending + recent history)
+curl http://localhost:3000/api/queue
+
+# Remove an item by ID
+curl -X DELETE http://localhost:3000/api/queue/<id>
+```
+
+Write `statement` as a precise lab instruction: name the instrument, the procedure, and the quantitative outcome expected. The statement becomes the top-level directive in the LLM execution mandate verbatim.
+
+### 4.3 Item Lifecycle
+
+```
+Pending → Running (loop picks it up)
+        → Completed (converged with quantitative finding)
+        → Failed (loop exhausted iterations without convergence)
+```
+
+Completed and failed items are retained as history (trimmed to the 50 most recent). The experiment ID assigned when running is stored in `experiment_id`; the outcome summary is in `result_summary`.
+
+---
+
+## 5) ISO 17025 Records
 
 The discovery journal (`DiscoveryJournal`) includes ISO 17025 record types. Mutations are available via the API; all writes are stored in memory and serialized to the JSONL journal.
 
@@ -265,9 +309,9 @@ QA sign-off computes `SHA-256(canonical_json(study_record))` and stores it as `q
 
 ---
 
-## 5) API Surface
+## 6) API Surface
 
-### 5.1 Public (no auth required)
+### 6.1 Public (no auth required)
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -287,16 +331,19 @@ QA sign-off computes `SHA-256(canonical_json(study_record))` and stores it as `q
 | GET | `/api/methods/:id` | Single method validation |
 | GET | `/api/lab/reference-materials` | Reference materials |
 | GET | `/api/lab/calibration-status` | Per-instrument calibration validity |
+| GET | `/api/queue` | Protocol queue — all items (pending + history) |
 | GET | `/api/literature/search?q=` | PubChem compound lookup |
 | GET | `/api/auth/oidc/start` | Initiate OIDC PKCE flow |
 | GET | `/api/auth/oidc/callback` | OIDC callback (issues JWT) |
 | WS | `/ws?token=` | Event stream (JWT required when `AXIOMLAB_WS_AUTH ≠ 0`) |
 
-### 5.2 Protected (JWT required)
+### 6.2 Protected (JWT required)
 
 | Method | Path | Role | Description |
 | --- | --- | --- | --- |
 | POST | `/api/emergency-stop` | operator | Halt all instruments |
+| POST | `/api/queue` | operator | Push a protocol directive (priority 0–255) |
+| DELETE | `/api/queue/:id` | operator | Remove a queued item |
 | POST | `/api/studies` | pi | Create study |
 | GET | `/api/studies/:id` | any | Get study |
 | POST | `/api/studies/:id/protocols` | pi | Pre-register protocol |
@@ -308,7 +355,7 @@ QA sign-off computes `SHA-256(canonical_json(study_record))` and stores it as `q
 
 ---
 
-## 6) Multi-Slot Experiment Scheduling
+## 7) Multi-Slot Experiment Scheduling
 
 By default, one experiment runs at a time. Increase parallelism:
 
@@ -327,9 +374,9 @@ curl http://localhost:3000/api/status
 
 ---
 
-## 7) Runbook
+## 8) Runbook
 
-### 7.1 Local Development
+### 8.1 Local Development
 
 ```bash
 # Build all crates
@@ -353,7 +400,7 @@ cargo test -p agent_runtime --test vessel_simulation_e2e -- --ignored --test-thr
 cargo test -p agent_runtime --test sila2_e2e -- --ignored --test-threads=1
 ```
 
-### 7.2 Verus Proof Workflow
+### 8.2 Verus Proof Workflow
 
 ```bash
 # Install Verus (macOS ARM64, Linux x86-64, Linux ARM64)
@@ -374,7 +421,7 @@ cargo test -p agent_runtime --test sila2_e2e -- --ignored --test-threads=1
 python3 vessel_physics/generate_manifest.py
 ```
 
-### 7.3 Release Gate
+### 8.3 Release Gate
 
 ```bash
 ./scripts/proof_release_gate.sh
@@ -382,7 +429,7 @@ python3 vessel_physics/generate_manifest.py
 
 Runs: build, manifest generation, signing, policy enforcement, sandbox/capability tests, audit chain verification, compliance bundle export.
 
-### 7.4 Audit Log
+### 8.4 Audit Log
 
 **Location:** `$AXIOMLAB_DATA_DIR/audit/runtime_audit.jsonl` (default: `.artifacts/audit/runtime_audit.jsonl`)
 
@@ -421,7 +468,7 @@ curl "http://localhost:3000/api/audit/verify"
 curl "http://localhost:3000/api/audit/zk-status"
 ```
 
-### 7.5 Verify Signed Manifest
+### 8.5 Verify Signed Manifest
 
 ```bash
 cargo run -p proof_artifacts --bin proofctl -- verify \
@@ -429,7 +476,7 @@ cargo run -p proof_artifacts --bin proofctl -- verify \
   --public-key .artifacts/proof/manifest_signing_key.public.b64
 ```
 
-### 7.6 Verify Rekor Anchor
+### 8.6 Verify Rekor Anchor
 
 ```bash
 # Via rekor-cli
@@ -439,7 +486,7 @@ rekor-cli verify --uuid <uuid> --artifact-hash <sha256_hex>
 curl https://rekor.sigstore.dev/api/v1/log/entries/<uuid>
 ```
 
-### 7.7 ELN Export (Benchling)
+### 8.7 ELN Export (Benchling)
 
 ```bash
 # Export a study to Benchling
@@ -452,7 +499,7 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 
 ---
 
-## 8) Environment Variables
+## 9) Environment Variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -484,37 +531,37 @@ Requires `AXIOMLAB_BENCHLING_TOKEN`, `AXIOMLAB_BENCHLING_TENANT`, `AXIOMLAB_BENC
 
 ---
 
-## 9) Security Findings and Risk Priorities
+## 10) Security Findings and Risk Priorities
 
-### 9.1 High: Policy construction trust boundary
+### 10.1 High: Policy construction trust boundary
 
 - Code: [proof_artifacts/src/policy.rs](proof_artifacts/src/policy.rs)
 - Issue: `RuntimePolicyEngine` can be constructed with `trusted` flag without prior signature verification. In production, `simulator.rs` calls `mark_signature_verified()` only when manifest hash matches a compile-time constant — not a runtime cryptographic check.
 - Mitigation: Use `proofctl verify` with actual Ed25519 keys before deployment.
 
-### 9.2 Low: Audit signing key file is local-only
+### 10.2 Low: Audit signing key file is local-only
 
 - Code: [agent_runtime/src/audit.rs](agent_runtime/src/audit.rs) — `FileBackedSigner::load_or_create()`
 - Status: **Resolved for single-node deployments.** `audit_signer_from_env()` loads in priority order: `AXIOMLAB_AUDIT_SIGNING_KEY` env var → `AXIOMLAB_AUDIT_SIGNING_KEY_PATH` file → auto-generate at `~/.config/axiomlab/audit_signing.key`. The key survives restarts.
 - Remaining risk: Key is on local disk. A complete chain rewrite from the same host with the same persisted key passes local checks. Rekor anchors remain the external witness. HSM or KMS custody is needed for production.
 
-### 9.3 Medium: Hardware is simulated
+### 10.3 Medium: Hardware is simulated
 
 - Code: [sila_sim/](sila_sim/)
 - Issue: All SiLA 2 responses are simulated. Validation pipeline is tested against the mock, not real instruments.
 - Mitigation: Hardware-in-the-loop tests behind a `--feature hardware` gate when connecting real instruments.
 
-### 9.4 Low: proof_synthesizer requires external toolchain
+### 10.4 Low: proof_synthesizer requires external toolchain
 
 - Proof repair loop requires Verus binary + LLM. Not wired into CI gate. All production proofs are pre-generated and committed.
 
-### 9.5 Low: Key lifecycle is external
+### 10.5 Low: Key lifecycle is external
 
 - Ed25519 key generation, rotation, revocation, and storage are left to the operator. Use HSM/KMS for production.
 
 ---
 
-## 10) Operator Checklist
+## 11) Operator Checklist
 
 Before running high-risk actions:
 
@@ -531,7 +578,7 @@ Before running high-risk actions:
 
 ---
 
-## 11) Suggested Next Hardening Tasks
+## 12) Suggested Next Hardening Tasks
 
 1. Restrict trusted policy-engine constructor usage to test-only contexts.
 2. Replace hardware simulation with injected production driver traits (trait-based `SensorDriver` injection behind `--feature hardware`).
