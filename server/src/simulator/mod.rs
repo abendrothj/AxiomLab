@@ -90,6 +90,63 @@ fn experiment_exhausted_iterations(experiment: &Experiment) -> bool {
             .is_some_and(|e| e.contains("max orchestrator iterations"))
 }
 
+/// Deterministic science agenda.  Each entry is (dedup_key, hypothesis_statement).
+/// `dedup_key` must appear verbatim in the statement so the existence check works.
+const SCIENCE_AGENDA: &[(&str, &str)] = &[
+    (
+        "ph-titration-capacity",
+        "pH titration — buffer capacity [ph-titration-capacity]: run calibrate_ph, \
+         then add NaOH in ≥6 equal increments (50–300 µL into a water baseline) and \
+         measure pH after each addition. Fit pH vs cumulative NaOH volume (linear model). \
+         Report slope ± std-error and R².",
+    ),
+    (
+        "beer-lambert-upper-range",
+        "Beer-Lambert extended range [beer-lambert-upper-range]: scan absorbance at ≥8 \
+         fill volumes across [100, 1000] µL (evenly spaced). Fit the linear model and \
+         compare the slope to the previously established ~2.38×10⁻⁵ AU/µL baseline. \
+         Report updated slope ± std-error and R².",
+    ),
+    (
+        "incubator-temperature-linearity",
+        "Incubator setpoint accuracy [incubator-temperature-linearity]: use \
+         read_temperature at 5 setpoints — trigger each with a dispense step, then \
+         read. Setpoints: 25, 30, 35, 37, 40 °C. Fit measured vs nominal temperature; \
+         report offset, slope, and R².",
+    ),
+    (
+        "ph-absorbance-coupling",
+        "pH–absorbance coupling [ph-absorbance-coupling]: prepare 5 solutions at NaOH \
+         volumes 50, 100, 150, 200, 250 µL. Measure both pH and absorbance at each level. \
+         Fit absorbance vs pH and report the correlation coefficient with R².",
+    ),
+    (
+        "arm-workspace-boundary",
+        "Arm workspace boundary [arm-workspace-boundary]: map the outer boundary of the \
+         safe arm workspace by issuing move_arm calls at x ∈ {0, 75, 150, 225, 300} mm \
+         and y ∈ {0, 75, 150, 225, 300} mm (z fixed at 100 mm). Record which succeed; \
+         report the confirmed reachable area as a fraction of the declared 300×300 mm envelope.",
+    ),
+];
+
+/// Propose the next untried hypothesis from the science agenda.
+/// Returns true when a hypothesis was added (and the journal saved).
+fn seed_follow_up_hypothesis(journal: &mut crate::discovery::DiscoveryJournal) -> bool {
+    for (key, stmt) in SCIENCE_AGENDA {
+        let already_exists = journal.hypotheses.iter().any(|h| h.statement.contains(key));
+        if !already_exists {
+            journal.add_hypothesis(stmt.to_string());
+            tracing::info!(key = key, "Seeded follow-up hypothesis from science agenda");
+            if let Err(e) = journal.save(&crate::discovery::journal_path()) {
+                tracing::warn!("Failed to persist journal after hypothesis seed: {e}");
+            }
+            return true;
+        }
+    }
+    tracing::warn!("Science agenda exhausted — all planned hypotheses have been proposed");
+    false
+}
+
 // ── Slot manager ──────────────────────────────────────────────────────────────
 
 struct SlotManager {
@@ -253,14 +310,19 @@ async fn pause_after_run(
 
     if should_idle_exploration(&sink.journal.lock().unwrap()) {
         *consecutive_exhaustions = 0;
+        let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
+        if seeded {
+            sink.set_loop_status("exploring", "New hypothesis seeded — queuing next experiment", 0);
+            return;
+        }
         let pause = loop_cfg.idle_pause_secs;
         tracing::info!(
             pause_secs = pause,
-            "Journal has findings and no active hypotheses — extended idle"
+            "Science agenda exhausted — all planned experiments complete, extended idle"
         );
         sink.set_loop_status(
             "idle",
-            "Findings recorded, no active hypotheses — waiting for new questions",
+            "All planned experiments complete — idling for new questions",
             pause,
         );
         sleep(Duration::from_secs(pause)).await;
@@ -347,13 +409,22 @@ pub async fn run_loop(
         // ── Fill available slots ───────────────────────────────────────────────
         while scheduler.available_slots() > 0 && running.load(Ordering::SeqCst) {
             if should_idle_exploration(&sink.journal.lock().unwrap()) {
+                let seeded = seed_follow_up_hypothesis(&mut sink.journal.lock().unwrap());
+                if seeded {
+                    sink.set_loop_status(
+                        "exploring",
+                        "New hypothesis seeded — starting next experiment",
+                        0,
+                    );
+                    continue;
+                }
                 tracing::info!(
                     pause_secs = loop_cfg.idle_pause_secs,
-                    "Skipping new experiment — findings recorded, no active hypotheses"
+                    "Science agenda exhausted — all planned experiments complete, extended idle"
                 );
                 sink.set_loop_status(
                     "idle",
-                    "Findings recorded, no active hypotheses — skipping new experiment",
+                    "All planned experiments complete — idling for new questions",
                     loop_cfg.idle_pause_secs,
                 );
                 sleep(Duration::from_secs(loop_cfg.idle_pause_secs)).await;
