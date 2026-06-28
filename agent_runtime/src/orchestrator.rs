@@ -104,9 +104,9 @@ pub struct OrchestratorConfig {
     /// Default: 300 (5 minutes). Only meaningful when `approval_queue` is `Some`.
     pub approval_timeout_secs: u64,
 
-    /// Pre-formatted discovery journal summary injected into every approval
+    /// Pre-formatted operation log summary injected into every approval
     /// context this experiment produces.  Set by the server layer from the
-    /// persisted journal before each experiment; not touched by the LLM.
+    /// persisted log before each experiment; not touched by the LLM.
     pub journal_summary: String,
 
     /// Number of confirmed findings in the journal at the start of this

@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// Root directory for all AxiomLab persistent data.
 ///
 /// Controlled by `AXIOMLAB_DATA_DIR` (default: `.artifacts`).
-/// All audit logs, discovery journals, and proof artifacts are anchored here.
+/// All audit logs, operation logs, and proof artifacts are anchored here.
 pub fn data_dir() -> PathBuf {
     std::env::var("AXIOMLAB_DATA_DIR")
         .map(PathBuf::from)

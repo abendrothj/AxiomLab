@@ -1,4 +1,4 @@
-//! Hypothesis state machine for the AxiomLab discovery journal.
+//! Hypothesis/directive state machine for the AxiomLab operation log.
 //!
 //! # Lifecycle
 //!

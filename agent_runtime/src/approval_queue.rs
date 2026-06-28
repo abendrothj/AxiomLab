@@ -74,9 +74,9 @@ pub struct ApprovalContext {
     /// Each entry is `(tool_name, params)`.  Gives the scientist a verifiable
     /// record of what the agent has actually done, not what it claims to have done.
     pub recent_actions: Vec<(String, serde_json::Value)>,
-    /// Pre-formatted discovery journal summary (findings count, active/settled
-    /// hypotheses, recent runs).  Set once per experiment by the server layer
-    /// from the persisted journal — not from LLM output.
+    /// Pre-formatted operation log summary (findings count, active/settled
+    /// directives, recent runs).  Set once per experiment by the server layer
+    /// from the persisted log — not from LLM output.
     pub journal_summary: String,
     /// If this approval was triggered from inside a structured protocol, the
     /// step position and description give the scientist precise context.
@@ -125,9 +125,9 @@ pub struct PendingApprovalInfo {
     /// state, not from the LLM's narrative).
     pub recent_actions: Vec<serde_json::Value>,
     // ── Scientific judgment context ───────────────────────────────────────────
-    /// Compact discovery journal state: finding count, hypothesis statuses,
+    /// Compact operation log state: finding count, directive statuses,
     /// recent protocol runs.  Pre-formatted by the server from the persisted
-    /// journal — not from the LLM.
+    /// log — not from the LLM.
     pub journal_summary: String,
     /// If this approval was triggered from a structured protocol, the step
     /// position and description (e.g. "Step 3 of 5: increment fill fraction by
