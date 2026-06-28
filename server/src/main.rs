@@ -97,15 +97,21 @@ async fn status_handler(State(s): State<AppState>) -> impl IntoResponse {
         (pending, running)
     };
     let hardware_mode = s.sila_clients.is_some();
+    let agenda_complete = {
+        let j = s.journal.lock().unwrap();
+        let items = simulator::agenda_status(&j);
+        items.iter().all(|i| i.status == "completed")
+    };
     axum::Json(serde_json::json!({
-        "running":       s.running.load(Ordering::SeqCst),
-        "iteration":     s.iteration.load(Ordering::SeqCst),
-        "notebook":      notebook,
-        "slot_count":    slot_count,
-        "loop_status":   loop_status,
-        "queue_pending": queue_pending,
-        "queue_running": queue_running,
-        "hardware_mode": hardware_mode,
+        "running":          s.running.load(Ordering::SeqCst),
+        "iteration":        s.iteration.load(Ordering::SeqCst),
+        "notebook":         notebook,
+        "slot_count":       slot_count,
+        "loop_status":      loop_status,
+        "queue_pending":    queue_pending,
+        "queue_running":    queue_running,
+        "hardware_mode":    hardware_mode,
+        "agenda_complete":  agenda_complete,
     }))
 }
 

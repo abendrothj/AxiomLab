@@ -81,6 +81,7 @@ export default function App() {
   const [loopStatus, setLoopStatus]       = useState<LoopStatus | null>(null);
   const [queuePending, setQueuePending]       = useState(0);
   const [hardwareMode, setHardwareMode]       = useState(false);
+  const [agendaComplete, setAgendaComplete]   = useState(false);
   const [findingToast, setFindingToast]       = useState<FindingRecordedEvent | null>(null);
   const thinkTimer      = useRef<ReturnType<typeof setTimeout> | null>(null);
   const findingTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -103,6 +104,7 @@ export default function App() {
       if (s.loop_status) setLoopStatus(s.loop_status as LoopStatus);
       if (typeof s.queue_pending === "number") setQueuePending(s.queue_pending);
       if (typeof s.hardware_mode === "boolean") setHardwareMode(s.hardware_mode);
+      if (typeof s.agenda_complete === "boolean") setAgendaComplete(s.agenda_complete);
     });
 
     // Pending approvals count for tab badge
@@ -182,6 +184,7 @@ export default function App() {
         pendingCount={pendingCount}
         queuePending={queuePending}
         hardwareMode={hardwareMode}
+        agendaComplete={agendaComplete}
       />
 
       {/* Finding toast — shown for 6 s when analyze_series records a result */}
@@ -256,9 +259,9 @@ const TAB_LABELS: Record<Tab, string> = {
   queue: "QUEUE",
 };
 
-function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount, queuePending, hardwareMode }: {
+function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pendingCount, queuePending, hardwareMode, agendaComplete }: {
   stage: string; stageColor: string; iteration: number; connected: boolean;
-  tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number; queuePending: number; hardwareMode: boolean;
+  tab: Tab; onTabChange: (t: Tab) => void; pendingCount: number; queuePending: number; hardwareMode: boolean; agendaComplete: boolean;
 }) {
   const [stopping, setStopping] = useState(false);
   const [stopMsg, setStopMsg]   = useState<string | null>(null);
@@ -424,6 +427,22 @@ function Header({ stage, stageColor, iteration, connected, tab, onTabChange, pen
           }} />
           {hardwareMode ? "SILA 2" : "SIMULATOR"}
         </div>
+
+        {/* Commissioning complete badge */}
+        {agendaComplete && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 5,
+            fontSize: 8, letterSpacing: "0.1em",
+            color: "#00ff9d",
+            padding: "2px 8px",
+            border: "1px solid #00ff9d22",
+            borderRadius: 2,
+            background: "#00ff9d08",
+          }}>
+            <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#00ff9d", boxShadow: "0 0 4px #00ff9d" }} />
+            COMMISSIONED
+          </div>
+        )}
 
         {/* Connection indicator */}
         <div style={{
