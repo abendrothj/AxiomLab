@@ -78,7 +78,9 @@ async fn main() {
             lab.seed_default_vessels(); // capacity registry for the ProofGate
             lab
         })),
-        approval_queue: Arc::new(ApprovalQueue::new()),
+        approval_queue: Arc::new(ApprovalQueue::open(
+            std::env::var("AXIOMLAB_APPROVALS_PATH").unwrap_or_else(|_| ".artifacts/runtime/approvals.json".into()),
+        ).expect("open approval journal")),
         protocol_queue: Arc::new(ProtocolQueue::open(
             std::env::var("AXIOMLAB_QUEUE_PATH").unwrap_or_else(|_| ".artifacts/runtime/queue.json".into()),
         ).expect("open protocol queue")),
@@ -124,6 +126,7 @@ fn api_router(state: AppState) -> Router {
         .route("/api/queue", get(handlers::queue_list).post(handlers::queue_push))
         .route("/api/queue/:id", delete(handlers::queue_cancel))
         .route("/api/approvals", get(handlers::approvals_list))
+        .route("/api/approvals/history", get(handlers::approvals_history))
         .route("/api/approvals/:id", post(handlers::approvals_resolve))
         .route("/api/lab", get(handlers::lab))
         .route("/ready", get(handlers::ready))
@@ -229,6 +232,16 @@ mod tests {
         let resp = app.oneshot(Request::post("/api/audit/verify").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("\"ok\":true"));
+    }
+
+    #[tokio::test]
+    async fn approval_history_is_exposed() {
+        let state = test_state();
+        state.approval_queue.request("move_arm", &serde_json::json!({"x": 1.0}));
+        let app = api_router(state);
+        let resp = app.oneshot(Request::get("/api/approvals/history").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("\"status\":\"pending\""));
     }
 
     fn make_token(secret: &str, exp: usize) -> String {

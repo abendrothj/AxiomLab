@@ -127,6 +127,10 @@ pub async fn approvals_list(State(s): State<AppState>) -> Json<serde_json::Value
     Json(json!(s.approval_queue.list_pending()))
 }
 
+pub async fn approvals_history(State(s): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!(s.approval_queue.history()))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DecisionBody {
     pub approved: bool,

@@ -20,7 +20,7 @@ mod gates;
 pub use analyze::{
     AnalyzeOutcome, AnalyzeRequest, CALIBRATION_R2_THRESHOLD, MIN_CALIBRATION_LEVELS, analyze_series,
 };
-pub use approvals::{ApprovalQueue, ApprovalRequest, Decision};
+pub use approvals::{ApprovalQueue, ApprovalRecord, ApprovalRequest, ApprovalStatus, Decision};
 pub use calibration::{
     ProposedCalibration, latest_valid_until, measurement_instrument, record_calibration,
 };

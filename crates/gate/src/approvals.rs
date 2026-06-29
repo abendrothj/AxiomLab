@@ -6,17 +6,18 @@
 //! identical action does not re-prompt — but *different* params produce a
 //! different scope hash and require a fresh approval.
 
-use serde::Serialize;
+use axiom_types::RiskClass;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::oneshot;
-use axiom_types::RiskClass;
 
 /// An operator's decision on a pending approval request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
     pub approved: bool,
     pub notes: String,
@@ -25,7 +26,7 @@ pub struct Decision {
 }
 
 /// A request awaiting an operator decision (the serialisable view for the API).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub id: String,
     pub tool: String,
@@ -38,21 +39,81 @@ pub struct ApprovalRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+    TimedOut,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    pub request: ApprovalRequest,
+    pub status: ApprovalStatus,
+    pub decision: Option<Decision>,
+    pub resolved_secs: Option<u64>,
+}
+
 struct Pending {
     request: ApprovalRequest,
     responder: oneshot::Sender<Decision>,
 }
 
-/// In-memory approval queue shared between the gate pipeline and the server API.
-#[derive(Default)]
+/// Live approval waiters plus a durable lifecycle journal shared by the gate
+/// pipeline and server API. Restarted pending requests fail closed as interrupted.
 pub struct ApprovalQueue {
     pending: Mutex<HashMap<String, Pending>>,
     granted_scopes: Mutex<HashSet<String>>,
+    records: Mutex<Vec<ApprovalRecord>>,
+    path: Option<PathBuf>,
+}
+
+impl Default for ApprovalQueue {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            granted_scopes: Mutex::new(HashSet::new()),
+            records: Mutex::new(Vec::new()),
+            path: None,
+        }
+    }
 }
 
 impl ApprovalQueue {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut records: Vec<ApprovalRecord> = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        let recovered_at = now_secs();
+        for record in &mut records {
+            if record.status == ApprovalStatus::Pending {
+                record.status = ApprovalStatus::Interrupted;
+                record.resolved_secs = Some(recovered_at);
+                record.decision = Some(Decision {
+                    approved: false,
+                    notes: "Server restarted while approval was pending".into(),
+                    approver_id: "system".into(),
+                });
+            }
+        }
+        let queue = Self {
+            pending: Mutex::new(HashMap::new()),
+            granted_scopes: Mutex::new(HashSet::new()),
+            records: Mutex::new(records),
+            path: Some(path),
+        };
+        queue.persist()?;
+        Ok(queue)
     }
 
     /// Scope hash for an action: `sha256(tool || params)`.
@@ -105,7 +166,20 @@ impl ApprovalQueue {
             gate: gate.into(),
             reason: reason.into(),
         };
-        self.pending.lock().unwrap().insert(id.clone(), Pending { request: req, responder: tx });
+        self.records.lock().unwrap().push(ApprovalRecord {
+            request: req.clone(),
+            status: ApprovalStatus::Pending,
+            decision: None,
+            resolved_secs: None,
+        });
+        self.pending.lock().unwrap().insert(
+            id.clone(),
+            Pending {
+                request: req,
+                responder: tx,
+            },
+        );
+        self.persist_best_effort();
         (id, rx)
     }
 
@@ -118,9 +192,18 @@ impl ApprovalQueue {
             .unwrap()
             .remove(id)
             .ok_or_else(|| format!("no pending approval '{id}'"))?;
+        let status = if decision.approved {
+            ApprovalStatus::Approved
+        } else {
+            ApprovalStatus::Denied
+        };
         if decision.approved {
-            self.granted_scopes.lock().unwrap().insert(pending.request.scope_hash.clone());
+            self.granted_scopes
+                .lock()
+                .unwrap()
+                .insert(pending.request.scope_hash.clone());
         }
+        self.update_record(id, status, Some(decision.clone()));
         // Receiver may have dropped on timeout; ignore send error.
         let _ = pending.responder.send(decision);
         Ok(())
@@ -128,12 +211,68 @@ impl ApprovalQueue {
 
     /// Drop a pending request without resolving (used on gate-side timeout).
     pub fn cancel(&self, id: &str) {
-        self.pending.lock().unwrap().remove(id);
+        if self.pending.lock().unwrap().remove(id).is_some() {
+            self.update_record(
+                id,
+                ApprovalStatus::TimedOut,
+                Some(Decision {
+                    approved: false,
+                    notes: "Approval timed out".into(),
+                    approver_id: "system".into(),
+                }),
+            );
+        }
     }
 
     /// Snapshot of all pending requests, for the `/api/approvals` route.
     pub fn list_pending(&self) -> Vec<ApprovalRequest> {
-        self.pending.lock().unwrap().values().map(|p| p.request.clone()).collect()
+        self.pending
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| p.request.clone())
+            .collect()
+    }
+
+    pub fn history(&self) -> Vec<ApprovalRecord> {
+        self.records.lock().unwrap().clone()
+    }
+
+    fn update_record(&self, id: &str, status: ApprovalStatus, decision: Option<Decision>) {
+        if let Some(record) = self
+            .records
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|record| record.request.id == id)
+        {
+            record.status = status;
+            record.decision = decision;
+            record.resolved_secs = Some(now_secs());
+        }
+        self.persist_best_effort();
+    }
+
+    fn persist_best_effort(&self) {
+        if let Err(error) = self.persist() {
+            tracing::error!(%error, "failed to persist approval journal");
+        }
+    }
+
+    fn persist(&self) -> std::io::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("tmp");
+        std::fs::write(
+            &temporary,
+            serde_json::to_vec_pretty(&*self.records.lock().unwrap())
+                .map_err(std::io::Error::other)?,
+        )?;
+        std::fs::rename(temporary, path)
     }
 }
 
@@ -161,8 +300,15 @@ mod tests {
         let q = ApprovalQueue::new();
         let (id, rx) = q.request("move_arm", &json!({"x": 1.0}));
         assert_eq!(q.list_pending().len(), 1);
-        q.resolve(&id, Decision { approved: true, notes: "ok".into(), approver_id: "op1".into() })
-            .unwrap();
+        q.resolve(
+            &id,
+            Decision {
+                approved: true,
+                notes: "ok".into(),
+                approver_id: "op1".into(),
+            },
+        )
+        .unwrap();
         let d = rx.await.unwrap();
         assert!(d.approved);
         assert!(q.is_scope_granted(&ApprovalQueue::scope_hash("move_arm", &json!({"x": 1.0}))));
@@ -172,7 +318,17 @@ mod tests {
     #[test]
     fn resolve_unknown_errors() {
         let q = ApprovalQueue::new();
-        assert!(q.resolve("nope", Decision { approved: true, notes: String::new(), approver_id: "x".into() }).is_err());
+        assert!(
+            q.resolve(
+                "nope",
+                Decision {
+                    approved: true,
+                    notes: String::new(),
+                    approver_id: "x".into()
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -192,5 +348,25 @@ mod tests {
         assert_eq!(pending[0].gate, "ApprovalGate");
         assert_eq!(pending[0].reason, "Physical movement requires review");
         assert_eq!(pending[0].expires_secs, pending[0].created_secs + 60);
+    }
+
+    #[test]
+    fn restart_marks_pending_request_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approvals.json");
+        let queue = ApprovalQueue::open(&path).unwrap();
+        queue.request("move_arm", &json!({"x": 1.0}));
+        drop(queue);
+        let recovered = ApprovalQueue::open(&path).unwrap();
+        assert!(recovered.list_pending().is_empty());
+        assert_eq!(recovered.history()[0].status, ApprovalStatus::Interrupted);
+        assert_eq!(
+            recovered.history()[0]
+                .decision
+                .as_ref()
+                .unwrap()
+                .approver_id,
+            "system"
+        );
     }
 }

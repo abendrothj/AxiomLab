@@ -11,6 +11,8 @@ lean4/.lake/config/
 # Frontend
 visualizer/node_modules/
 visualizer/dist/
+ui/test-results/
+ui/playwright-report/
 
 # SQLite event log (runtime data, not source)
 *.db

@@ -113,6 +113,7 @@ rejected. That is the safe default.
 | GET/POST | `/api/queue` | list / submit a directive (POST needs JWT) |
 | DELETE | `/api/queue/{id}` | cancel a queued directive |
 | GET | `/api/approvals` | pending approval requests |
+| GET | `/api/approvals/history` | durable approval lifecycle, including restart interruptions |
 | POST | `/api/approvals/{id}` | approve or deny |
 | GET | `/api/lab` | reagent inventory + vessel contents |
 | GET | `/ready` | liveness |

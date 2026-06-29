@@ -109,6 +109,17 @@ curl -X POST localhost:8080/api/approvals/<id> \
 - A revoked approver key or approval id (see `AXIOMLAB_REVOCATION_LIST`) is
   rejected even when "approved".
 - No decision within the timeout → auto-deny.
+- Approval lifecycle records survive restarts. A request that was pending when
+  the process stopped is recorded as `interrupted` and is never replayed or
+  treated as granted. Query `GET /api/approvals/history` for the journal.
+
+Operator browser workflows are covered with Playwright:
+
+```bash
+cd ui
+npx playwright install chromium # first run only
+npm run test:e2e
+```
 
 ---
 
@@ -233,6 +244,7 @@ directives and expected outcomes live in `benchmarks/protocols.json`.
 | `AXIOMLAB_SILA_BIND` | `127.0.0.1:50051` | Bind address for the mock instrument server |
 | `AXIOMLAB_SIM_FAULTS` | `{}` | Deterministic simulator fault profile as JSON |
 | `AXIOMLAB_QUEUE_PATH` | `.artifacts/runtime/queue.json` | Durable queue; interrupted runs are requeued |
+| `AXIOMLAB_APPROVALS_PATH` | `.artifacts/runtime/approvals.json` | Durable approval lifecycle journal; pending requests become interrupted on restart |
 | `AXIOMLAB_LAB_STATE_PATH` | `.artifacts/lab_state.json` | Reagent/vessel state |
 | `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | localhost / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |
 | `AXIOMLAB_MAX_ITERATIONS` | `50` | Orchestrator iteration cap |
