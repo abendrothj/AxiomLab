@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package sila2.org.silastandard;
+
+message String {
+  string value = 1;
+}
+
+message Real {
+  double value = 1;
+}

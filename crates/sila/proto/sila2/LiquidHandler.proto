@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+import "SiLAFramework.proto";
+
+package sila2.org.axiomlab.liquidhandling.liquidhandler.v1;
+
+service LiquidHandler {
+  rpc Dispense (Dispense_Parameters) returns (Dispense_Responses) {}
+  rpc Aspirate (Aspirate_Parameters) returns (Aspirate_Responses) {}
+}
+
+message Dispense_Parameters {
+  sila2.org.silastandard.String TargetVessel = 1;
+  sila2.org.silastandard.Real VolumeUl = 2;
+}
+
+message Dispense_Responses {
+  sila2.org.silastandard.Real DispensedVolumeUl = 1;
+}
+
+message Aspirate_Parameters {
+  sila2.org.silastandard.String SourceVessel = 1;
+  sila2.org.silastandard.Real VolumeUl = 2;
+}
+
+message Aspirate_Responses {
+  sila2.org.silastandard.Real AspiratedVolumeUl = 1;
+}

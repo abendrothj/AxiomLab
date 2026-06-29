@@ -146,6 +146,10 @@ unknown samples.
   endpoint is configured.
 - **gRPC:** set `AXIOMLAB_SILA_ENDPOINT=http://host:port` to dispatch the
   liquid/spectrophotometer/thermal services over gRPC (`instruments.proto`).
+- **Full SiLA 2:** set `AXIOMLAB_SILA_PROTOCOL=sila2` with
+  `AXIOMLAB_SILA_ENDPOINT=http://host:port` to speak the SiLA 2 feature packages
+  used by the Python `sila_sim` server (`LiquidHandler`, `Spectrophotometer`,
+  `Incubator`, with `sila2.org.silastandard` wrapper types).
 
 ### End-to-end gRPC without hardware
 
@@ -166,9 +170,28 @@ This is verified automatically: `cargo test -p axiom-sila --test grpc_e2e` round
 over a real connection, and `axiom-gate`'s `pipeline_executes_over_grpc` runs the
 full gate pipeline through it.
 
-> Note: the Python `sila_sim` server speaks **full SiLA 2** (different packages,
-> `SiLAFramework.proto`, wrapped standard types), so the current gRPC client does
-> not talk to it directly — a SiLA 2 client layer would be required for that.
+### End-to-end against the Python SiLA 2 simulator
+
+The Rust backend can also speak the full SiLA 2 feature protocol emitted by
+`sila_sim`:
+
+```bash
+# terminal 1 — Python SiLA 2 simulator
+cd sila_sim
+python -m axiomlab_sim --insecure --disable-discovery --port 50052
+
+# terminal 2 — point AxiomLab at full SiLA 2
+AXIOMLAB_SILA_ENDPOINT=http://127.0.0.1:50052 \
+AXIOMLAB_SILA_PROTOCOL=sila2 \
+  cargo run -p axiomlab-server
+```
+
+The opt-in integration test starts `sila_sim` and round-trips dispense,
+absorbance, and incubator temperature over the real SiLA 2 wire format:
+
+```bash
+AXIOMLAB_RUN_SILA2_E2E=1 cargo test -p axiom-sila --test full_sila2_e2e -- --nocapture
+```
 
 ---
 
@@ -188,6 +211,7 @@ full gate pipeline through it.
 | `AXIOMLAB_PROOF_MANIFEST` | `.artifacts/proof/manifest.signed.json` | Manifest path |
 | `AXIOMLAB_MANIFEST_PUBKEY` | embedded constant | Trusted manifest signing key |
 | `AXIOMLAB_SILA_ENDPOINT` | _(unset → simulator)_ | gRPC instrument endpoint |
+| `AXIOMLAB_SILA_PROTOCOL` | `instruments` | Set `sila2` for the full SiLA 2 protocol |
 | `AXIOMLAB_SILA_BIND` | `127.0.0.1:50051` | Bind address for the mock instrument server |
 | `AXIOMLAB_LAB_STATE_PATH` | `.artifacts/lab_state.json` | Reagent/vessel state |
 | `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | localhost / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |

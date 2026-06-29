@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+import "SiLAFramework.proto";
+
+package sila2.org.axiomlab.environment.incubator.v1;
+
+service Incubator {
+  rpc SetTemperature (SetTemperature_Parameters) returns (SetTemperature_Responses) {}
+  rpc ReadTemperature (ReadTemperature_Parameters) returns (ReadTemperature_Responses) {}
+  rpc Incubate (Incubate_Parameters) returns (Incubate_Responses) {}
+}
+
+message SetTemperature_Parameters {
+  sila2.org.silastandard.Real TemperatureCelsius = 1;
+}
+
+message SetTemperature_Responses {
+  sila2.org.silastandard.Real ConfirmedTemperature = 1;
+}
+
+message ReadTemperature_Parameters {
+}
+
+message ReadTemperature_Responses {
+  sila2.org.silastandard.Real CurrentTemperature = 1;
+  sila2.org.silastandard.Real TargetTemperature = 2;
+}
+
+message Incubate_Parameters {
+  sila2.org.silastandard.Real DurationMinutes = 1;
+}
+
+message Incubate_Responses {
+  sila2.org.silastandard.Real ElapsedTime = 1;
+}

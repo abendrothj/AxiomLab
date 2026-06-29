@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+import "SiLAFramework.proto";
+
+package sila2.org.axiomlab.measurement.spectrophotometer.v1;
+
+service Spectrophotometer {
+  rpc ReadAbsorbance (ReadAbsorbance_Parameters) returns (ReadAbsorbance_Responses) {}
+}
+
+message ReadAbsorbance_Parameters {
+  sila2.org.silastandard.String VesselId = 1;
+  sila2.org.silastandard.Real WavelengthNm = 2;
+}
+
+message ReadAbsorbance_Responses {
+  sila2.org.silastandard.Real Absorbance = 1;
+  sila2.org.silastandard.Real WavelengthNm = 2;
+}

@@ -5,6 +5,7 @@
 //! gate pipeline calls `execute` only after every safety gate has passed, so
 //! this crate contains transport + physics, never policy.
 
+mod full_sila;
 mod grpc;
 mod mock;
 mod sim;
@@ -14,6 +15,41 @@ pub mod pb {
     tonic::include_proto!("axiomlab.hardware");
 }
 
+/// Generated clients for the full SiLA 2 protocol used by `sila_sim`.
+pub mod sila2_pb {
+    pub mod org {
+        pub mod silastandard {
+            tonic::include_proto!("sila2.org.silastandard");
+        }
+        pub mod axiomlab {
+            pub mod liquidhandling {
+                pub mod liquidhandler {
+                    pub mod v1 {
+                        tonic::include_proto!("sila2.org.axiomlab.liquidhandling.liquidhandler.v1");
+                    }
+                }
+            }
+            pub mod measurement {
+                pub mod spectrophotometer {
+                    pub mod v1 {
+                        tonic::include_proto!(
+                            "sila2.org.axiomlab.measurement.spectrophotometer.v1"
+                        );
+                    }
+                }
+            }
+            pub mod environment {
+                pub mod incubator {
+                    pub mod v1 {
+                        tonic::include_proto!("sila2.org.axiomlab.environment.incubator.v1");
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub use full_sila::FullSilaLab;
 pub use grpc::GrpcLab;
 pub use mock::{serve as serve_mock, spawn_mock_server};
 pub use sim::SimLab;
@@ -45,26 +81,45 @@ pub struct SilaClients {
 enum Backend {
     Simulator(Mutex<SimLab>),
     Grpc(GrpcLab),
+    FullSila(FullSilaLab),
 }
 
 impl SilaClients {
     /// Offline physics simulator backend (the default for development).
     pub fn simulator() -> Self {
-        Self { backend: Backend::Simulator(Mutex::new(SimLab::new())) }
+        Self {
+            backend: Backend::Simulator(Mutex::new(SimLab::new())),
+        }
     }
 
     /// Real-hardware gRPC backend, all services on one endpoint.
     pub fn grpc(endpoint: impl Into<String>) -> Self {
-        Self { backend: Backend::Grpc(GrpcLab::single(endpoint)) }
+        Self {
+            backend: Backend::Grpc(GrpcLab::single(endpoint)),
+        }
+    }
+
+    /// Full SiLA 2 backend, compatible with the Python `sila_sim` server.
+    pub fn full_sila(endpoint: impl Into<String>) -> Self {
+        Self {
+            backend: Backend::FullSila(FullSilaLab::single(endpoint)),
+        }
     }
 
     /// Select backend from the environment: `AXIOMLAB_SILA_ENDPOINT` enables the
-    /// gRPC backend; otherwise the simulator is used.
+    /// gRPC backend; otherwise the simulator is used. Set
+    /// `AXIOMLAB_SILA_PROTOCOL=sila2` to use the full SiLA 2 wire protocol
+    /// expected by the Python `sila_sim` server.
     pub fn from_env() -> Self {
         match std::env::var("AXIOMLAB_SILA_ENDPOINT") {
             Ok(ep) if !ep.is_empty() => {
-                tracing::info!(endpoint = %ep, "SiLA gRPC backend");
-                Self::grpc(ep)
+                if std::env::var("AXIOMLAB_SILA_PROTOCOL").as_deref() == Ok("sila2") {
+                    tracing::info!(endpoint = %ep, "full SiLA 2 backend");
+                    Self::full_sila(ep)
+                } else {
+                    tracing::info!(endpoint = %ep, "SiLA gRPC backend");
+                    Self::grpc(ep)
+                }
             }
             _ => {
                 tracing::info!("SiLA simulator backend (no AXIOMLAB_SILA_ENDPOINT)");
@@ -83,6 +138,7 @@ impl SilaClients {
         match &self.backend {
             Backend::Simulator(lab) => lab.lock().await.execute(action),
             Backend::Grpc(lab) => lab.execute(action).await,
+            Backend::FullSila(lab) => lab.execute(action).await,
         }
     }
 
@@ -91,6 +147,7 @@ impl SilaClients {
         match &self.backend {
             Backend::Simulator(lab) => Some(lab.lock().await.vessel_snapshot()),
             Backend::Grpc(_) => None,
+            Backend::FullSila(_) => None,
         }
     }
 }
@@ -105,7 +162,11 @@ mod tests {
     async fn simulator_execute_dispense() {
         let clients = SilaClients::simulator();
         assert!(clients.is_simulator());
-        let action = Action::new("dispense", json!({"vessel_id": "tube_1", "volume_ul": 100.0}), RiskClass::LiquidHandling);
+        let action = Action::new(
+            "dispense",
+            json!({"vessel_id": "tube_1", "volume_ul": 100.0}),
+            RiskClass::LiquidHandling,
+        );
         let r = clients.execute(&action).await.unwrap();
         assert_eq!(r["success"], true);
         assert!(clients.vessel_snapshot().await.is_some());
