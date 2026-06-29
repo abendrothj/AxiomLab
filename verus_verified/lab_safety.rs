@@ -156,6 +156,35 @@ pub fn safe_dispense(ul: u64) -> (result: Result<u64, u64>)
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Stateful safety — cumulative vessel capacity
+// ═══════════════════════════════════════════════════════════════════
+
+/// A dispense is safe iff the running total stays within the vessel's capacity.
+/// (Spec arithmetic is over the mathematical integers, so there is no overflow
+/// to reason about here — the exec function below discharges that.)
+pub open spec fn vessel_within_capacity(current_ul: u64, add_ul: u64, capacity_ul: u64) -> bool {
+    current_ul + add_ul <= capacity_ul
+}
+
+/// Add `add_ul` to a vessel holding `current_ul` against a `capacity_ul` limit.
+///
+/// Verus proves: the Ok path NEVER overflows and ALWAYS leaves the vessel within
+/// capacity — for all u64 inputs. This is the stateful counterpart to the
+/// single-shot `dispense` bound: it governs the *running total*, not one volume.
+pub fn safe_add_volume(current_ul: u64, add_ul: u64, capacity_ul: u64) -> (result: Result<u64, u64>)
+    ensures
+        result.is_ok() <==> vessel_within_capacity(current_ul, add_ul, capacity_ul),
+        result.is_ok() ==> result.unwrap() == current_ul + add_ul,
+        result.is_ok() ==> result.unwrap() <= capacity_ul,
+{
+    if add_ul <= capacity_ul && current_ul <= capacity_ul - add_ul {
+        Ok(current_ul + add_ul)
+    } else {
+        Err(current_ul)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  Composite safety — multi-axis command validation
 // ═══════════════════════════════════════════════════════════════════
 
@@ -272,6 +301,12 @@ fn main() {
     // Composite command.
     let cmd = execute_lab_command(600, 300_000, 101_325, 5_000);
     assert(cmd.is_ok());
+
+    // Cumulative vessel capacity.
+    let added = safe_add_volume(1_000, 500, 2_000);
+    assert(added.is_ok());
+    let over = safe_add_volume(1_800, 500, 2_000);
+    assert(over.is_err());
 }
 
 } // verus!

@@ -73,7 +73,11 @@ async fn main() {
         running: Arc::new(AtomicBool::new(false)),
         iteration: Arc::new(AtomicU32::new(0)),
         audit_chain: Arc::new(Chain::open(chain_path)),
-        lab_state: Arc::new(Mutex::new(LabState::load())),
+        lab_state: Arc::new(Mutex::new({
+            let mut lab = LabState::load();
+            lab.seed_default_vessels(); // capacity registry for the ProofGate
+            lab
+        })),
         approval_queue: Arc::new(ApprovalQueue::new()),
         protocol_queue: Arc::new(ProtocolQueue::new()),
         tx,

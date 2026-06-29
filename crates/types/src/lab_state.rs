@@ -59,7 +59,24 @@ pub struct LabState {
     /// Vessel contents: `vessel_id → [VesselContribution, ...]` (insertion order preserved).
     #[serde(default, deserialize_with = "deser_vessel_contents")]
     pub vessel_contents: HashMap<String, Vec<VesselContribution>>,
+    /// Vessel capacities in µL: `vessel_id → max_volume_ul`. Consulted by the
+    /// `ProofGate`'s verified cumulative-capacity check.
+    #[serde(default)]
+    pub vessel_capacities: HashMap<String, f64>,
 }
+
+/// Default vessel capacities (µL). Mirrors the simulator's vessel set so the
+/// cumulative-capacity check is active out of the box; override per deployment.
+pub const DEFAULT_VESSEL_CAPACITIES: &[(&str, f64)] = &[
+    ("beaker_A", 50_000.0),
+    ("beaker_B", 50_000.0),
+    ("tube_1", 2_000.0),
+    ("tube_2", 2_000.0),
+    ("tube_3", 2_000.0),
+    ("plate_well_A1", 300.0),
+    ("plate_well_B1", 300.0),
+    ("reservoir", 200_000.0),
+];
 
 /// Accept both the legacy `Vec<String>` and the current `Vec<VesselContribution>`
 /// formats when loading `lab_state.json`.
@@ -216,6 +233,30 @@ impl LabState {
     /// Contributions currently in a vessel.
     pub fn vessel_contents_of(&self, vessel_id: &str) -> &[VesselContribution] {
         self.vessel_contents.get(vessel_id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Total tracked volume in a vessel (µL) — the sum of its contributions.
+    pub fn vessel_volume(&self, vessel_id: &str) -> f64 {
+        self.vessel_contents
+            .get(vessel_id)
+            .map(|cs| cs.iter().map(|c| c.volume_ul).sum())
+            .unwrap_or(0.0)
+    }
+
+    /// The configured capacity of a vessel (µL), if known.
+    pub fn vessel_capacity(&self, vessel_id: &str) -> Option<f64> {
+        self.vessel_capacities.get(vessel_id).copied()
+    }
+
+    pub fn set_vessel_capacity(&mut self, vessel_id: &str, capacity_ul: f64) {
+        self.vessel_capacities.insert(vessel_id.into(), capacity_ul);
+    }
+
+    /// Seed [`DEFAULT_VESSEL_CAPACITIES`] for any vessel not already configured.
+    pub fn seed_default_vessels(&mut self) {
+        for (id, cap) in DEFAULT_VESSEL_CAPACITIES {
+            self.vessel_capacities.entry((*id).into()).or_insert(*cap);
+        }
     }
 
     // ── Queries ──

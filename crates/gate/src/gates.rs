@@ -131,9 +131,44 @@ impl Gate for ProofGate {
             .check_artifact(&action.tool)
             .map_err(|e| reject(self.name(), e, action))?;
         match evaluate_predicate(action) {
-            PredicateOutcome::Pass | PredicateOutcome::NotApplicable => Ok(()),
-            PredicateOutcome::Fail(reason) => Err(reject(self.name(), reason, action)),
+            PredicateOutcome::Pass | PredicateOutcome::NotApplicable => {}
+            PredicateOutcome::Fail(reason) => return Err(reject(self.name(), reason, action)),
         }
+
+        // Stateful, verified check: a dispense must keep the vessel's running
+        // total within its capacity. Uses safe_add_volume (Verus-proven twin).
+        if action.tool == "dispense" {
+            let p = &action.params;
+            let vessel = p
+                .get("vessel_id")
+                .or_else(|| p.get("target_container"))
+                .and_then(|v| v.as_str());
+            let add = p.get("volume_ul").and_then(|v| v.as_f64());
+            if let (Some(vessel), Some(add)) = (vessel, add) {
+                let lab = ctx.lab_state.lock().unwrap();
+                if let Some(capacity) = lab.vessel_capacity(vessel) {
+                    let current = lab.vessel_volume(vessel);
+                    // µL is the verified envelope's unit; round to it.
+                    let ok = axiom_proofs::predicates::safe_add_volume(
+                        current.round() as u64,
+                        add.round() as u64,
+                        capacity.round() as u64,
+                    )
+                    .is_some();
+                    if !ok {
+                        return Err(reject(
+                            self.name(),
+                            format!(
+                                "dispense of {add} µL would exceed verified capacity of '{vessel}' \
+                                 ({current} + {add} > {capacity} µL)"
+                            ),
+                            action,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -176,13 +211,20 @@ impl Gate for ExecuteGate {
             .await
             .map_err(|e| reject(self.name(), format!("instrument error: {e}"), action))?;
 
-        // Reflect liquid handling into the policy model used by the ChemistryGate.
-        if matches!(action.tool.as_str(), "dispense") {
-            if let (Some(vessel), Some(reagent), Some(vol)) = (
+        // Reflect liquid handling into LabState so the ChemistryGate stays
+        // accurate and the ProofGate's cumulative-capacity check sees the running
+        // total. Volume is tracked even when no reagent is named.
+        if action.tool == "dispense" {
+            if let (Some(vessel), Some(vol)) = (
                 action.params.get("vessel_id").or_else(|| action.params.get("target_container")).and_then(|v| v.as_str()),
-                action.params.get("reagent").or_else(|| action.params.get("source_reagent")).and_then(|v| v.as_str()),
                 action.params.get("volume_ul").and_then(|v| v.as_f64()),
             ) {
+                let reagent = action
+                    .params
+                    .get("reagent")
+                    .or_else(|| action.params.get("source_reagent"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unspecified)");
                 let mut lab = ctx.lab_state.lock().unwrap();
                 lab.add_to_vessel(vessel, reagent, vol);
             }

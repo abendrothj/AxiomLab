@@ -21,7 +21,7 @@ use axiom_types::Action;
 pub use verus_proofs::hardware_bounds::{
     MAX_ARM_EXTENSION_MM, MAX_PRESSURE_PA, MAX_TEMPERATURE_MILLI_K, MAX_VOLUME_UL,
     MIN_ARM_EXTENSION_MM, MIN_TEMPERATURE_MILLI_K, arm_in_range, pressure_in_range,
-    temp_in_range, volume_in_range,
+    safe_add_volume, temp_in_range, volume_in_range,
 };
 
 /// Dispense volume (µL) within verified syringe capacity.

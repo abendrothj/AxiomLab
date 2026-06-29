@@ -89,6 +89,18 @@ pub fn execute_lab_command(
     Ok((arm_mm, temp_mk, pressure_pa, volume_ul))
 }
 
+/// Runtime twin of the verified `safe_add_volume` in lab_safety.rs.
+///
+/// Returns the new running total if adding `add_ul` to a vessel holding
+/// `current_ul` stays within `capacity_ul` (overflow-safe), else `None`. The
+/// accept/reject decision matches the Verus-proven function exactly.
+pub fn safe_add_volume(current_ul: u64, add_ul: u64, capacity_ul: u64) -> Option<u64> {
+    match current_ul.checked_add(add_ul) {
+        Some(total) if total <= capacity_ul => Some(total),
+        _ => None,
+    }
+}
+
 /// Clamp arm value to the safe range.
 /// Mirrors: `pub fn clamp_arm` in lab_safety.rs.
 pub fn clamp_arm(mm: u64) -> u64 {
@@ -172,6 +184,23 @@ mod tests {
     #[test]
     fn composite_command_rejects_bad_arm() {
         assert!(execute_lab_command(5000, 300_000, 101_325, 5_000).is_err());
+    }
+
+    // ── cumulative vessel capacity ──
+    #[test]
+    fn add_volume_within_capacity() {
+        assert_eq!(safe_add_volume(1_000, 500, 2_000), Some(1_500));
+        assert_eq!(safe_add_volume(0, 2_000, 2_000), Some(2_000)); // exactly full is ok
+    }
+
+    #[test]
+    fn add_volume_over_capacity() {
+        assert_eq!(safe_add_volume(1_800, 500, 2_000), None);
+    }
+
+    #[test]
+    fn add_volume_no_overflow() {
+        assert_eq!(safe_add_volume(u64::MAX, 1, u64::MAX), None);
     }
 
     // ── clamp ──

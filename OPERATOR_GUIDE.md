@@ -21,7 +21,7 @@ to the audit chain as a `deny`. Nothing is skipped or softened.
 | 1 | `CapabilityGate` | Operational per-parameter bounds (e.g. dispense 0.5–1000 µL, arm 0–300/250 mm). Configurable policy; a **subset** of the verified envelope. |
 | 2 | `ChemistryGate` | The reagent being added is compatible with the target vessel's current contents (GHS/NFPA table). |
 | 3 | `CalibrationGate` | Measurement tools (`read_absorbance`, `read_ph`, `read_temperature`) require a calibration record whose `valid_until` is in the future. |
-| 4 | `ProofGate` | (a) the signed manifest lists a `Passed`, sorry-free artifact for the action (Verus-backed for high-risk); (b) the **verified bound predicate** passes with the actual parameters. |
+| 4 | `ProofGate` | (a) the signed manifest lists a `Passed`, sorry-free artifact for the action (Verus-backed for high-risk); (b) the **verified bound predicate** passes with the actual parameters; (c) for a dispense, the **verified cumulative-capacity check** (`safe_add_volume`) confirms the vessel's running total stays within capacity. |
 | 5 | `ApprovalGate` | `Actuation`/`Destructive` actions require operator sign-off, scoped to `sha256(tool‖params)`. Timeout → auto-deny. |
 | 6 | `ExecuteGate` | Dispatches to SiLA 2 gRPC (or the simulator); records the result. |
 | 7 | `AuditGate` | Appends a signed entry to the chain. |
@@ -172,10 +172,12 @@ unknown samples.
 
 ## 9. Formal verification (honest scope)
 
-What is proven: the scalar hardware-safety bounds in
-`verus_verified/lab_safety.rs` — for all inputs, the actuation guards reject
-out-of-envelope values with no integer overflow. CI (`.github/workflows/verus.yml`)
-runs the Verus compiler on that file and asserts the runtime uses the generated
+What is proven (`verus_verified/lab_safety.rs`, for all inputs, no integer
+overflow): the scalar actuation bounds (arm, temperature, pressure, volume) and
+the **stateful cumulative-capacity property** — `safe_add_volume` proves a
+dispense never pushes a vessel's running total past its capacity. The `ProofGate`
+calls the runtime twin on every dispense. CI (`.github/workflows/verus.yml`) runs
+the Verus compiler on that file and asserts the runtime uses the generated
 constants.
 
 What is **not** proven (enforced by Rust + tests, not Verus): the pipeline

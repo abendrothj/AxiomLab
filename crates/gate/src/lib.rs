@@ -345,6 +345,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispense_exceeding_cumulative_capacity_rejected() {
+        let (ctx, _d) = ctx();
+        ctx.lab_state.lock().unwrap().set_vessel_capacity("tube_x", 1500.0);
+        let pipeline = Pipeline::standard();
+        // Each dispense is within per-op capability (≤1000 µL) and the single-shot
+        // proof bound — but cumulatively they exceed the 1500 µL vessel capacity.
+        let step = |v: f64| {
+            Action::new("dispense", serde_json::json!({"vessel_id": "tube_x", "volume_ul": v}), RiskClass::LiquidHandling)
+        };
+        assert!(pipeline.run(step(800.0), &ctx).await.is_ok());
+        let err = pipeline.run(step(800.0), &ctx).await.unwrap_err();
+        assert_eq!(err.gate, "ProofGate");
+        assert!(err.reason.contains("capacity"));
+    }
+
+    #[tokio::test]
     async fn chemistry_incompatibility_rejected() {
         let (ctx, _d) = ctx();
         {
