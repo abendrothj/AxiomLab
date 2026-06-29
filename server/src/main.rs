@@ -82,7 +82,7 @@ async fn main() {
             std::env::var("AXIOMLAB_APPROVALS_PATH").unwrap_or_else(|_| ".artifacts/runtime/approvals.json".into()),
         ).expect("open approval journal")),
         protocol_queue: Arc::new(ProtocolQueue::open(
-            std::env::var("AXIOMLAB_QUEUE_PATH").unwrap_or_else(|_| ".artifacts/runtime/queue.json".into()),
+            std::env::var("AXIOMLAB_DATABASE_PATH").unwrap_or_else(|_| ".artifacts/runtime/axiomlab.db".into()),
         ).expect("open protocol queue")),
         tx,
         signer,
@@ -125,6 +125,7 @@ fn api_router(state: AppState) -> Router {
         .route("/api/agenda", get(handlers::agenda))
         .route("/api/queue", get(handlers::queue_list).post(handlers::queue_push))
         .route("/api/queue/:id", delete(handlers::queue_cancel))
+        .route("/api/queue/:id/reconcile", post(handlers::queue_reconcile))
         .route("/api/approvals", get(handlers::approvals_list))
         .route("/api/approvals/history", get(handlers::approvals_history))
         .route("/api/approvals/:id", post(handlers::approvals_resolve))

@@ -122,6 +122,7 @@ rejected. That is the safe default.
 | GET | `/api/agenda` | commissioning agenda |
 | GET/POST | `/api/queue` | list / submit a directive (POST needs JWT) |
 | DELETE | `/api/queue/{id}` | cancel a queued directive |
+| POST | `/api/queue/{id}/reconcile` | resolve an interrupted run after physical-state review |
 | GET | `/api/approvals` | pending approval requests |
 | GET | `/api/approvals/history` | durable approval lifecycle, including restart interruptions |
 | POST | `/api/approvals/{id}` | approve or deny |

@@ -52,7 +52,11 @@ pub async fn audit(State(s): State<AppState>, Query(p): Query<Pagination>) -> im
             }))
             .into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("audit read failed: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("audit read failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -79,13 +83,20 @@ pub async fn agenda(State(s): State<AppState>) -> Json<serde_json::Value> {
         .entries()
         .map(|e| e.iter().any(|x| x.action == "protocol_conclusion"))
         .unwrap_or(false);
-    let item = |key: &str, statement: &str| {
-        json!({ "key": key, "statement": statement, "status": if concluded { "completed" } else { "pending" } })
-    };
+    let item = |key: &str, statement: &str| json!({ "key": key, "statement": statement, "status": if concluded { "completed" } else { "pending" } });
     Json(json!([
-        item("calibrate_spectrophotometer", "Establish a valid absorbance calibration"),
-        item("dispense_accuracy", "Confirm dispense accuracy within capability bounds"),
-        item("arm_reachability", "Verify arm reaches all registered vessels safely"),
+        item(
+            "calibrate_spectrophotometer",
+            "Establish a valid absorbance calibration"
+        ),
+        item(
+            "dispense_accuracy",
+            "Confirm dispense accuracy within capability bounds"
+        ),
+        item(
+            "arm_reachability",
+            "Verify arm reaches all registered vessels safely"
+        ),
     ]))
 }
 
@@ -121,6 +132,34 @@ pub async fn queue_cancel(State(s): State<AppState>, Path(id): Path<String>) -> 
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReconcileBody {
+    pub retry: bool,
+    pub notes: String,
+}
+
+pub async fn queue_reconcile(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReconcileBody>,
+) -> impl IntoResponse {
+    if body.notes.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "reconciliation notes are required").into_response();
+    }
+    if s.protocol_queue
+        .reconcile(&id, body.retry, body.notes.trim())
+    {
+        s.broadcast(json!({ "event": "run_reconciled", "id": id, "retry": body.retry }));
+        (
+            StatusCode::OK,
+            Json(json!({ "reconciled": id, "retry": body.retry })),
+        )
+            .into_response()
+    } else {
+        (StatusCode::CONFLICT, "run does not require reconciliation").into_response()
+    }
+}
+
 // ── /api/approvals ──────────────────────────────────────────────────────────
 
 pub async fn approvals_list(State(s): State<AppState>) -> Json<serde_json::Value> {
@@ -148,11 +187,17 @@ pub async fn approvals_resolve(
     let decision = axiom_gate::Decision {
         approved: body.approved,
         notes: body.notes,
-        approver_id: if body.approver_id.is_empty() { "operator".into() } else { body.approver_id },
+        approver_id: if body.approver_id.is_empty() {
+            "operator".into()
+        } else {
+            body.approver_id
+        },
     };
     match s.approval_queue.resolve(&id, decision) {
         Ok(()) => {
-            s.broadcast(json!({ "event": "approval_resolved", "id": id, "approved": body.approved }));
+            s.broadcast(
+                json!({ "event": "approval_resolved", "id": id, "approved": body.approved }),
+            );
             (StatusCode::OK, Json(json!({ "resolved": id }))).into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, e).into_response(),

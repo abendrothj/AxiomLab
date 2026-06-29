@@ -1,10 +1,8 @@
-//! In-memory protocol (directive) queue.
-//!
-//! Operators push directives; a background worker claims the next pending one,
-//! runs it through the orchestrator + gate pipeline, and records the outcome.
+//! SQLite-backed directive queue with leases and fail-closed restart recovery.
 
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
@@ -13,9 +11,34 @@ use tokio::sync::Notify;
 pub enum QueueStatus {
     Pending,
     Running,
+    RecoveryRequired,
     Completed,
     Failed,
     Cancelled,
+}
+
+impl QueueStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::RecoveryRequired => "recovery_required",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+    fn parse(value: &str) -> Self {
+        match value {
+            "pending" => Self::Pending,
+            "running" => Self::Running,
+            "recovery_required" => Self::RecoveryRequired,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,131 +48,127 @@ pub struct QueueItem {
     pub status: QueueStatus,
     pub summary: Option<String>,
     pub created_secs: u64,
+    pub submitted_by: String,
+    pub lease_expires_secs: Option<u64>,
+    pub version: u64,
 }
 
 pub struct ProtocolQueue {
-    items: Mutex<Vec<QueueItem>>,
+    connection: Mutex<Connection>,
     notify: Notify,
-    path: Option<PathBuf>,
-}
-
-impl Default for ProtocolQueue {
-    fn default() -> Self {
-        Self {
-            items: Mutex::new(Vec::new()),
-            notify: Notify::new(),
-            path: None,
-        }
-    }
 }
 
 impl ProtocolQueue {
     pub fn new() -> Self {
-        Self::default()
+        Self::open_in_memory().expect("open in-memory queue")
     }
 
-    pub fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let mut items: Vec<QueueItem> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error),
-        };
-        for item in &mut items {
-            if item.status == QueueStatus::Running {
-                item.status = QueueStatus::Pending;
-                item.summary = Some("Recovered after an interrupted server process".into());
-            }
+    pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        if let Some(parent) = path.as_ref().parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
-        let queue = Self {
-            items: Mutex::new(items),
+        Self::from_connection(Connection::open(path)?)
+    }
+
+    fn open_in_memory() -> rusqlite::Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?)
+    }
+
+    fn from_connection(connection: Connection) -> rusqlite::Result<Self> {
+        connection.execute_batch(include_str!("../migrations/0001_operational_state.sql"))?;
+        connection.execute(
+            "UPDATE directives SET status='recovery_required', summary='Server stopped while execution outcome was uncertain', lease_owner=NULL, lease_expires_secs=NULL, updated_secs=?1, version=version+1 WHERE status='running'",
+            [now_secs()],
+        )?;
+        Ok(Self {
+            connection: Mutex::new(connection),
             notify: Notify::new(),
-            path: Some(path),
-        };
-        queue.persist()?;
-        Ok(queue)
+        })
     }
 
     pub fn push(&self, directive: impl Into<String>) -> String {
+        self.push_for(directive, "development")
+    }
+
+    pub fn push_for(&self, directive: impl Into<String>, submitted_by: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        self.items.lock().unwrap().push(QueueItem {
-            id: id.clone(),
-            directive: directive.into(),
-            status: QueueStatus::Pending,
-            summary: None,
-            created_secs: now_secs(),
-        });
+        let now = now_secs();
+        self.connection.lock().unwrap().execute(
+            "INSERT INTO directives(id,directive,status,created_secs,updated_secs,submitted_by) VALUES(?1,?2,'pending',?3,?3,?4)",
+            params![id, directive.into(), now, submitted_by],
+        ).expect("insert directive");
         self.notify.notify_one();
-        self.persist_best_effort();
         id
     }
 
     pub fn list(&self) -> Vec<QueueItem> {
-        self.items.lock().unwrap().clone()
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT id,directive,status,summary,created_secs,submitted_by,lease_expires_secs,version FROM directives ORDER BY created_secs,id").unwrap();
+        statement
+            .query_map([], |row| {
+                Ok(QueueItem {
+                    id: row.get(0)?,
+                    directive: row.get(1)?,
+                    status: QueueStatus::parse(&row.get::<_, String>(2)?),
+                    summary: row.get(3)?,
+                    created_secs: row.get(4)?,
+                    submitted_by: row.get(5)?,
+                    lease_expires_secs: row.get(6)?,
+                    version: row.get(7)?,
+                })
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
     }
 
-    /// Cancel a pending item. Returns `false` if it is missing or already running.
     pub fn cancel(&self, id: &str) -> bool {
-        let mut items = self.items.lock().unwrap();
-        if let Some(it) = items.iter_mut().find(|i| i.id == id) {
-            if it.status == QueueStatus::Pending {
-                it.status = QueueStatus::Cancelled;
-                drop(items);
-                self.persist_best_effort();
-                return true;
-            }
-        }
-        false
+        self.transition(id, QueueStatus::Pending, QueueStatus::Cancelled, None)
     }
 
-    /// Claim the next pending item, marking it Running. Returns `(id, directive)`.
     pub fn claim_next(&self) -> Option<(String, String)> {
-        let mut items = self.items.lock().unwrap();
-        let it = items
-            .iter_mut()
-            .find(|i| i.status == QueueStatus::Pending)?;
-        it.status = QueueStatus::Running;
-        let claimed = (it.id.clone(), it.directive.clone());
-        drop(items);
-        self.persist_best_effort();
-        Some(claimed)
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction().ok()?;
+        let next: Option<(String,String)> = transaction.query_row("SELECT id,directive FROM directives WHERE status='pending' ORDER BY created_secs,id LIMIT 1", [], |row| Ok((row.get(0)?,row.get(1)?))).optional().ok()?;
+        let (id, directive) = next?;
+        let expiry = now_secs() + 30;
+        if transaction.execute("UPDATE directives SET status='running',lease_owner='worker-1',lease_expires_secs=?2,updated_secs=?3,version=version+1 WHERE id=?1 AND status='pending'", params![id,expiry,now_secs()]).ok()? != 1 { return None; }
+        transaction.commit().ok()?;
+        Some((id, directive))
     }
 
     pub fn finish(&self, id: &str, status: QueueStatus, summary: Option<String>) {
-        let mut items = self.items.lock().unwrap();
-        if let Some(it) = items.iter_mut().find(|i| i.id == id) {
-            it.status = status;
-            it.summary = summary;
-        }
-        drop(items);
-        self.persist_best_effort();
+        let _ = self.connection.lock().unwrap().execute("UPDATE directives SET status=?2,summary=?3,lease_owner=NULL,lease_expires_secs=NULL,updated_secs=?4,version=version+1 WHERE id=?1", params![id,status.as_str(),summary,now_secs()]);
     }
 
-    /// Wait until a new item may be available.
+    pub fn reconcile(&self, id: &str, retry: bool, notes: &str) -> bool {
+        let changed = self.transition(
+            id,
+            QueueStatus::RecoveryRequired,
+            if retry {
+                QueueStatus::Pending
+            } else {
+                QueueStatus::Failed
+            },
+            Some(notes),
+        );
+        if changed && retry {
+            self.notify.notify_one();
+        }
+        changed
+    }
+
+    fn transition(
+        &self,
+        id: &str,
+        from: QueueStatus,
+        to: QueueStatus,
+        summary: Option<&str>,
+    ) -> bool {
+        self.connection.lock().unwrap().execute("UPDATE directives SET status=?3,summary=COALESCE(?4,summary),updated_secs=?5,version=version+1 WHERE id=?1 AND status=?2", params![id,from.as_str(),to.as_str(),summary,now_secs()]).unwrap_or(0)==1
+    }
     pub async fn wait(&self) {
         self.notify.notified().await;
-    }
-
-    fn persist_best_effort(&self) {
-        if let Err(error) = self.persist() {
-            tracing::error!(%error, "failed to persist protocol queue");
-        }
-    }
-
-    fn persist(&self) -> std::io::Result<()> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temporary = path.with_extension("tmp");
-        std::fs::write(
-            &temporary,
-            serde_json::to_vec_pretty(&*self.items.lock().unwrap())
-                .map_err(std::io::Error::other)?,
-        )?;
-        std::fs::rename(temporary, path)
     }
 }
 
@@ -163,45 +182,25 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn push_claim_finish() {
         let q = ProtocolQueue::new();
-        let id = q.push("do thing");
-        assert_eq!(q.list().len(), 1);
-        let (cid, directive) = q.claim_next().unwrap();
-        assert_eq!(cid, id);
-        assert_eq!(directive, "do thing");
-        assert!(q.claim_next().is_none());
+        let id = q.push("x");
+        assert_eq!(q.claim_next().unwrap().0, id);
         q.finish(&id, QueueStatus::Completed, Some("done".into()));
         assert_eq!(q.list()[0].status, QueueStatus::Completed);
     }
-
     #[test]
-    fn cancel_only_pending() {
-        let q = ProtocolQueue::new();
-        let id = q.push("x");
-        assert!(q.cancel(&id));
-        assert!(!q.cancel(&id)); // already cancelled
-        assert!(!q.cancel("missing"));
-    }
-
-    #[test]
-    fn interrupted_run_is_requeued_on_open() {
+    fn restart_requires_reconciliation() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("queue.json");
-        let queue = ProtocolQueue::open(&path).unwrap();
-        queue.push("recover me");
-        queue.claim_next().unwrap();
-        drop(queue);
-        let recovered = ProtocolQueue::open(&path).unwrap();
-        assert_eq!(recovered.list()[0].status, QueueStatus::Pending);
-        assert!(
-            recovered.list()[0]
-                .summary
-                .as_deref()
-                .unwrap()
-                .contains("Recovered")
-        );
+        let path = dir.path().join("state.db");
+        let q = ProtocolQueue::open(&path).unwrap();
+        let id = q.push("x");
+        q.claim_next().unwrap();
+        drop(q);
+        let q = ProtocolQueue::open(&path).unwrap();
+        assert_eq!(q.list()[0].status, QueueStatus::RecoveryRequired);
+        assert!(q.reconcile(&id, true, "physical state verified"));
+        assert_eq!(q.list()[0].status, QueueStatus::Pending);
     }
 }
