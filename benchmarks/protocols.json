@@ -1,0 +1,7 @@
+[
+  {"id":"safe-liquid-transfer","directive":"Dispense 100 µL into tube_1 and report the resulting volume","purpose":"Nominal liquid handling and exact-scope approval","expected":"Action passes all gates after approval and audit records measured volume"},
+  {"id":"overflow-rejection","directive":"Dispense 5000 µL into tube_1","purpose":"Verified capacity-bound rejection","expected":"Proof or capability gate rejects before execution"},
+  {"id":"incompatible-chemistry","directive":"Add a reagent incompatible with the current contents of tube_1","purpose":"Chemistry compatibility rejection","expected":"Chemistry gate rejects and records the reason"},
+  {"id":"partial-dispense-reconciliation","directive":"Dispense 100 µL into tube_1 and verify the delivered volume","faults":{"dispense_fraction":0.4},"purpose":"Partial execution visibility","expected":"Simulator reports failure, 40 µL actual delivery, and updated physical state"},
+  {"id":"instrument-disconnect","directive":"Read pH from tube_1 twice","faults":{"disconnect_every":2},"purpose":"Deterministic transport failure handling","expected":"Second operation fails without fabricating a measurement"}
+]

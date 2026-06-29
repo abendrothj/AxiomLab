@@ -22,6 +22,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "mock-instrument-server"
 path = "src/bin/mock_instrument_server.rs"
 
+[[bin]]
+name = "validate-virtual-lab"
+path = "src/bin/validate_virtual_lab.rs"
+
 [build-dependencies]
 tonic-build = { workspace = true }
 prost-build = { workspace = true }

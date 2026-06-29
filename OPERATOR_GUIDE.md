@@ -193,6 +193,24 @@ absorbance, and incubator temperature over the real SiLA 2 wire format:
 AXIOMLAB_RUN_SILA2_E2E=1 cargo test -p axiom-sila --test full_sila2_e2e -- --nocapture
 ```
 
+### Reproducible virtual-lab faults
+
+Set `AXIOMLAB_SIM_FAULTS` to a JSON profile. Failures are operation-count based,
+not random, so runs are reproducible.
+
+```bash
+AXIOMLAB_SIM_FAULTS='{"disconnect_every":3,"dispense_fraction":0.5,"temperature_drift_c":2.0}' \
+  cargo run -p axiomlab-server
+
+cargo run -p axiom-sila --bin validate-virtual-lab > VALIDATION_REPORT.md
+```
+
+Supported controls are `disconnect_every`, `timeout_every`,
+`dispense_fraction`, `temperature_drift_c`, and `absorbance_drift`. Partial
+dispenses update physical state by the actual delivered amount and return
+`success:false`; callers must reconcile rather than assume atomicity. Benchmark
+directives and expected outcomes live in `benchmarks/protocols.json`.
+
 ---
 
 ## 8. Environment variables
@@ -213,6 +231,8 @@ AXIOMLAB_RUN_SILA2_E2E=1 cargo test -p axiom-sila --test full_sila2_e2e -- --noc
 | `AXIOMLAB_SILA_ENDPOINT` | _(unset → simulator)_ | gRPC instrument endpoint |
 | `AXIOMLAB_SILA_PROTOCOL` | `instruments` | Set `sila2` for the full SiLA 2 protocol |
 | `AXIOMLAB_SILA_BIND` | `127.0.0.1:50051` | Bind address for the mock instrument server |
+| `AXIOMLAB_SIM_FAULTS` | `{}` | Deterministic simulator fault profile as JSON |
+| `AXIOMLAB_QUEUE_PATH` | `.artifacts/runtime/queue.json` | Durable queue; interrupted runs are requeued |
 | `AXIOMLAB_LAB_STATE_PATH` | `.artifacts/lab_state.json` | Reagent/vessel state |
 | `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | localhost / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |
 | `AXIOMLAB_MAX_ITERATIONS` | `50` | Orchestrator iteration cap |

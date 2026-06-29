@@ -1,0 +1,101 @@
+use axiom_sila::{FaultProfile, SimLab};
+use axiom_types::{Action, RiskClass};
+use serde_json::json;
+
+struct ResultRow {
+    scenario: &'static str,
+    expected: &'static str,
+    observed: String,
+    passed: bool,
+}
+
+fn action(tool: &str, params: serde_json::Value) -> Action {
+    Action::new(tool, params, RiskClass::LiquidHandling)
+}
+
+fn main() {
+    let mut results = Vec::new();
+    let probe = action("read_ph", json!({"vessel_id": "tube_1"}));
+
+    let mut disconnect = SimLab::with_faults(FaultProfile {
+        disconnect_every: Some(2),
+        ..Default::default()
+    });
+    let _ = disconnect.execute(&probe);
+    let observed = disconnect.execute(&probe);
+    results.push(ResultRow {
+        scenario: "deterministic_disconnect",
+        expected: "second operation rejected as disconnected",
+        observed: format!("{observed:?}"),
+        passed: observed.is_err(),
+    });
+
+    let mut timeout = SimLab::with_faults(FaultProfile {
+        timeout_every: Some(1),
+        ..Default::default()
+    });
+    let observed = timeout.execute(&probe);
+    results.push(ResultRow {
+        scenario: "deterministic_timeout",
+        expected: "first operation rejected as timed out",
+        observed: format!("{observed:?}"),
+        passed: observed.is_err(),
+    });
+
+    let mut partial = SimLab::with_faults(FaultProfile {
+        dispense_fraction: Some(0.4),
+        ..Default::default()
+    });
+    let observed = partial
+        .execute(&action(
+            "dispense",
+            json!({"vessel_id": "tube_1", "volume_ul": 100.0}),
+        ))
+        .unwrap();
+    let passed = observed["success"] == false && observed["actual_volume_dispensed"] == 40.0;
+    results.push(ResultRow {
+        scenario: "partial_dispense",
+        expected: "40 µL applied and partial execution reported",
+        observed: observed.to_string(),
+        passed,
+    });
+
+    let mut drift = SimLab::with_faults(FaultProfile {
+        temperature_drift_c: 3.0,
+        ..Default::default()
+    });
+    let observed = drift
+        .execute(&action(
+            "read_temperature",
+            json!({"device_id": "incubator"}),
+        ))
+        .unwrap();
+    let passed = observed["current_temp_c"] == 25.0;
+    results.push(ResultRow {
+        scenario: "temperature_drift",
+        expected: "22 °C baseline reads 25 °C",
+        observed: observed.to_string(),
+        passed,
+    });
+
+    println!(
+        "# Virtual Lab Validation\n\n| Scenario | Expected | Observed | Result |\n|---|---|---|---|"
+    );
+    for result in &results {
+        println!(
+            "| `{}` | {} | `{}` | {} |",
+            result.scenario,
+            result.expected,
+            result.observed.replace('|', "\\|"),
+            if result.passed { "PASS" } else { "FAIL" }
+        );
+    }
+    let passed = results.iter().filter(|result| result.passed).count();
+    println!(
+        "\n**Summary: {passed}/{} scenarios passed.**",
+        results.len()
+    );
+    if passed != results.len() {
+        std::process::exit(1);
+    }
+}

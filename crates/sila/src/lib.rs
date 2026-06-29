@@ -52,7 +52,7 @@ pub mod sila2_pb {
 pub use full_sila::FullSilaLab;
 pub use grpc::GrpcLab;
 pub use mock::{serve as serve_mock, spawn_mock_server};
-pub use sim::SimLab;
+pub use sim::{FaultProfile, SimLab};
 
 use axiom_types::Action;
 use serde_json::Value;
@@ -66,6 +66,8 @@ pub enum SilaError {
     MissingParam(String),
     #[error("simulator physics error: {0}")]
     Physics(String),
+    #[error("injected simulator fault: {0}")]
+    InjectedFault(String),
     #[error("gRPC transport error: {0}")]
     Transport(String),
     #[error("gRPC call failed: {0}")]
@@ -87,8 +89,13 @@ enum Backend {
 impl SilaClients {
     /// Offline physics simulator backend (the default for development).
     pub fn simulator() -> Self {
+        Self::simulator_with_faults(FaultProfile::default())
+    }
+
+    /// Offline simulator with a deterministic fault profile.
+    pub fn simulator_with_faults(faults: FaultProfile) -> Self {
         Self {
-            backend: Backend::Simulator(Mutex::new(SimLab::new())),
+            backend: Backend::Simulator(Mutex::new(SimLab::with_faults(faults))),
         }
     }
 
@@ -123,7 +130,11 @@ impl SilaClients {
             }
             _ => {
                 tracing::info!("SiLA simulator backend (no AXIOMLAB_SILA_ENDPOINT)");
-                Self::simulator()
+                let faults = FaultProfile::from_env().unwrap_or_else(|error| {
+                    tracing::warn!(%error, "invalid simulator fault profile; faults disabled");
+                    FaultProfile::default()
+                });
+                Self::simulator_with_faults(faults)
             }
         }
     }

@@ -7,6 +7,7 @@
 use crate::SilaError;
 use axiom_types::Action;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -21,7 +22,50 @@ struct VesselParams {
 
 impl VesselParams {
     fn unknown() -> Self {
-        Self { volume_ul: 0.0, max_volume_ul: 50_000.0, epsilon: 1.0, path_length_cm: 1.0 }
+        Self {
+            volume_ul: 0.0,
+            max_volume_ul: 50_000.0,
+            epsilon: 1.0,
+            path_length_cm: 1.0,
+        }
+    }
+}
+
+/// Deterministic failure controls for virtual-lab validation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FaultProfile {
+    /// Fail every Nth operation as a disconnected instrument.
+    pub disconnect_every: Option<u64>,
+    /// Fail every Nth operation as a timeout.
+    pub timeout_every: Option<u64>,
+    /// Dispense only this fraction, while reporting the measured partial volume.
+    pub dispense_fraction: Option<f64>,
+    /// Constant offset added to temperature readings.
+    pub temperature_drift_c: f64,
+    /// Constant offset added to absorbance readings.
+    pub absorbance_drift: f64,
+}
+
+impl FaultProfile {
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var("AXIOMLAB_SIM_FAULTS") {
+            Ok(value) if !value.trim().is_empty() => {
+                serde_json::from_str(&value).map_err(|e| e.to_string())
+            }
+            _ => Ok(Self::default()),
+        }
+    }
+
+    fn validate(&self) -> Result<(), SilaError> {
+        if let Some(fraction) = self.dispense_fraction {
+            if !(0.0..=1.0).contains(&fraction) {
+                return Err(SilaError::InjectedFault(
+                    "dispense_fraction must be between 0 and 1".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -30,6 +74,8 @@ pub struct SimLab {
     vessels: HashMap<String, VesselParams>,
     /// Device temperatures in °C (thermal controllers / incubators).
     temps_c: HashMap<String, f64>,
+    faults: FaultProfile,
+    operation_count: u64,
 }
 
 impl Default for SimLab {
@@ -54,31 +100,79 @@ impl SimLab {
         ] {
             vessels.insert(
                 id.to_string(),
-                VesselParams { volume_ul: init, max_volume_ul: max, epsilon: eps, path_length_cm: path },
+                VesselParams {
+                    volume_ul: init,
+                    max_volume_ul: max,
+                    epsilon: eps,
+                    path_length_cm: path,
+                },
             );
         }
-        Self { vessels, temps_c: HashMap::new() }
+        Self {
+            vessels,
+            temps_c: HashMap::new(),
+            faults: FaultProfile::default(),
+            operation_count: 0,
+        }
+    }
+
+    pub fn with_faults(faults: FaultProfile) -> Self {
+        let mut lab = Self::new();
+        lab.faults = faults;
+        lab
     }
 
     /// Dispatch a proposed action against the physics model.
     pub fn execute(&mut self, action: &Action) -> Result<Value, SilaError> {
+        self.faults.validate()?;
+        self.operation_count = self.operation_count.saturating_add(1);
+        if self
+            .faults
+            .disconnect_every
+            .is_some_and(|n| n > 0 && self.operation_count % n == 0)
+        {
+            return Err(SilaError::InjectedFault(format!(
+                "instrument disconnected on operation {}",
+                self.operation_count
+            )));
+        }
+        if self
+            .faults
+            .timeout_every
+            .is_some_and(|n| n > 0 && self.operation_count % n == 0)
+        {
+            return Err(SilaError::InjectedFault(format!(
+                "instrument timed out on operation {}",
+                self.operation_count
+            )));
+        }
         let p = &action.params;
         match action.tool.as_str() {
             "dispense" => {
                 let (vessel, volume) = (vessel_of(p)?, f64_of(p, "volume_ul")?);
-                let new_vol = self.dispense(&vessel, volume)?;
-                Ok(json!({ "success": true, "vessel_id": vessel, "actual_volume_dispensed": volume, "vessel_volume_ul": new_vol }))
+                let actual = volume * self.faults.dispense_fraction.unwrap_or(1.0);
+                let new_vol = self.dispense(&vessel, actual)?;
+                Ok(
+                    json!({ "success": actual == volume, "partial_execution": actual != volume, "vessel_id": vessel, "requested_volume_ul": volume, "actual_volume_dispensed": actual, "vessel_volume_ul": new_vol }),
+                )
             }
             "aspirate" => {
                 let (vessel, volume) = (vessel_of(p)?, f64_of(p, "volume_ul")?);
                 let new_vol = self.aspirate(&vessel, volume)?;
-                Ok(json!({ "success": true, "vessel_id": vessel, "actual_volume_aspirated": volume, "vessel_volume_ul": new_vol }))
+                Ok(
+                    json!({ "success": true, "vessel_id": vessel, "actual_volume_aspirated": volume, "vessel_volume_ul": new_vol }),
+                )
             }
             "read_absorbance" => {
                 let vessel = vessel_of(p)?;
                 let wl = f64_of(p, "wavelength_nm").unwrap_or(500.0);
-                let a = self.read_absorbance(&vessel, wl);
-                Ok(json!({ "success": true, "vessel_id": vessel, "absorbance_value": a, "actual_wavelength_nm": wl }))
+                let a = f64::max(
+                    0.001,
+                    self.read_absorbance(&vessel, wl) + self.faults.absorbance_drift,
+                );
+                Ok(
+                    json!({ "success": true, "vessel_id": vessel, "absorbance_value": a, "actual_wavelength_nm": wl }),
+                )
             }
             "read_ph" => {
                 let vessel = vessel_of(p)?;
@@ -87,7 +181,8 @@ impl SimLab {
             }
             "read_temperature" => {
                 let device = device_of(p)?;
-                let t = *self.temps_c.get(&device).unwrap_or(&22.0);
+                let t =
+                    *self.temps_c.get(&device).unwrap_or(&22.0) + self.faults.temperature_drift_c;
                 Ok(json!({ "success": true, "device_id": device, "current_temp_c": t }))
             }
             "set_temperature" => {
@@ -121,14 +216,20 @@ impl SimLab {
         self.vessels
             .iter()
             .map(|(id, p)| {
-                (id.clone(), json!({ "volume_ul": p.volume_ul, "max_volume_ul": p.max_volume_ul }))
+                (
+                    id.clone(),
+                    json!({ "volume_ul": p.volume_ul, "max_volume_ul": p.max_volume_ul }),
+                )
             })
             .collect::<serde_json::Map<_, _>>()
             .into()
     }
 
     fn dispense(&mut self, vessel_id: &str, volume_ul: f64) -> Result<f64, SilaError> {
-        let p = self.vessels.entry(vessel_id.to_owned()).or_insert_with(VesselParams::unknown);
+        let p = self
+            .vessels
+            .entry(vessel_id.to_owned())
+            .or_insert_with(VesselParams::unknown);
         let new_vol = p.volume_ul + volume_ul;
         if new_vol > p.max_volume_ul {
             return Err(SilaError::Physics(format!(
@@ -141,7 +242,10 @@ impl SimLab {
     }
 
     fn aspirate(&mut self, vessel_id: &str, volume_ul: f64) -> Result<f64, SilaError> {
-        let p = self.vessels.entry(vessel_id.to_owned()).or_insert_with(VesselParams::unknown);
+        let p = self
+            .vessels
+            .entry(vessel_id.to_owned())
+            .or_insert_with(VesselParams::unknown);
         if volume_ul > p.volume_ul {
             return Err(SilaError::Physics(format!(
                 "underflow: requested {volume_ul:.1} µL, only {:.1} µL available",
@@ -153,8 +257,16 @@ impl SimLab {
     }
 
     fn read_absorbance(&self, vessel_id: &str, wavelength_nm: f64) -> f64 {
-        let p = self.vessels.get(vessel_id).cloned().unwrap_or_else(VesselParams::unknown);
-        let fill = if p.max_volume_ul > 0.0 { p.volume_ul / p.max_volume_ul } else { 0.0 };
+        let p = self
+            .vessels
+            .get(vessel_id)
+            .cloned()
+            .unwrap_or_else(VesselParams::unknown);
+        let fill = if p.max_volume_ul > 0.0 {
+            p.volume_ul / p.max_volume_ul
+        } else {
+            0.0
+        };
         let a_base = p.epsilon * fill * p.path_length_cm;
         let wl_factor = (-0.5 * ((wavelength_nm - 500.0) / 150.0).powi(2)).exp();
         let a_det = a_base * wl_factor;
@@ -168,7 +280,13 @@ impl SimLab {
         let fill = self
             .vessels
             .get(vessel_id)
-            .map(|p| if p.max_volume_ul > 0.0 { p.volume_ul / p.max_volume_ul } else { 0.0 })
+            .map(|p| {
+                if p.max_volume_ul > 0.0 {
+                    p.volume_ul / p.max_volume_ul
+                } else {
+                    0.0
+                }
+            })
             .unwrap_or(0.0);
         let ph = 7.0 - fill * 0.5;
         (ph * 100.0).round() / 100.0
@@ -197,7 +315,9 @@ fn str_of(p: &Value, key: &str) -> Result<String, SilaError> {
 }
 
 fn f64_of(p: &Value, key: &str) -> Result<f64, SilaError> {
-    p.get(key).and_then(|v| v.as_f64()).ok_or_else(|| SilaError::MissingParam(key.to_string()))
+    p.get(key)
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| SilaError::MissingParam(key.to_string()))
 }
 
 #[cfg(test)]
@@ -212,16 +332,29 @@ mod tests {
     #[test]
     fn dispense_then_aspirate() {
         let mut lab = SimLab::new();
-        let r = lab.execute(&act("dispense", json!({"vessel_id": "tube_1", "volume_ul": 500.0}))).unwrap();
+        let r = lab
+            .execute(&act(
+                "dispense",
+                json!({"vessel_id": "tube_1", "volume_ul": 500.0}),
+            ))
+            .unwrap();
         assert_eq!(r["vessel_volume_ul"], 500.0);
-        let r = lab.execute(&act("aspirate", json!({"vessel_id": "tube_1", "volume_ul": 200.0}))).unwrap();
+        let r = lab
+            .execute(&act(
+                "aspirate",
+                json!({"vessel_id": "tube_1", "volume_ul": 200.0}),
+            ))
+            .unwrap();
         assert_eq!(r["vessel_volume_ul"], 300.0);
     }
 
     #[test]
     fn dispense_overflow_errors() {
         let mut lab = SimLab::new();
-        let r = lab.execute(&act("dispense", json!({"vessel_id": "tube_1", "volume_ul": 9999.0})));
+        let r = lab.execute(&act(
+            "dispense",
+            json!({"vessel_id": "tube_1", "volume_ul": 9999.0}),
+        ));
         assert!(matches!(r, Err(SilaError::Physics(_))));
     }
 
@@ -237,21 +370,66 @@ mod tests {
     #[test]
     fn set_and_read_temperature() {
         let mut lab = SimLab::new();
-        lab.execute(&act("set_temperature", json!({"device_id": "plate1", "target_temp_c": 37.0}))).unwrap();
-        let r = lab.execute(&act("read_temperature", json!({"device_id": "plate1"}))).unwrap();
+        lab.execute(&act(
+            "set_temperature",
+            json!({"device_id": "plate1", "target_temp_c": 37.0}),
+        ))
+        .unwrap();
+        let r = lab
+            .execute(&act("read_temperature", json!({"device_id": "plate1"})))
+            .unwrap();
         assert_eq!(r["current_temp_c"], 37.0);
     }
 
     #[test]
     fn unknown_tool_errors() {
         let mut lab = SimLab::new();
-        assert!(matches!(lab.execute(&act("frobnicate", json!({}))), Err(SilaError::UnknownTool(_))));
+        assert!(matches!(
+            lab.execute(&act("frobnicate", json!({}))),
+            Err(SilaError::UnknownTool(_))
+        ));
     }
 
     #[test]
     fn target_container_alias_works() {
         let mut lab = SimLab::new();
-        let r = lab.execute(&act("read_absorbance", json!({"target_container": "tube_2", "wavelength_nm": 500.0}))).unwrap();
+        let r = lab
+            .execute(&act(
+                "read_absorbance",
+                json!({"target_container": "tube_2", "wavelength_nm": 500.0}),
+            ))
+            .unwrap();
         assert_eq!(r["success"], true);
+    }
+
+    #[test]
+    fn deterministic_disconnect_is_reproducible() {
+        let mut lab = SimLab::with_faults(FaultProfile {
+            disconnect_every: Some(2),
+            ..Default::default()
+        });
+        let action = act("read_ph", json!({"vessel_id": "tube_1"}));
+        assert!(lab.execute(&action).is_ok());
+        assert!(matches!(
+            lab.execute(&action),
+            Err(SilaError::InjectedFault(_))
+        ));
+    }
+
+    #[test]
+    fn partial_dispense_reports_actual_state() {
+        let mut lab = SimLab::with_faults(FaultProfile {
+            dispense_fraction: Some(0.5),
+            ..Default::default()
+        });
+        let result = lab
+            .execute(&act(
+                "dispense",
+                json!({"vessel_id": "tube_1", "volume_ul": 100.0}),
+            ))
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert_eq!(result["actual_volume_dispensed"], 50.0);
+        assert_eq!(result["vessel_volume_ul"], 50.0);
     }
 }

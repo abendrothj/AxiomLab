@@ -79,7 +79,9 @@ async fn main() {
             lab
         })),
         approval_queue: Arc::new(ApprovalQueue::new()),
-        protocol_queue: Arc::new(ProtocolQueue::new()),
+        protocol_queue: Arc::new(ProtocolQueue::open(
+            std::env::var("AXIOMLAB_QUEUE_PATH").unwrap_or_else(|_| ".artifacts/runtime/queue.json".into()),
+        ).expect("open protocol queue")),
         tx,
         signer,
         clients: Arc::new(SilaClients::from_env()),

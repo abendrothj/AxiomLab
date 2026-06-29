@@ -1,0 +1,10 @@
+# Virtual Lab Validation
+
+| Scenario | Expected | Observed | Result |
+|---|---|---|---|
+| `deterministic_disconnect` | second operation rejected as disconnected | `Err(InjectedFault("instrument disconnected on operation 2"))` | PASS |
+| `deterministic_timeout` | first operation rejected as timed out | `Err(InjectedFault("instrument timed out on operation 1"))` | PASS |
+| `partial_dispense` | 40 µL applied and partial execution reported | `{"actual_volume_dispensed":40.0,"partial_execution":true,"requested_volume_ul":100.0,"success":false,"vessel_id":"tube_1","vessel_volume_ul":40.0}` | PASS |
+| `temperature_drift` | 22 °C baseline reads 25 °C | `{"current_temp_c":25.0,"device_id":"incubator","success":true}` | PASS |
+
+**Summary: 4/4 scenarios passed.**
