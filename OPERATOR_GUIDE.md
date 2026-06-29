@@ -291,3 +291,28 @@ calibrated before measuring, recovered from a rejection, chain verifies).
 
   It prints pass/fail per scenario and an overall score. Add scenarios as the
   tool surface grows; the harness is client-agnostic.
+
+---
+
+## 11. Production-readiness boundary
+
+The current runtime is appropriate for a single-process virtual-lab alpha. Its
+durability is intentionally fail-closed but not transactional:
+
+- Directive and approval projections use atomic JSON files. They do not support
+  multiple workers or cross-record transactions.
+- A run interrupted while marked `running` is requeued. Before real hardware,
+  replace this with a `recovery_required` state so uncertain actuation cannot be
+  replayed automatically.
+- A pending approval becomes `interrupted` after restart and is never granted or
+  replayed. Approved scopes are not restored into a new process session.
+- JWT currently protects queue submission only. Approval identity supplied by
+  the request body is operator metadata, not strong authentication.
+- Chemistry compatibility is a reviewed policy table, not a substitute for a
+  validated EHS process or instrument-specific risk assessment.
+- Simulator behavior is evidence about AxiomLab's control logic, not evidence
+  that a physical instrument behaves identically.
+
+Do not connect consequential hardware until identity, transactional recovery,
+and uncertain-outcome reconciliation are implemented. The delivery sequence,
+design choices, and acceptance tests are specified in `ROADMAP.md`.

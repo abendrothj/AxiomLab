@@ -44,8 +44,9 @@ rest of the system is enforced by Rust types and tests.**
 
 ### 2. Tamper-evident audit
 
-There is no separate database of runs. The **audit chain is the system of
-record.** Every gate decision and every executed action is an append-only entry
+The **audit chain is the evidence system of record.** Operational queue and
+approval projections are restart-durable JSON journals today; they are not yet
+a transactional database. Every gate decision and executed action is an append-only entry
 that:
 
 - hashes the previous entry (a SHA-256 hash chain), and
@@ -74,6 +75,7 @@ ui/             React dashboard
 verus_verified/ lab_safety.rs — the binding, formally-verified spec
 verus_proofs/   build-time bridge: generates runtime constants from the spec
 sila_sim/       Python SiLA 2 mock (kept)
+benchmarks/      reproducible virtual-lab protocol scenarios
 ```
 
 ---
@@ -93,8 +95,16 @@ export AXIOMLAB_MANIFEST_PUBKEY=<key>
 cargo run -p axiomlab-server
 #    → listening on 0.0.0.0:8080
 
-# 4. (optional) Run the UI dev server
-cd ui && npm install && npm run dev
+# 4. Install and test the UI
+cd ui && npm install
+npm test && npm run build && npm run test:e2e
+
+# 5. (optional, separate terminal) Run the UI dev server
+npm run dev
+
+# 6. Generate virtual-lab validation evidence from the repository root
+cd ..
+cargo run -p axiom-sila --bin validate-virtual-lab
 ```
 
 Without a valid manifest the `ProofGate` **fails closed** — every gated action is
@@ -120,9 +130,23 @@ rejected. That is the safe default.
 | GET | `/metrics` | Prometheus |
 | WS | `/ws` | live event stream |
 
-See [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md) for production deployment (signing,
-key rotation, Rekor, JWT, approvals) and [OUTLINE & RESEARCH.md](OUTLINE%20&%20RESEARCH.md)
+See [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md) for operational configuration
+(signing, key rotation, Rekor, JWT, approvals) and
+[OUTLINE & RESEARCH.md](OUTLINE%20&%20RESEARCH.md)
 for scope and positioning.
+
+## Status and next steps
+
+AxiomLab is a **hardware-free integrated alpha**: the safety path, simulator,
+durable restart behavior, operator UI, and browser validation are implemented.
+It is useful for safety-policy development, SiLA integration work, operator
+workflow evaluation, and reproducible failure testing. It is not production lab
+software yet.
+
+The next release should add OIDC/RBAC and SQLite-backed transactional state,
+followed by versioned protocols and explicit reconciliation for uncertain
+physical outcomes. The phased implementation plan and acceptance criteria are in
+[ROADMAP.md](ROADMAP.md).
 
 ---
 

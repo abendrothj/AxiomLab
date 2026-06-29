@@ -1,5 +1,10 @@
 # AxiomLab Rewrite Plan
 
+> **Historical implementation record.** The rewrite described here is complete.
+> Current operation is documented in `README.md` and `OPERATOR_GUIDE.md`; future
+> production work and acceptance criteria live in `ROADMAP.md`. Test counts and
+> known gaps below describe the rewrite checkpoint and are not current status.
+
 **Decision:** Full rewrite in-place on `main`.  
 **Preserved:** `verus_proofs/` (30 theorems), `sila_sim/` (Python mock), `agent_runtime/proto/` (SiLA 2 FDL).  
 **Deleted:** Everything else — rebuilt from scratch under the architecture below.
@@ -369,14 +374,11 @@ The server boots, loads + verifies a signed proof manifest, and serves the API.
   `MANIFEST_SIGNING_PUBLIC_KEY` constant.
 
 ### Follow-ups / known gaps
-- `verus.yml` still has a manifest-freshness sub-step that reads the deleted
-  `proof_artifacts/vessel_physics_manifest.json`. Per the plan ("verus.yml
-  unchanged") it was left as-is — the core Verus verification of
-  `verus_verified/*.rs` is intact; that sub-step needs relocating or removing.
-- `.github/workflows/proof-release-gate.yml` + `scripts/proof_release_gate.sh`
-  drive the old `proofctl`/`auditctl`/`approvalctl` binaries from the deleted
-  crates. They need rewriting against the new `gen-manifest` bin and
-  `Chain::verify`, or retiring.
+- Superseded by `ROADMAP.md`. Current priorities are production identity,
+  transactional operational state, versioned protocol recovery, virtual-lab
+  evidence, and deployment hardening.
+- Rewrite-era CI references to deleted proof and control binaries have since
+  been removed; current CI and runtime commands are documented elsewhere.
 
 ---
 

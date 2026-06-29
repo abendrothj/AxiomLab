@@ -52,10 +52,18 @@ enforced by Rust types and tests). The honest one-line claim:
 
 ## Roadmap (aligned to the two pillars)
 
-- **Safety:** widen the verified envelope only where a "for-all-inputs" guarantee
-  is genuinely load-bearing (e.g. volume conservation on the dispense path, *if*
-  wired to runtime — kept unwired under `verus_verified/archive/` until then).
-- **Audit:** richer chain queries and exports; operator tooling around Rekor
-  inclusion proofs; key rotation runbooks.
-- **Ops layer:** broaden the SiLA 2 instrument coverage and the offline simulator
-  fidelity so directives developed offline transfer faithfully to hardware.
+The enforcement substrate is implemented and usable as a hardware-free alpha.
+Production work should now prioritize identity, transactional recovery, and
+versioned protocols—not broader autonomy or more device types.
+
+The authoritative phased plan is [ROADMAP.md](ROADMAP.md). In order:
+
+1. OIDC sessions, RBAC, and separation of duties.
+2. SQLite repositories, leases, migrations, and crash recovery.
+3. Immutable protocol versions, checkpoints, pause/stop, and reconciliation.
+4. Deeper deterministic virtual-lab faults and chemistry policy provenance.
+5. Deployment, observability, backup, and incident runbooks.
+6. An optional narrow hardware pilot after recovery semantics are proven.
+
+Formal verification should expand only when a new property is both
+load-bearing and mechanically connected to runtime enforcement.

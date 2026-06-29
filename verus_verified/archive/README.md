@@ -1,5 +1,8 @@
 # Archived Verus specs
 
+Project status and planned verification work are tracked in
+[ROADMAP.md](../../ROADMAP.md).
+
 These specs are **not wired into the runtime** and are no longer part of CI
 verification. They are kept for reference only.
 
