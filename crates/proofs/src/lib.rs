@@ -51,9 +51,14 @@ impl ProofChecker {
         }
         #[cfg(not(feature = "unsafe-bypass"))]
         {
+            // The trusted key is the embedded constant by default; operators who
+            // rotate keys (e.g. after running `gen-manifest`) override it via
+            // AXIOMLAB_MANIFEST_PUBKEY without recompiling.
+            let pubkey_b64 = std::env::var("AXIOMLAB_MANIFEST_PUBKEY")
+                .unwrap_or_else(|_| MANIFEST_SIGNING_PUBLIC_KEY.to_string());
             let pk = STANDARD
-                .decode(MANIFEST_SIGNING_PUBLIC_KEY)
-                .map_err(|e| format!("invalid embedded signing key: {e}"))?;
+                .decode(pubkey_b64.trim())
+                .map_err(|e| format!("invalid manifest signing key: {e}"))?;
             verify_signed_manifest(&signed, &pk).map_err(|e| format!("manifest signature: {e}"))?;
             tracing::info!(path, key_id = %signed.signature.key_id, "Manifest signature verified");
             Ok(Self { manifest: signed.manifest })

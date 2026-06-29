@@ -24,14 +24,11 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
 
-      - name: Run unit tests
-        run: cargo test --workspace --lib
+      - name: Run all tests
+        run: cargo test --workspace
 
-      - name: Run server integration tests
-        run: cargo test -p axiomlab-server
-
-      - name: Run pipeline rejection integration tests
-        run: cargo test -p agent_runtime --test pipeline_rejection
-
-      - name: Run agent_runtime doc tests
-        run: cargo test -p agent_runtime --doc
+      - name: Build UI
+        run: |
+          cd ui
+          npm install --no-audit --no-fund
+          npm run build

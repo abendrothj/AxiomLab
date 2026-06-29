@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    # ── New architecture (REWRITE.md) — added as each crate is built ──
+    # ── New architecture (REWRITE.md) ──
     "crates/types",
     "crates/audit",
     "crates/chemistry",
@@ -8,12 +8,9 @@ members = [
     "crates/proofs",
     "crates/gate",
     "crates/llm",
-
-    # ── Legacy crates (deleted in the final rewrite step) ──
-    "scientific_compute",
-    "agent_runtime",
-    "proof_artifacts",
     "server",
+
+    # ── Kept verbatim (formally-verified specs) ──
     "verus_proofs",
 ]
 resolver = "2"

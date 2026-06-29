@@ -310,16 +310,16 @@ No `HypothesisManager`. No `DiscoveryJournal`. No `notebook`.
 
 ## What Gets Deleted
 
-When the new workspace compiles and all tests pass, delete in one commit:
+Done — all legacy crates removed:
 
-- `agent_runtime/` (entire crate)
-- `proof_artifacts/` (entire crate)
-- `proof_synthesizer/` (entire crate — research spike, not production)
-- `scientific_compute/` (fitting math absorbed into `crates/gate/`)
-- `physical_types/` (absorbed into `crates/types/`)
-- `server/` (replaced by new `server/`)
-- `visualizer/` (replaced by new `ui/`)
-- `contracts/AuditVerifier.sol` (keep as stub or delete — planned future ZK work)
+- [x] `agent_runtime/` (entire crate)
+- [x] `proof_artifacts/` (entire crate)
+- [x] `proof_synthesizer/` (entire crate — research spike, not production)
+- [x] `scientific_compute/` (fitting math absorbed into `crates/gate/`)
+- [x] `physical_types/` (absorbed into `crates/types/`)
+- [x] `server/` (replaced by new `server/`)
+- [x] `visualizer/` (replaced by new `ui/`)
+- [ ] `contracts/AuditVerifier.sol` — kept (planned future ZK work)
 
 ---
 
@@ -335,9 +335,48 @@ Each crate is independently compilable and tested before the next is started. No
 - [x] 6. `crates/gate/` — pipeline + all 7 gates **(done — 24 tests pass; full end-to-end pipeline tested)**
 - [x] 7. `crates/llm/` — orchestrator **(done — 10 tests pass; scripted client drives full pipeline)**
 - [x] 8. `server/` — HTTP server **(done — 11 tests pass; routes + worker, chain-derived, no SQLite/journal)**
-- [ ] 9. `ui/` — frontend, last
+- [x] 9. `ui/` — frontend **(done — React + Vite, `npm run build` succeeds)**; legacy crates deleted
 
 Each step gets its own commit with passing tests before moving to the next.
+
+---
+
+## Status: COMPLETE
+
+All nine steps done. Workspace builds clean; full test suite green:
+
+| Crate | Tests |
+|---|---|
+| `axiom-types` | 8 |
+| `axiom-audit` | 15 |
+| `axiom-chemistry` | 7 |
+| `axiom-sila` | 8 |
+| `axiom-proofs` | 14 |
+| `axiom-gate` | 24 (incl. end-to-end pipeline) |
+| `axiom-llm` | 10 (incl. orchestrator→pipeline→audit) |
+| `axiomlab-server` | 11 (incl. HTTP integration) |
+| `verus_proofs` (kept) | 31 + integration |
+
+The server boots, loads + verifies a signed proof manifest, and serves the API.
+
+### Running it
+- Generate a signed manifest (runtime artifact; `.artifacts/` is gitignored):
+  `cargo run -p axiom-proofs --bin gen-manifest`
+  then export the printed `AXIOMLAB_MANIFEST_PUBKEY`.
+- Without a valid manifest the `ProofGate` **fails closed** — every gated action
+  is rejected, which is the safe default.
+- Trusted manifest key resolution: `AXIOMLAB_MANIFEST_PUBKEY` env → embedded
+  `MANIFEST_SIGNING_PUBLIC_KEY` constant.
+
+### Follow-ups / known gaps
+- `verus.yml` still has a manifest-freshness sub-step that reads the deleted
+  `proof_artifacts/vessel_physics_manifest.json`. Per the plan ("verus.yml
+  unchanged") it was left as-is — the core Verus verification of
+  `verus_verified/*.rs` is intact; that sub-step needs relocating or removing.
+- `.github/workflows/proof-release-gate.yml` + `scripts/proof_release_gate.sh`
+  drive the old `proofctl`/`auditctl`/`approvalctl` binaries from the deleted
+  crates. They need rewriting against the new `gen-manifest` bin and
+  `Chain::verify`, or retiring.
 
 ---
 

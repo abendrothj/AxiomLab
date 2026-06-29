@@ -17,6 +17,10 @@ hex = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 
+[[bin]]
+name = "gen-manifest"
+path = "src/bin/gen_manifest.rs"
+
 [features]
 # Dev/CI only: skip manifest signature verification (loud warning).
 unsafe-bypass = []
