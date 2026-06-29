@@ -186,7 +186,16 @@ impl Gate for ApprovalGate {
         if !action.risk_class.requires_approval() {
             return Ok(());
         }
-        crate::require_operator_approval(ctx, &action.tool, &action.params)
+        crate::require_operator_approval(
+            ctx,
+            &action.tool,
+            &action.params,
+            crate::ApprovalMetadata {
+                risk_class: Some(action.risk_class),
+                gate: self.name(),
+                reason: "Physical actuation requires approval for this exact tool and parameter scope",
+            },
+        )
             .await
             .map(|_| ())
             .map_err(|e| reject(self.name(), e, action))

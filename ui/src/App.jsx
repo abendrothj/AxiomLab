@@ -1,11 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { api, getToken, setToken as saveToken } from "./api.js";
+import { api, getToken, setToken as saveToken, tokenIsRemembered } from "./api.js";
+import { formatDeadline, routeFromHash, routes } from "./operator.js";
 
 const directiveTemplates = [
   "Calibrate the spectrophotometer with registered standards, then read tube_1 at 500 nm",
   "Dispense 50 µL of buffer into tube_1, then read absorbance at 500 nm",
   "Set the incubator to 37 °C and report current temperature",
 ];
+
+function useRoute() {
+  const read = () => routeFromHash(location.hash);
+  const [route, setRoute] = useState(read);
+  useEffect(() => {
+    const update = () => setRoute(read());
+    window.addEventListener("hashchange", update);
+    return () => window.removeEventListener("hashchange", update);
+  }, []);
+  return route;
+}
 
 function useLiveEvents() {
   const [events, setEvents] = useState([]);
@@ -92,10 +104,11 @@ function StatusStrip({ status, audit, connected }) {
 
 function TokenSettings() {
   const [token, setToken] = useState(getToken());
+  const [remember, setRemember] = useState(tokenIsRemembered());
   const [saved, setSaved] = useState(false);
 
   const persist = () => {
-    saveToken(token.trim());
+    saveToken(token.trim(), remember);
     setSaved(true);
     setTimeout(() => setSaved(false), 1800);
   };
@@ -113,6 +126,11 @@ function TokenSettings() {
         />
         <button type="button" onClick={persist}>{saved ? "Saved" : "Save"}</button>
       </div>
+      <label className="checkRow">
+        <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+        Remember across browser restarts. Leave unchecked for session-only storage.
+      </label>
+      {token && <button type="button" className="link" onClick={() => { setToken(""); saveToken(""); }}>Clear token</button>}
     </Panel>
   );
 }
@@ -167,9 +185,12 @@ function ApprovalCard({ approval, onResolve }) {
         <code>{shortHash(approval.scope_hash)}</code>
       </div>
       <dl className="facts">
+        <div><dt>Risk</dt><dd>{approval.risk_class || "Policy change"}</dd></div>
+        <div><dt>Gate</dt><dd>{approval.gate || "ApprovalGate"}</dd></div>
         <div><dt>Created</dt><dd>{formatAge(approval.created_secs)}</dd></div>
-        <div><dt>Request ID</dt><dd><code>{approval.id.slice(0, 8)}</code></dd></div>
+        <div><dt>Deadline</dt><dd className="deadline">{formatDeadline(approval.expires_secs)}</dd></div>
       </dl>
+      <div className="approvalReason">{approval.reason || "Operator approval required"}</div>
       <JsonBlock value={approval.params} />
       <div className="reviewGrid">
         <input value={approver} onChange={(e) => setApprover(e.target.value)} placeholder="approver id" />
@@ -314,6 +335,7 @@ function EventsPanel({ events, connected }) {
 }
 
 export default function App() {
+  const route = useRoute();
   const [status, setStatus] = useState(null);
   const [audit, setAudit] = useState(null);
   const [approvals, setApprovals] = useState([]);
@@ -413,20 +435,43 @@ export default function App() {
         </div>
         <button type="button" className="secondary" onClick={refresh}>Refresh</button>
       </header>
+      <nav className="navTabs" aria-label="Operator console sections">
+        {routes.map(([key, label]) => (
+          <a key={key} href={`#/${key}`} className={route === key ? "active" : ""}>
+            {label}
+            {key === "approvals" && approvals.length > 0 && <span>{approvals.length}</span>}
+          </a>
+        ))}
+      </nav>
 
       {err && <div className="error">{err}</div>}
       <StatusStrip status={status} audit={audit} connected={connected} />
 
-      <main className="grid">
-        <ApprovalsPanel approvals={approvals} resolve={resolve} />
-        <CommandCenter directive={directive} setDirective={setDirective} submit={submit} busy={busy} />
-        <QueuePanel queue={queue} cancel={cancel} />
-        <AuditPanel audit={audit} verify={verify} />
-        <AgendaPanel agenda={agenda} />
-        <LabPanel lab={lab} />
-        <EventsPanel events={events} connected={connected} />
-        <TokenSettings />
-      </main>
+      {route === "overview" && (
+        <main className="grid">
+          <ApprovalsPanel approvals={approvals} resolve={resolve} />
+          <CommandCenter directive={directive} setDirective={setDirective} submit={submit} busy={busy} />
+          <QueuePanel queue={queue.slice(-5)} cancel={cancel} />
+          <AgendaPanel agenda={agenda} />
+          <EventsPanel events={events.slice(0, 12)} connected={connected} />
+        </main>
+      )}
+      {route === "approvals" && <main className="singleView"><ApprovalsPanel approvals={approvals} resolve={resolve} /></main>}
+      {route === "runs" && (
+        <main className="grid">
+          <CommandCenter directive={directive} setDirective={setDirective} submit={submit} busy={busy} />
+          <QueuePanel queue={queue} cancel={cancel} />
+          <EventsPanel events={events} connected={connected} />
+        </main>
+      )}
+      {route === "audit" && <main className="singleView"><AuditPanel audit={audit} verify={verify} /></main>}
+      {route === "lab" && (
+        <main className="grid twoCol">
+          <LabPanel lab={lab} />
+          <AgendaPanel agenda={agenda} />
+        </main>
+      )}
+      {route === "settings" && <main className="singleView narrow"><TokenSettings /></main>}
     </div>
   );
 }

@@ -29,8 +29,14 @@ pub use context::GateContext;
 
 use async_trait::async_trait;
 use axiom_audit::{EntryData, RekorClient};
-use axiom_types::{Action, Rejection};
+use axiom_types::{Action, Rejection, RiskClass};
 use std::sync::Arc;
+
+pub struct ApprovalMetadata<'a> {
+    pub risk_class: Option<RiskClass>,
+    pub gate: &'a str,
+    pub reason: &'a str,
+}
 
 /// Request operator approval for `(tool, params)` and await the decision.
 ///
@@ -42,12 +48,20 @@ pub async fn require_operator_approval(
     ctx: &GateContext,
     tool: &str,
     params: &serde_json::Value,
+    metadata: ApprovalMetadata<'_>,
 ) -> Result<String, String> {
     let scope = ApprovalQueue::scope_hash(tool, params);
     if ctx.approvals.is_scope_granted(&scope) {
         return Ok("(previously approved)".into());
     }
-    let (id, rx) = ctx.approvals.request(tool, params);
+    let (id, rx) = ctx.approvals.request_with_metadata(
+        tool,
+        params,
+        metadata.risk_class,
+        metadata.gate,
+        metadata.reason,
+        ctx.approval_timeout,
+    );
     let decision = match tokio::time::timeout(ctx.approval_timeout, rx).await {
         Ok(Ok(d)) => d,
         Ok(Err(_)) => return Err("approval channel closed".into()),

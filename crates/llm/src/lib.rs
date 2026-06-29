@@ -101,7 +101,18 @@ impl Orchestrator {
                                     "r_squared": cal.r_squared,
                                     "model": cal.model,
                                 });
-                                match require_operator_approval(ctx, "record_calibration", &params).await {
+                                match require_operator_approval(
+                                    ctx,
+                                    "record_calibration",
+                                    &params,
+                                    axiom_gate::ApprovalMetadata {
+                                        risk_class: None,
+                                        gate: "CalibrationApproval",
+                                        reason: "Recording calibration authorizes future measurement actions",
+                                    },
+                                )
+                                .await
+                                {
                                     Ok(approver) => {
                                         record_calibration(&ctx.audit_chain, ctx.signer.as_ref(), &cal, &approver)
                                             .map_err(|e| OrchestratorError::TooManyRejections { count: rejections, last: e.to_string() })?;

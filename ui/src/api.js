@@ -2,10 +2,15 @@
 // localStorage) is sent on mutating calls; POST /api/queue requires it when the
 // server has AXIOMLAB_JWT_SECRET configured.
 
-export const getToken = () => localStorage.getItem("axiomlab_token") || "";
-export const setToken = (token) => {
-  if (token) localStorage.setItem("axiomlab_token", token);
-  else localStorage.removeItem("axiomlab_token");
+export const getToken = () =>
+  sessionStorage.getItem("axiomlab_token") || localStorage.getItem("axiomlab_token") || "";
+export const tokenIsRemembered = () => Boolean(localStorage.getItem("axiomlab_token"));
+export const setToken = (token, remember = false) => {
+  sessionStorage.removeItem("axiomlab_token");
+  localStorage.removeItem("axiomlab_token");
+  if (token) {
+    (remember ? localStorage : sessionStorage).setItem("axiomlab_token", token);
+  }
 };
 
 async function get(path) {

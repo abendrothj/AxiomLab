@@ -11,7 +11,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::sync::oneshot;
+use axiom_types::RiskClass;
 
 /// An operator's decision on a pending approval request.
 #[derive(Debug, Clone)]
@@ -30,6 +32,10 @@ pub struct ApprovalRequest {
     pub params: Value,
     pub scope_hash: String,
     pub created_secs: u64,
+    pub expires_secs: u64,
+    pub risk_class: Option<RiskClass>,
+    pub gate: String,
+    pub reason: String,
 }
 
 struct Pending {
@@ -65,15 +71,39 @@ impl ApprovalQueue {
 
     /// Register a pending request, returning a receiver for the operator's decision.
     pub fn request(&self, tool: &str, params: &Value) -> (String, oneshot::Receiver<Decision>) {
+        self.request_with_metadata(
+            tool,
+            params,
+            None,
+            "ApprovalGate",
+            "Operator approval required",
+            Duration::from_secs(300),
+        )
+    }
+
+    pub fn request_with_metadata(
+        &self,
+        tool: &str,
+        params: &Value,
+        risk_class: Option<RiskClass>,
+        gate: impl Into<String>,
+        reason: impl Into<String>,
+        timeout: Duration,
+    ) -> (String, oneshot::Receiver<Decision>) {
         let id = uuid::Uuid::new_v4().to_string();
         let scope_hash = Self::scope_hash(tool, params);
         let (tx, rx) = oneshot::channel();
+        let created_secs = now_secs();
         let req = ApprovalRequest {
             id: id.clone(),
             tool: tool.to_string(),
             params: params.clone(),
             scope_hash,
-            created_secs: now_secs(),
+            created_secs,
+            expires_secs: created_secs.saturating_add(timeout.as_secs()),
+            risk_class,
+            gate: gate.into(),
+            reason: reason.into(),
         };
         self.pending.lock().unwrap().insert(id.clone(), Pending { request: req, responder: tx });
         (id, rx)
@@ -143,5 +173,24 @@ mod tests {
     fn resolve_unknown_errors() {
         let q = ApprovalQueue::new();
         assert!(q.resolve("nope", Decision { approved: true, notes: String::new(), approver_id: "x".into() }).is_err());
+    }
+
+    #[test]
+    fn request_metadata_is_exposed_to_operators() {
+        let q = ApprovalQueue::new();
+        let (_id, _rx) = q.request_with_metadata(
+            "move_arm",
+            &json!({"x_mm": 10.0}),
+            Some(RiskClass::Actuation),
+            "ApprovalGate",
+            "Physical movement requires review",
+            Duration::from_secs(60),
+        );
+        let pending = q.list_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].risk_class, Some(RiskClass::Actuation));
+        assert_eq!(pending[0].gate, "ApprovalGate");
+        assert_eq!(pending[0].reason, "Physical movement requires review");
+        assert_eq!(pending[0].expires_secs, pending[0].created_secs + 60);
     }
 }

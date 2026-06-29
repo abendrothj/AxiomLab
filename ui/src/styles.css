@@ -76,6 +76,34 @@ pre { margin: 0; }
 }
 .hero h1 { font-size: 34px; line-height: 1.05; margin: 0 0 8px; letter-spacing: -0.04em; }
 .hero p { color: var(--muted); margin: 0; }
+.navTabs {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  margin: 0 0 16px;
+  overflow-x: auto;
+}
+.navTabs a {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--muted);
+  display: inline-flex;
+  font-weight: 700;
+  gap: 7px;
+  padding: 8px 11px;
+  text-decoration: none;
+}
+.navTabs a:hover { background: #111b27; color: var(--text); }
+.navTabs a.active { background: #172538; border-color: var(--border-strong); color: var(--text); }
+.navTabs a span {
+  background: var(--danger);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+}
 .eyebrow {
   color: var(--accent-strong);
   font-size: 11px;
@@ -116,6 +144,9 @@ pre { margin: 0; }
   gap: 16px;
   align-items: start;
 }
+.grid.twoCol { grid-template-columns: 1fr 1fr; }
+.singleView { max-width: 1040px; }
+.singleView.narrow { max-width: 680px; }
 .panel {
   background: linear-gradient(180deg, rgba(21, 31, 43, 0.96), rgba(17, 24, 33, 0.96));
   border: 1px solid var(--border);
@@ -182,9 +213,18 @@ h3 { color: var(--text); font-size: 14px; margin: 14px 0 8px; }
 .approvalTop h3 { font-size: 20px; margin: 8px 0 0; }
 .facts {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(4, 1fr);
   gap: 10px;
   margin: 14px 0;
+}
+.deadline { color: var(--warn); font-weight: 700; }
+.approvalReason {
+  background: rgba(227, 179, 65, 0.08);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  color: #ead9a7;
+  margin-bottom: 12px;
+  padding: 9px 11px;
 }
 .facts div { background: #0b121b; border: 1px solid var(--border); border-radius: 12px; padding: 9px; }
 .facts dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
@@ -200,6 +240,14 @@ h3 { color: var(--text); font-size: 14px; margin: 14px 0 8px; }
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 .reviewGrid { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 10px; margin: 12px 0; }
+.checkRow {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+.checkRow input { accent-color: var(--accent); width: auto; }
 .timeline li, .auditLog li, .checklist li, .eventLog li {
   border-bottom: 1px solid var(--border);
   padding: 11px 0;
@@ -233,7 +281,9 @@ h3 { color: var(--text); font-size: 14px; margin: 14px 0 8px; }
   .app { padding: 18px; }
   .statusStrip { grid-template-columns: repeat(2, 1fr); }
   .grid { grid-template-columns: 1fr; }
+  .grid.twoCol { grid-template-columns: 1fr; }
   .panel.span2 { grid-column: span 1; }
   .toolbar { align-items: stretch; flex-direction: column; }
   .templateList { max-width: none; }
+  .facts { grid-template-columns: 1fr 1fr; }
 }
