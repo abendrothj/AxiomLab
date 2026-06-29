@@ -1,32 +1,17 @@
 //! # verus_proofs
 //!
-//! Hardware safety enforcement for AxiomLab, backed by formal verification.
+//! The formally-verified hardware safety envelope, and the bridge that makes the
+//! runtime use exactly the bounds Verus proved.
 //!
-//! ## Architecture
-//!
-//! The single source of truth for all safety constants and predicates is
-//! `verus_verified/lab_safety.rs`, which is formally verified by the real
-//! Verus compiler + Z3 SMT solver.
-//!
-//! At build time, `build.rs` extracts the constants from that file and
-//! generates a Rust source file that `hardware_bounds.rs` includes.
-//! This guarantees the runtime uses EXACTLY the same bounds that were
-//! formally proven safe.
+//! The single source of truth is `verus_verified/lab_safety.rs`, verified by the
+//! real Verus compiler + Z3 (see `.github/workflows/verus.yml`). At build time,
+//! `build.rs` extracts that file's constants into a generated Rust file that
+//! [`hardware_bounds`] includes — so "what runs" is mechanically derived from
+//! "what was proven," not hand-copied.
 //!
 //! ## Modules
-//!
-//! - [`hardware_bounds`] — Safety constants (from Verus source) and
-//!   runtime-checked actuator functions.
-//! - [`concurrency`] — Token-based channel ownership for safe hardware
-//!   sharing across concurrent tasks.
-//! - [`resource_allocator`] — Fixed-capacity resource pools and well plates.
-//! - [`verify`] — Driver to invoke the real Verus compiler on the source
-//!   of truth and confirm proofs still hold.
-//! - [`verus_shim`] — Legacy compatibility macros (deprecated).
+//! - [`hardware_bounds`] — verified safety constants + runtime-checked bound predicates.
+//! - [`verify`] — driver that re-invokes the Verus compiler on the source of truth.
 
-pub mod verus_shim;
 pub mod hardware_bounds;
-pub mod concurrency;
-pub mod resource_allocator;
 pub mod verify;
-pub mod orchestrator_spec;

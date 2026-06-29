@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 axiom-types = { workspace = true }
+# The verified safety envelope. Its build.rs generates these constants from
+# verus_verified/lab_safety.rs, so the bounds the ProofGate enforces are
+# mechanically derived from what Verus proved — not hand-copied.
+verus_proofs = { path = "../../verus_proofs" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

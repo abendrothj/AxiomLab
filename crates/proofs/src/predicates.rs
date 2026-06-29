@@ -7,42 +7,22 @@
 //! merely checking that a signed artifact exists — is the architectural fix the
 //! `ProofGate` is built around.
 //!
-//! CI's `verus.yml` job verifies the source these mirror; the
-//! `constants_match_verus_source` test guards against drift.
+//! CI's `verus.yml` job verifies that source; `verus_proofs/build.rs` extracts
+//! its constants at build time, and the `constants_match_verus_source` test here
+//! guards against drift in the extracted values.
 
 use axiom_types::Action;
 
-// ── Verified constants (mirror verus_verified/lab_safety.rs) ────────────────
-
-/// Maximum robotic-arm extension, millimetres.
-pub const MAX_ARM_EXTENSION_MM: u64 = 1200;
-pub const MIN_ARM_EXTENSION_MM: u64 = 0;
-/// Temperature envelope in milli-kelvin (200 K … 500 K).
-pub const MAX_TEMPERATURE_MILLI_K: u64 = 500_000;
-pub const MIN_TEMPERATURE_MILLI_K: u64 = 200_000;
-/// Maximum chamber pressure, pascals.
-pub const MAX_PRESSURE_PA: u64 = 200_000;
-/// Maximum dispense volume, microlitres (syringe capacity).
-pub const MAX_VOLUME_UL: u64 = 50_000;
-
-// ── Predicate functions (mirror Verus spec fns) ────────────────────────────
-
-#[inline]
-pub fn arm_in_range(mm: u64) -> bool {
-    MIN_ARM_EXTENSION_MM <= mm && mm <= MAX_ARM_EXTENSION_MM
-}
-#[inline]
-pub fn temp_in_range_mk(mk: u64) -> bool {
-    MIN_TEMPERATURE_MILLI_K <= mk && mk <= MAX_TEMPERATURE_MILLI_K
-}
-#[inline]
-pub fn pressure_in_range(pa: u64) -> bool {
-    pa <= MAX_PRESSURE_PA
-}
-#[inline]
-pub fn volume_in_range(ul: u64) -> bool {
-    ul <= MAX_VOLUME_UL
-}
+// ── Verified constants + predicates, re-exported from the bridge crate ───────
+//
+// These come from `verus_proofs::hardware_bounds`, which generates them at build
+// time from `verus_verified/lab_safety.rs`. We do not redefine them here — the
+// whole point is that the runtime bound IS the proven bound.
+pub use verus_proofs::hardware_bounds::{
+    MAX_ARM_EXTENSION_MM, MAX_PRESSURE_PA, MAX_TEMPERATURE_MILLI_K, MAX_VOLUME_UL,
+    MIN_ARM_EXTENSION_MM, MIN_TEMPERATURE_MILLI_K, arm_in_range, pressure_in_range,
+    temp_in_range, volume_in_range,
+};
 
 /// Dispense volume (µL) within verified syringe capacity.
 pub fn dispense_safe(volume_ul: f64) -> bool {
