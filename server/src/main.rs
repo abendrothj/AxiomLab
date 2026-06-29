@@ -95,7 +95,11 @@ async fn main() {
         async move { h.render() }
     };
 
-    let mut app = api_router(state).route("/metrics", get(render));
+    let metrics = Router::new()
+        .route("/metrics", get(render))
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session))
+        .with_state(state.clone());
+    let mut app = api_router(state).merge(metrics);
 
     // Serve the built UI if present.
     if std::path::Path::new("ui/dist").is_dir() {
