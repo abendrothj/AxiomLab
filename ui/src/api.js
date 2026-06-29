@@ -2,7 +2,11 @@
 // localStorage) is sent on mutating calls; POST /api/queue requires it when the
 // server has AXIOMLAB_JWT_SECRET configured.
 
-const token = () => localStorage.getItem("axiomlab_token") || "";
+export const getToken = () => localStorage.getItem("axiomlab_token") || "";
+export const setToken = (token) => {
+  if (token) localStorage.setItem("axiomlab_token", token);
+  else localStorage.removeItem("axiomlab_token");
+};
 
 async function get(path) {
   const r = await fetch(path);
@@ -12,8 +16,8 @@ async function get(path) {
 
 async function send(method, path, body) {
   const headers = { "content-type": "application/json" };
-  const t = token();
-  if (t) headers.authorization = `Bearer ${t}`;
+  const token = getToken();
+  if (token) headers.authorization = `Bearer ${token}`;
   const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) throw new Error(`${path}: ${r.status} ${await r.text()}`);
   return r.json().catch(() => ({}));
@@ -28,7 +32,7 @@ export const api = {
   pushDirective: (directive) => send("POST", "/api/queue", { directive }),
   cancelQueued: (id) => send("DELETE", `/api/queue/${id}`),
   approvals: () => get("/api/approvals"),
-  resolveApproval: (id, approved, notes) =>
-    send("POST", `/api/approvals/${id}`, { approved, notes, approver_id: "operator" }),
+  resolveApproval: (id, approved, notes, approverId = "operator") =>
+    send("POST", `/api/approvals/${id}`, { approved, notes, approver_id: approverId }),
   lab: () => get("/api/lab"),
 };
