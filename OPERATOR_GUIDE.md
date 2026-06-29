@@ -188,3 +188,26 @@ ordering, the audit chain's cryptographic properties, chemistry, calibration,
 approvals, the server. Verus covers the physical actuation envelope — the one
 place a "holds for all inputs" guarantee is most worth having — and nothing more.
 Other specs are kept, unwired, under `verus_verified/archive/`.
+
+---
+
+## 10. Evaluating the LLM
+
+The LLM's *enforcement* is covered by the gate tests; its *judgement* is measured
+by a scenario suite in `crates/llm/tests/eval.rs`. Each scenario is a directive +
+lab setup + an expectation over the resulting audit chain (concluded safely,
+calibrated before measuring, recovered from a rejection, chain verifies).
+
+- CI runs the scenarios against scripted reference solutions
+  (`cargo test -p axiom-llm --test eval`) — this exercises the orchestration and
+  recovery loop with no network.
+- To evaluate a **real model**, point it at an endpoint and run the live
+  scorecard:
+
+  ```bash
+  AXIOMLAB_LLM_ENDPOINT=… AXIOMLAB_LLM_API_KEY=… AXIOMLAB_LLM_MODEL=claude-opus-4-8 \
+    cargo test -p axiom-llm --test eval -- --ignored --nocapture
+  ```
+
+  It prints pass/fail per scenario and an overall score. Add scenarios as the
+  tool surface grows; the harness is client-agnostic.
