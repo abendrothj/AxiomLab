@@ -60,8 +60,9 @@ impl ProofChecker {
         }
     }
 
-    /// Construct directly from a manifest (tests only).
-    #[cfg(any(test, feature = "unsafe-bypass"))]
+    /// Construct directly from a manifest the caller has already established trust
+    /// in (e.g. verified out-of-band, or assembled in tests). Prefer
+    /// [`ProofChecker::load_and_verify`] for the production load path.
     pub fn from_manifest_trusted(manifest: ProofManifest) -> Self {
         Self { manifest }
     }

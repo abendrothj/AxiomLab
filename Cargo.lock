@@ -628,6 +628,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-gate"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axiom-audit",
+ "axiom-chemistry",
+ "axiom-proofs",
+ "axiom-sila",
+ "axiom-types",
+ "nalgebra",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "axiom-proofs"
 version = "0.1.0"
 dependencies = [

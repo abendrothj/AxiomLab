@@ -6,6 +6,7 @@ members = [
     "crates/chemistry",
     "crates/sila",
     "crates/proofs",
+    "crates/gate",
 
     # ── Legacy crates (deleted in the final rewrite step) ──
     "scientific_compute",
@@ -25,6 +26,7 @@ repository = "https://github.com/abendrothj/AxiomLab"
 [workspace.dependencies]
 # Phase 1 – Pure Rust scientific compute
 nalgebra = "0.33"
+async-trait = "0.1"
 uom = "0.36"
 rustfft = "6"
 num-complex = "0.4"

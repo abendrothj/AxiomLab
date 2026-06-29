@@ -1,0 +1,25 @@
+[package]
+name = "axiom-gate"
+description = "The fail-closed gate pipeline — the entire safety story."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axiom-types = { workspace = true }
+axiom-audit = { workspace = true }
+axiom-chemistry = { workspace = true }
+axiom-sila = { workspace = true }
+axiom-proofs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+nalgebra = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

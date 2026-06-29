@@ -332,7 +332,7 @@ Each crate is independently compilable and tested before the next is started. No
 - [x] 3. `crates/chemistry/` — compatibility table **(done — 7 tests pass; returns `HazardLevel`, operates on reagent names)**
 - [x] 4. `crates/sila/` — proto codegen + clients **(done — 8 tests pass; unified `execute`, simulator + gRPC backends)**
 - [x] 5. `crates/proofs/` — artifact loading + predicates **(done — 14 tests pass; predicates mirror verified bounds, called with actual params)**
-- [ ] 6. `crates/gate/` — pipeline + all 7 gates, depends on all above
+- [x] 6. `crates/gate/` — pipeline + all 7 gates **(done — 24 tests pass; full end-to-end pipeline tested)**
 - [ ] 7. `crates/llm/` — orchestrator, depends on gate
 - [ ] 8. `server/` — HTTP server, depends on everything
 - [ ] 9. `ui/` — frontend, last
