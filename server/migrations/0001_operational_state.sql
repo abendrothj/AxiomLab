@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     revoked_secs INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS oidc_states (
+    state TEXT PRIMARY KEY,
+    nonce TEXT NOT NULL,
+    created_secs INTEGER NOT NULL,
+    return_to TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS approval_records (
     id TEXT PRIMARY KEY,
     run_id TEXT,

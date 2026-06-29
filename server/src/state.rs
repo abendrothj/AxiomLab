@@ -4,6 +4,7 @@
 //! the authoritative record; everything else is derived or transient.
 
 use crate::queue::ProtocolQueue;
+use crate::auth::AuthStore;
 use axiom_audit::{Chain, RevocationList, Signer};
 use axiom_gate::{ApprovalQueue, CapabilityPolicy};
 use axiom_proofs::ProofChecker;
@@ -29,7 +30,7 @@ pub struct AppState {
     pub proofs: Arc<ProofChecker>,
     pub capability: Arc<CapabilityPolicy>,
     pub revocations: Arc<RevocationList>,
-    pub jwt_secret: Arc<Option<String>>,
+    pub auth: Arc<AuthStore>,
 }
 
 impl AppState {

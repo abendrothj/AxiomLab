@@ -16,7 +16,7 @@ use axiom_proofs::ProofChecker;
 use axiom_sila::SilaClients;
 use axiom_types::LabState;
 use axum::{
-    Router,
+    Router, middleware,
     routing::{delete, get, post},
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -60,10 +60,7 @@ async fn main() {
         }
     };
 
-    let jwt_secret = std::env::var("AXIOMLAB_JWT_SECRET").ok();
-    if jwt_secret.is_none() {
-        tracing::warn!("AXIOMLAB_JWT_SECRET not set — POST /api/queue runs in open dev mode");
-    }
+    let database_path = std::env::var("AXIOMLAB_DATABASE_PATH").unwrap_or_else(|_| ".artifacts/runtime/axiomlab.db".into());
 
     let chain_path = std::env::var("AXIOMLAB_AUDIT_LOG")
         .unwrap_or_else(|_| ".artifacts/audit/runtime_audit.jsonl".into());
@@ -82,7 +79,7 @@ async fn main() {
             std::env::var("AXIOMLAB_APPROVALS_PATH").unwrap_or_else(|_| ".artifacts/runtime/approvals.json".into()),
         ).expect("open approval journal")),
         protocol_queue: Arc::new(ProtocolQueue::open(
-            std::env::var("AXIOMLAB_DATABASE_PATH").unwrap_or_else(|_| ".artifacts/runtime/axiomlab.db".into()),
+            &database_path,
         ).expect("open protocol queue")),
         tx,
         signer,
@@ -90,7 +87,7 @@ async fn main() {
         proofs,
         capability: Arc::new(CapabilityPolicy::default_lab()),
         revocations: Arc::new(RevocationList::from_env()),
-        jwt_secret: Arc::new(jwt_secret),
+        auth: Arc::new(auth::AuthStore::open(&database_path).expect("open auth store")),
     };
 
     tokio::spawn(worker::run(state.clone()));
@@ -118,8 +115,10 @@ async fn main() {
 /// All routes except `/metrics` and static file serving, with `state` attached.
 /// Factored out so tests can exercise the real router.
 fn api_router(state: AppState) -> Router {
-    Router::new()
+    let protected = Router::new()
         .route("/api/status", get(handlers::status))
+        .route("/api/auth/me", get(handlers::auth_me))
+        .route("/api/auth/logout", post(handlers::auth_logout))
         .route("/api/audit", get(handlers::audit))
         .route("/api/audit/verify", post(handlers::audit_verify))
         .route("/api/agenda", get(handlers::agenda))
@@ -130,8 +129,14 @@ fn api_router(state: AppState) -> Router {
         .route("/api/approvals/history", get(handlers::approvals_history))
         .route("/api/approvals/:id", post(handlers::approvals_resolve))
         .route("/api/lab", get(handlers::lab))
-        .route("/ready", get(handlers::ready))
         .route("/ws", get(handlers::ws))
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_session));
+    Router::new()
+        .route("/api/auth/login", get(handlers::auth_login))
+        .route("/api/auth/callback", get(handlers::auth_callback))
+        .route("/api/auth/dev-login", post(handlers::auth_dev_login))
+        .route("/ready", get(handlers::ready))
+        .merge(protected)
         .with_state(state)
 }
 
@@ -176,7 +181,7 @@ mod tests {
             proofs: Arc::new(ProofChecker::from_manifest_trusted(empty_manifest())),
             capability: Arc::new(CapabilityPolicy::default_lab()),
             revocations: Arc::new(RevocationList::new()),
-            jwt_secret: Arc::new(Some("s3cr3t".into())),
+            auth: Arc::new(auth::AuthStore::open(dir.path().join("state.db")).unwrap()),
         }
     }
 
@@ -194,8 +199,9 @@ mod tests {
 
     #[tokio::test]
     async fn status_reports_simulator() {
-        let app = api_router(test_state());
-        let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let state=test_state(); let (_,cookie)=state.auth.create_session("viewer",auth::Role::Viewer).unwrap();
+        let app = api_router(state);
+        let resp = app.oneshot(Request::get("/api/status").header("cookie",cookie.split(';').next().unwrap()).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("simulator"));
     }
@@ -212,14 +218,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queue_push_accepts_with_token_then_lists() {
+    async fn queue_push_accepts_with_session_then_lists() {
         let state = test_state();
-        let exp = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600) as usize;
-        let token = make_token("s3cr3t", exp);
+        let (principal, cookie) = state.auth.create_session("op", auth::Role::Operator).unwrap();
         let app = api_router(state.clone());
         let req = Request::post("/api/queue")
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
+            .header("cookie", cookie.split(';').next().unwrap())
+            .header("x-csrf-token", principal.csrf_token)
             .body(Body::from(r#"{"directive":"calibrate"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -229,8 +235,8 @@ mod tests {
 
     #[tokio::test]
     async fn audit_verify_ok_on_empty_chain() {
-        let app = api_router(test_state());
-        let resp = app.oneshot(Request::post("/api/audit/verify").body(Body::empty()).unwrap()).await.unwrap();
+        let state=test_state(); let (p,cookie)=state.auth.create_session("admin",auth::Role::Admin).unwrap(); let app=api_router(state);
+        let resp = app.oneshot(Request::post("/api/audit/verify").header("cookie",cookie.split(';').next().unwrap()).header("x-csrf-token",p.csrf_token).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("\"ok\":true"));
     }
@@ -239,19 +245,11 @@ mod tests {
     async fn approval_history_is_exposed() {
         let state = test_state();
         state.approval_queue.request("move_arm", &serde_json::json!({"x": 1.0}));
+        let (_,cookie)=state.auth.create_session("viewer",auth::Role::Viewer).unwrap();
         let app = api_router(state);
-        let resp = app.oneshot(Request::get("/api/approvals/history").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app.oneshot(Request::get("/api/approvals/history").header("cookie",cookie.split(';').next().unwrap()).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("\"status\":\"pending\""));
     }
 
-    fn make_token(secret: &str, exp: usize) -> String {
-        use jsonwebtoken::{EncodingKey, Header, encode};
-        #[derive(serde::Serialize)]
-        struct C {
-            sub: String,
-            exp: usize,
-        }
-        encode(&Header::default(), &C { sub: "op".into(), exp }, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
-    }
 }

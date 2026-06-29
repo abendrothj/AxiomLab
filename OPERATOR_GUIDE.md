@@ -229,7 +229,12 @@ directives and expected outcomes live in `benchmarks/protocols.json`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `AXIOMLAB_BIND` | `0.0.0.0:8080` | Listen address |
-| `AXIOMLAB_JWT_SECRET` | _(unset → open dev mode)_ | HS256 secret for `POST /api/queue` |
+| `AXIOMLAB_DEV_AUTH` | _(unset)_ | `1` enables local development login; never enable in production |
+| `AXIOMLAB_OIDC_AUTHORIZATION_ENDPOINT` | — | OIDC authorization endpoint |
+| `AXIOMLAB_OIDC_TOKEN_ENDPOINT` | — | OIDC token endpoint |
+| `AXIOMLAB_OIDC_USERINFO_ENDPOINT` | — | OIDC UserInfo endpoint |
+| `AXIOMLAB_OIDC_CLIENT_ID` / `_CLIENT_SECRET` | — | OIDC client credentials |
+| `AXIOMLAB_OIDC_REDIRECT_URI` | — | Registered callback URL, normally `/api/auth/callback` |
 | `AXIOMLAB_KMS_KEY_ID` | — | KMS key for audit signing (needs `--features kms`) |
 | `AXIOMLAB_AUDIT_SIGNING_KEY` | — | Inline base64 signing key (CI) |
 | `AXIOMLAB_AUDIT_SIGNING_KEY_PATH` | `~/.config/axiomlab/audit_signing.key` | File-backed key |

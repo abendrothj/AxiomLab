@@ -1,17 +1,94 @@
 //! HTTP + WebSocket handlers. Routes only — every handler delegates to the
 //! chain, the queues, or lab state. No business logic lives here.
 
-use crate::auth;
+use crate::auth::{self, Role};
 use crate::state::AppState;
 use axum::{
     Json,
     extract::{Path, Query, State, ws::WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Redirect},
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::atomic::Ordering;
+
+fn denied(error: String) -> axum::response::Response {
+    let status = if error == "insufficient role" {
+        StatusCode::FORBIDDEN
+    } else {
+        StatusCode::UNAUTHORIZED
+    };
+    (status, error).into_response()
+}
+
+pub async fn auth_me(State(s): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    match s.auth.principal(&headers) {
+        Ok(p) => Json(json!(p)).into_response(),
+        Err(e) => denied(e),
+    }
+}
+#[derive(Deserialize)]
+pub struct LoginQuery {
+    #[serde(default = "root_path")]
+    return_to: String,
+}
+fn root_path() -> String {
+    "/".into()
+}
+pub async fn auth_login(
+    State(s): State<AppState>,
+    Query(q): Query<LoginQuery>,
+) -> impl IntoResponse {
+    match s.auth.begin_oidc(&q.return_to) {
+        Ok(url) => Redirect::temporary(&url).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
+}
+#[derive(Deserialize)]
+pub struct CallbackQuery {
+    code: String,
+    state: String,
+}
+pub async fn auth_callback(
+    State(s): State<AppState>,
+    Query(q): Query<CallbackQuery>,
+) -> impl IntoResponse {
+    match s.auth.finish_oidc(&q.code, &q.state).await {
+        Ok((_p, cookie, to)) => (
+            [(axum::http::header::SET_COOKIE, cookie)],
+            Redirect::to(&to),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::UNAUTHORIZED, e).into_response(),
+    }
+}
+#[derive(Deserialize)]
+pub struct DevLoginBody {
+    subject: String,
+    role: Role,
+}
+pub async fn auth_dev_login(
+    State(s): State<AppState>,
+    Json(body): Json<DevLoginBody>,
+) -> impl IntoResponse {
+    if !s.auth.dev_mode {
+        return (StatusCode::NOT_FOUND, "development auth disabled").into_response();
+    }
+    match s.auth.create_session(&body.subject, body.role) {
+        Ok((p, cookie)) => {
+            ([(axum::http::header::SET_COOKIE, cookie)], Json(json!(p))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+pub async fn auth_logout(State(s): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    s.auth.revoke(&headers);
+    (
+        [(axum::http::header::SET_COOKIE, auth::clear_cookie())],
+        StatusCode::NO_CONTENT,
+    )
+}
 
 // ── /api/status ─────────────────────────────────────────────────────────────
 
@@ -60,7 +137,10 @@ pub async fn audit(State(s): State<AppState>, Query(p): Query<Pagination>) -> im
     }
 }
 
-pub async fn audit_verify(State(s): State<AppState>) -> impl IntoResponse {
+pub async fn audit_verify(State(s): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(error) = s.auth.authorize(&headers, Role::Admin, true) {
+        return denied(error);
+    }
     match s.audit_chain.verify() {
         Ok(v) => Json(json!({
             "ok": true,
@@ -116,15 +196,25 @@ pub async fn queue_push(
     headers: HeaderMap,
     Json(body): Json<DirectiveBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = auth::verify(&headers, &s.jwt_secret) {
-        return (StatusCode::UNAUTHORIZED, e).into_response();
-    }
-    let id = s.protocol_queue.push(body.directive.clone());
+    let principal = match s.auth.authorize(&headers, Role::Operator, true) {
+        Ok(p) => p,
+        Err(e) => return denied(e),
+    };
+    let id = s
+        .protocol_queue
+        .push_for(body.directive.clone(), &principal.subject);
     s.broadcast(json!({ "event": "queued", "id": id, "directive": body.directive }));
     (StatusCode::ACCEPTED, Json(json!({ "id": id }))).into_response()
 }
 
-pub async fn queue_cancel(State(s): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn queue_cancel(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = s.auth.authorize(&headers, Role::Operator, true) {
+        return denied(e);
+    }
     if s.protocol_queue.cancel(&id) {
         (StatusCode::OK, Json(json!({ "cancelled": id }))).into_response()
     } else {
@@ -141,8 +231,12 @@ pub struct ReconcileBody {
 pub async fn queue_reconcile(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ReconcileBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = s.auth.authorize(&headers, Role::Operator, true) {
+        return denied(e);
+    }
     if body.notes.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "reconciliation notes are required").into_response();
     }
@@ -175,23 +269,22 @@ pub struct DecisionBody {
     pub approved: bool,
     #[serde(default)]
     pub notes: String,
-    #[serde(default)]
-    pub approver_id: String,
 }
 
 pub async fn approvals_resolve(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<DecisionBody>,
 ) -> impl IntoResponse {
+    let principal = match s.auth.authorize(&headers, Role::Approver, true) {
+        Ok(p) => p,
+        Err(e) => return denied(e),
+    };
     let decision = axiom_gate::Decision {
         approved: body.approved,
         notes: body.notes,
-        approver_id: if body.approver_id.is_empty() {
-            "operator".into()
-        } else {
-            body.approver_id
-        },
+        approver_id: principal.subject,
     };
     match s.approval_queue.resolve(&id, decision) {
         Ok(()) => {
