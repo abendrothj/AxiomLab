@@ -334,7 +334,7 @@ Each crate is independently compilable and tested before the next is started. No
 - [x] 5. `crates/proofs/` — artifact loading + predicates **(done — 14 tests pass; predicates mirror verified bounds, called with actual params)**
 - [x] 6. `crates/gate/` — pipeline + all 7 gates **(done — 24 tests pass; full end-to-end pipeline tested)**
 - [x] 7. `crates/llm/` — orchestrator **(done — 10 tests pass; scripted client drives full pipeline)**
-- [ ] 8. `server/` — HTTP server, depends on everything
+- [x] 8. `server/` — HTTP server **(done — 11 tests pass; routes + worker, chain-derived, no SQLite/journal)**
 - [ ] 9. `ui/` — frontend, last
 
 Each step gets its own commit with passing tests before moving to the next.
