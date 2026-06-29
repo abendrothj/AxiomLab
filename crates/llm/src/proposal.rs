@@ -44,11 +44,47 @@ pub fn infer_risk(tool: &str) -> RiskClass {
     }
 }
 
-/// Parse the LLM's reply. The model is instructed to emit a single JSON object;
-/// any prose preceding the first `{` is tolerated and discarded.
+/// Extract the first complete JSON object from `raw`.
+///
+/// Real models wrap the object in prose or ```json fences and sometimes add
+/// trailing commentary. We scan from the first `{` to its matching `}`,
+/// respecting string literals, so all of those are tolerated.
+fn extract_json_object(raw: &str) -> Option<&str> {
+    let start = raw.find('{')?;
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, b) in raw.bytes().enumerate().skip(start) {
+        if in_str {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_str = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&raw[start..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Parse the LLM's reply into a [`Proposal`]. Tolerant of code fences and
+/// surrounding prose — only the first complete JSON object is read.
 pub fn parse(raw: &str) -> Result<Proposal, ParseError> {
-    let json_start = raw.find('{').unwrap_or(0);
-    let v: Value = serde_json::from_str(raw[json_start..].trim()).map_err(|e| ParseError::Json(e.to_string()))?;
+    let json = extract_json_object(raw)
+        .ok_or_else(|| ParseError::Json("no JSON object found in response".into()))?;
+    let v: Value = serde_json::from_str(json).map_err(|e| ParseError::Json(e.to_string()))?;
 
     match v.get("tool").and_then(|t| t.as_str()) {
         Some("done") => Ok(Proposal::Done {
@@ -122,6 +158,27 @@ mod tests {
     fn tolerates_leading_prose() {
         let p = parse("Here is my plan: {\"tool\":\"done\",\"summary\":\"x\"}").unwrap();
         assert!(matches!(p, Proposal::Done { .. }));
+    }
+
+    #[test]
+    fn tolerates_code_fences_and_trailing_prose() {
+        let raw = "```json\n{\"tool\":\"done\",\"summary\":\"ok\"}\n```\nThat completes the task.";
+        assert!(matches!(parse(raw).unwrap(), Proposal::Done { .. }));
+    }
+
+    #[test]
+    fn ignores_braces_inside_strings() {
+        // A `}` inside a string value must not terminate the object early.
+        let raw = r#"{"tool":"done","summary":"use {curly} braces"}"#;
+        match parse(raw).unwrap() {
+            Proposal::Done { summary } => assert_eq!(summary, "use {curly} braces"),
+            _ => panic!("expected done"),
+        }
+    }
+
+    #[test]
+    fn no_json_is_an_error() {
+        assert!(matches!(parse("I refuse to answer."), Err(ParseError::Json(_))));
     }
 
     #[test]
