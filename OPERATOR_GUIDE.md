@@ -125,9 +125,16 @@ curl -X POST localhost:8080/api/queue \
 A background worker claims the next pending directive, builds a `GateContext`,
 and runs the `Orchestrator`: the LLM proposes `propose_protocol` /
 `analyze_series` / `done`; protocol steps run through the pipeline; a gate
-rejection ends the run (there is no retry loop). Calibration is established by
-`analyze_series` — a good fit (R² ≥ 0.80) records a calibration entry that
-unlocks the measurement tools at the `CalibrationGate`.
+rejection ends the run (there is no retry loop).
+
+**Calibration is traceable, not self-certified.** `analyze_series` will only
+propose a calibration when the x-axis is drawn from **registered reference
+materials** (reagents with a `reference_material_id`), there are ≥5 distinct
+standard levels, and the fit clears R² ≥ 0.80. Even then it is not recorded
+until an operator approves it (calibration unlocks measurement). The signed
+calibration entry records the standards, level count, model, and approver — so
+an instrument can never be calibrated against arbitrary data it produced about
+unknown samples.
 
 ---
 

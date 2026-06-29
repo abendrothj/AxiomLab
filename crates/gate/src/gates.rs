@@ -151,35 +151,10 @@ impl Gate for ApprovalGate {
         if !action.risk_class.requires_approval() {
             return Ok(());
         }
-        let scope = crate::approvals::ApprovalQueue::scope_hash(&action.tool, &action.params);
-        if ctx.approvals.is_scope_granted(&scope) {
-            return Ok(()); // identical action already approved this session
-        }
-
-        let (id, rx) = ctx.approvals.request(&action.tool, &action.params);
-        let decision = match tokio::time::timeout(ctx.approval_timeout, rx).await {
-            Ok(Ok(d)) => d,
-            Ok(Err(_)) => {
-                return Err(reject(self.name(), "approval channel closed", action));
-            }
-            Err(_) => {
-                ctx.approvals.cancel(&id);
-                return Err(reject(self.name(), "approval timed out — auto-denied", action));
-            }
-        };
-
-        if !decision.approved {
-            return Err(reject(
-                self.name(),
-                format!("operator denied: {}", decision.notes),
-                action,
-            ));
-        }
-        // Honour revocations even on an approval.
-        ctx.revocations
-            .check_approval(&decision.approver_id, &id)
-            .map_err(|e| reject(self.name(), e, action))?;
-        Ok(())
+        crate::require_operator_approval(ctx, &action.tool, &action.params)
+            .await
+            .map(|_| ())
+            .map_err(|e| reject(self.name(), e, action))
     }
 }
 

@@ -17,9 +17,13 @@ mod context;
 mod fitting;
 mod gates;
 
-pub use analyze::{AnalyzeRequest, CALIBRATION_R2_THRESHOLD, analyze_series};
+pub use analyze::{
+    AnalyzeOutcome, AnalyzeRequest, CALIBRATION_R2_THRESHOLD, MIN_CALIBRATION_LEVELS, analyze_series,
+};
 pub use approvals::{ApprovalQueue, ApprovalRequest, Decision};
-pub use calibration::{latest_valid_until, measurement_instrument, record_calibration};
+pub use calibration::{
+    ProposedCalibration, latest_valid_until, measurement_instrument, record_calibration,
+};
 pub use capability::{ActionCapability, CapabilityPolicy, NumericRange};
 pub use context::GateContext;
 
@@ -27,6 +31,37 @@ use async_trait::async_trait;
 use axiom_audit::{EntryData, RekorClient};
 use axiom_types::{Action, Rejection};
 use std::sync::Arc;
+
+/// Request operator approval for `(tool, params)` and await the decision.
+///
+/// Shared by the [`gates::ApprovalGate`] and the orchestrator (calibration also
+/// requires sign-off). Returns the approver id on approval; `Err(reason)` on
+/// deny, timeout (auto-deny), a closed channel, or a revoked approver/approval.
+/// An identical scope already approved this session passes without re-prompting.
+pub async fn require_operator_approval(
+    ctx: &GateContext,
+    tool: &str,
+    params: &serde_json::Value,
+) -> Result<String, String> {
+    let scope = ApprovalQueue::scope_hash(tool, params);
+    if ctx.approvals.is_scope_granted(&scope) {
+        return Ok("(previously approved)".into());
+    }
+    let (id, rx) = ctx.approvals.request(tool, params);
+    let decision = match tokio::time::timeout(ctx.approval_timeout, rx).await {
+        Ok(Ok(d)) => d,
+        Ok(Err(_)) => return Err("approval channel closed".into()),
+        Err(_) => {
+            ctx.approvals.cancel(&id);
+            return Err("approval timed out — auto-denied".into());
+        }
+    };
+    if !decision.approved {
+        return Err(format!("operator denied: {}", decision.notes));
+    }
+    ctx.revocations.check_approval(&decision.approver_id, &id)?;
+    Ok(decision.approver_id)
+}
 
 /// One stage of the pipeline.
 #[async_trait]
@@ -239,14 +274,18 @@ mod tests {
     #[tokio::test]
     async fn measurement_allowed_after_calibration() {
         let (ctx, _d) = ctx();
-        // Record a calibration via analyze_series, then add a proof policy for the read.
-        let req = AnalyzeRequest {
-            x: vec![1.0, 2.0, 3.0, 4.0, 5.0],
-            y: vec![2.0, 4.0, 6.0, 8.0, 10.0],
-            model: Some("linear".into()),
-            instrument: Some("spectrophotometer".into()),
+        // Seed a valid calibration directly (analyze_series + approval is exercised
+        // in the analyze/orchestrator tests; here we only need the gate to see one).
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let cal = crate::ProposedCalibration {
+            instrument: "spectrophotometer".into(),
+            valid_until: now + 3600,
+            r_squared: 0.99,
+            model: "linear".into(),
+            standard_ids: vec!["std-0".into()],
+            n_levels: 5,
         };
-        analyze_series(&req, &ctx.audit_chain, ctx.signer.as_ref()).unwrap();
+        crate::record_calibration(&ctx.audit_chain, ctx.signer.as_ref(), &cal, "tester").unwrap();
 
         // Build a context whose manifest also authorises read_absorbance.
         let mut m = test_manifest();

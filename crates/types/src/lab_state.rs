@@ -220,6 +220,13 @@ impl LabState {
 
     // ── Queries ──
 
+    /// The set of registered reference-material IDs — the certified standards a
+    /// calibration's x-axis must be drawn from. Sourced from reagents that
+    /// declare a `reference_material_id`.
+    pub fn registered_reference_materials(&self) -> std::collections::HashSet<String> {
+        self.reagents.values().filter_map(|r| r.reference_material_id.clone()).collect()
+    }
+
     pub fn expired_reagents(&self, now_secs: u64) -> Vec<&Reagent> {
         self.reagents.values().filter(|r| !r.is_valid_at(now_secs)).collect()
     }
