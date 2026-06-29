@@ -217,4 +217,40 @@ mod tests {
         assert!(q.reconcile(&id, true, "physical state verified"));
         assert_eq!(q.list()[0].status, QueueStatus::Pending);
     }
+
+    #[test]
+    fn restart_preserves_terminal_and_pending_states() {
+        for (status, expected) in [
+            (QueueStatus::Pending, QueueStatus::Pending),
+            (QueueStatus::Completed, QueueStatus::Completed),
+            (QueueStatus::Failed, QueueStatus::Failed),
+            (QueueStatus::Cancelled, QueueStatus::Cancelled),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let queue = ProtocolQueue::open(&path).unwrap();
+            let id = queue.push("checkpoint");
+            match status {
+                QueueStatus::Pending => {}
+                QueueStatus::Cancelled => {
+                    assert!(queue.cancel(&id));
+                }
+                other => queue.finish(&id, other, Some("terminal".into())),
+            }
+            drop(queue);
+            let recovered = ProtocolQueue::open(&path).unwrap();
+            assert_eq!(recovered.list()[0].status, expected);
+        }
+    }
+
+    #[test]
+    fn two_workers_cannot_claim_same_directive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let first = ProtocolQueue::open(&path).unwrap();
+        let second = ProtocolQueue::open(&path).unwrap();
+        let id = first.push("once");
+        assert_eq!(first.claim_next().unwrap().0, id);
+        assert!(second.claim_next().is_none());
+    }
 }
