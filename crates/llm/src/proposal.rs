@@ -28,7 +28,12 @@ pub enum ParseError {
     InvalidArgs { tool: &'static str, detail: String },
 }
 
-/// Default risk class for a tool when the model omits one.
+/// The **authoritative** risk class for a tool.
+///
+/// Risk is derived from the tool here and nowhere else. The LLM does not get to
+/// classify its own actions — a model that labelled `move_arm` as `ReadOnly`
+/// would otherwise skip the `ApprovalGate`. Any `risk_class` field in the
+/// model's JSON is ignored. Unknown tools are treated as high-risk (fail-safe).
 pub fn infer_risk(tool: &str) -> RiskClass {
     match tool {
         "read_absorbance" | "read_ph" | "read_temperature" => RiskClass::ReadOnly,
@@ -36,16 +41,6 @@ pub fn infer_risk(tool: &str) -> RiskClass {
         "move_arm" | "centrifuge" | "incubate" | "set_temperature" => RiskClass::Actuation,
         "dispose" | "discard" => RiskClass::Destructive,
         _ => RiskClass::Actuation, // unknown ⇒ treat as high-risk (fail-safe)
-    }
-}
-
-fn parse_risk(v: Option<&Value>, tool: &str) -> RiskClass {
-    match v.and_then(|x| x.as_str()) {
-        Some("ReadOnly") => RiskClass::ReadOnly,
-        Some("LiquidHandling") => RiskClass::LiquidHandling,
-        Some("Actuation") => RiskClass::Actuation,
-        Some("Destructive") => RiskClass::Destructive,
-        _ => infer_risk(tool),
     }
 }
 
@@ -76,8 +71,8 @@ pub fn parse(raw: &str) -> Result<Proposal, ParseError> {
                     .and_then(|t| t.as_str())
                     .ok_or(ParseError::InvalidArgs { tool: "propose_protocol", detail: "step missing 'tool'".into() })?;
                 let params = step.get("params").cloned().unwrap_or_else(|| Value::Object(Default::default()));
-                let risk = parse_risk(step.get("risk_class"), tool);
-                actions.push(Action::new(tool, params, risk));
+                // Risk is authoritative from the tool; any model-supplied risk_class is ignored.
+                actions.push(Action::new(tool, params, infer_risk(tool)));
             }
             Ok(Proposal::Protocol(actions))
         }
@@ -103,6 +98,16 @@ mod tests {
                 assert_eq!(a[0].tool, "dispense");
                 assert_eq!(a[0].risk_class, RiskClass::LiquidHandling);
             }
+            _ => panic!("expected protocol"),
+        }
+    }
+
+    #[test]
+    fn llm_cannot_lower_its_own_risk() {
+        // Model labels a high-risk actuation as ReadOnly to dodge approval.
+        let p = parse(r#"{"tool":"propose_protocol","steps":[{"tool":"move_arm","params":{"x":1},"risk_class":"ReadOnly"}]}"#).unwrap();
+        match p {
+            Proposal::Protocol(a) => assert_eq!(a[0].risk_class, RiskClass::Actuation, "risk must come from the tool, not the model"),
             _ => panic!("expected protocol"),
         }
     }
