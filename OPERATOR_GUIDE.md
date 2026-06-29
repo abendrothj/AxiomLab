@@ -124,8 +124,10 @@ curl -X POST localhost:8080/api/queue \
 
 A background worker claims the next pending directive, builds a `GateContext`,
 and runs the `Orchestrator`: the LLM proposes `propose_protocol` /
-`analyze_series` / `done`; protocol steps run through the pipeline; a gate
-rejection ends the run (there is no retry loop).
+`analyze_series` / `done`; protocol steps run through the pipeline. A gate
+rejection does not end the run — the reason is fed back into the next mandate so
+the model can revise, bounded by `AXIOMLAB_MAX_REJECTIONS`. The gates still
+reject every unsafe action; only the orchestrator's patience is bounded.
 
 **Calibration is traceable, not self-certified.** `analyze_series` will only
 propose a calibration when the x-axis is drawn from **registered reference
@@ -166,6 +168,7 @@ unknown samples.
 | `AXIOMLAB_LAB_STATE_PATH` | `.artifacts/lab_state.json` | Reagent/vessel state |
 | `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | localhost / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |
 | `AXIOMLAB_MAX_ITERATIONS` | `50` | Orchestrator iteration cap |
+| `AXIOMLAB_MAX_REJECTIONS` | `5` | Gate rejections tolerated before a run aborts |
 | `AXIOMLAB_CALIBRATION_TTL_SECS` | `86400` | Lifetime of a recorded calibration |
 
 ---
