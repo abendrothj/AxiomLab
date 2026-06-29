@@ -37,6 +37,8 @@ pub struct ApprovalRequest {
     pub risk_class: Option<RiskClass>,
     pub gate: String,
     pub reason: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +71,7 @@ pub struct ApprovalQueue {
     granted_scopes: Mutex<HashSet<String>>,
     records: Mutex<Vec<ApprovalRecord>>,
     path: Option<PathBuf>,
+    sqlite_path: Option<PathBuf>,
 }
 
 impl Default for ApprovalQueue {
@@ -78,6 +81,7 @@ impl Default for ApprovalQueue {
             granted_scopes: Mutex::new(HashSet::new()),
             records: Mutex::new(Vec::new()),
             path: None,
+            sqlite_path: None,
         }
     }
 }
@@ -111,8 +115,59 @@ impl ApprovalQueue {
             granted_scopes: Mutex::new(HashSet::new()),
             records: Mutex::new(records),
             path: Some(path),
+            sqlite_path: None,
         };
         queue.persist()?;
+        Ok(queue)
+    }
+
+    pub fn open_sqlite(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref().to_path_buf();
+        let connection = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS approval_records(id TEXT PRIMARY KEY,run_id TEXT,scope_hash TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL,requested_by TEXT,decided_by TEXT,decision_json TEXT,created_secs INTEGER NOT NULL,resolved_secs INTEGER)").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT request_json,status,decision_json,resolved_secs FROM approval_records ORDER BY created_secs,id").map_err(|e|e.to_string())?;
+        let mut records: Vec<ApprovalRecord> = statement
+            .query_map([], |row| {
+                let request: String = row.get(0)?;
+                let status: String = row.get(1)?;
+                let decision: Option<String> = row.get(2)?;
+                Ok(ApprovalRecord {
+                    request: serde_json::from_str(&request).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    status: ApprovalStatus::parse(&status),
+                    decision: decision.and_then(|v| serde_json::from_str(&v).ok()),
+                    resolved_secs: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        drop(statement);
+        let recovered = now_secs();
+        for record in &mut records {
+            if record.status == ApprovalStatus::Pending {
+                record.status = ApprovalStatus::Interrupted;
+                record.resolved_secs = Some(recovered);
+                record.decision = Some(Decision {
+                    approved: false,
+                    notes: "Server restarted while approval was pending".into(),
+                    approver_id: "system".into(),
+                });
+            }
+        }
+        let queue = Self {
+            pending: Mutex::new(HashMap::new()),
+            granted_scopes: Mutex::new(HashSet::new()),
+            records: Mutex::new(records),
+            path: None,
+            sqlite_path: Some(path),
+        };
+        queue.persist().map_err(|e| e.to_string())?;
         Ok(queue)
     }
 
@@ -151,6 +206,19 @@ impl ApprovalQueue {
         reason: impl Into<String>,
         timeout: Duration,
     ) -> (String, oneshot::Receiver<Decision>) {
+        self.request_with_metadata_for_run(tool, params, risk_class, gate, reason, timeout, None)
+    }
+
+    pub fn request_with_metadata_for_run(
+        &self,
+        tool: &str,
+        params: &Value,
+        risk_class: Option<RiskClass>,
+        gate: impl Into<String>,
+        reason: impl Into<String>,
+        timeout: Duration,
+        run_id: Option<String>,
+    ) -> (String, oneshot::Receiver<Decision>) {
         let id = uuid::Uuid::new_v4().to_string();
         let scope_hash = Self::scope_hash(tool, params);
         let (tx, rx) = oneshot::channel();
@@ -165,6 +233,7 @@ impl ApprovalQueue {
             risk_class,
             gate: gate.into(),
             reason: reason.into(),
+            run_id,
         };
         self.records.lock().unwrap().push(ApprovalRecord {
             request: req.clone(),
@@ -260,6 +329,18 @@ impl ApprovalQueue {
     }
 
     fn persist(&self) -> std::io::Result<()> {
+        if let Some(path) = &self.sqlite_path {
+            let mut connection = rusqlite::Connection::open(path).map_err(std::io::Error::other)?;
+            let transaction = connection.transaction().map_err(std::io::Error::other)?;
+            transaction
+                .execute("DELETE FROM approval_records", [])
+                .map_err(std::io::Error::other)?;
+            for record in self.records.lock().unwrap().iter() {
+                transaction.execute("INSERT INTO approval_records(id,run_id,scope_hash,request_json,status,decided_by,decision_json,created_secs,resolved_secs) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",rusqlite::params![record.request.id,record.request.run_id,record.request.scope_hash,serde_json::to_string(&record.request).map_err(std::io::Error::other)?,record.status.as_str(),record.decision.as_ref().map(|d|d.approver_id.clone()),record.decision.as_ref().map(serde_json::to_string).transpose().map_err(std::io::Error::other)?,record.request.created_secs,record.resolved_secs]).map_err(std::io::Error::other)?;
+            }
+            transaction.commit().map_err(std::io::Error::other)?;
+            return Ok(());
+        }
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -273,6 +354,28 @@ impl ApprovalQueue {
                 .map_err(std::io::Error::other)?,
         )?;
         std::fs::rename(temporary, path)
+    }
+}
+
+impl ApprovalStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::TimedOut => "timed_out",
+            Self::Interrupted => "interrupted",
+        }
+    }
+    fn parse(value: &str) -> Self {
+        match value {
+            "pending" => Self::Pending,
+            "approved" => Self::Approved,
+            "denied" => Self::Denied,
+            "timed_out" => Self::TimedOut,
+            "interrupted" => Self::Interrupted,
+            _ => Self::Interrupted,
+        }
     }
 }
 
@@ -367,6 +470,29 @@ mod tests {
                 .unwrap()
                 .approver_id,
             "system"
+        );
+    }
+
+    #[test]
+    fn sqlite_journal_marks_pending_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let queue = ApprovalQueue::open_sqlite(&path).unwrap();
+        queue.request_with_metadata_for_run(
+            "move_arm",
+            &json!({"x":1}),
+            Some(RiskClass::Actuation),
+            "ApprovalGate",
+            "review",
+            Duration::from_secs(60),
+            Some("run-1".into()),
+        );
+        drop(queue);
+        let recovered = ApprovalQueue::open_sqlite(&path).unwrap();
+        assert_eq!(recovered.history()[0].status, ApprovalStatus::Interrupted);
+        assert_eq!(
+            recovered.history()[0].request.run_id.as_deref(),
+            Some("run-1")
         );
     }
 }

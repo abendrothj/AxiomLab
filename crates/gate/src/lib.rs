@@ -54,13 +54,14 @@ pub async fn require_operator_approval(
     if ctx.approvals.is_scope_granted(&scope) {
         return Ok("(previously approved)".into());
     }
-    let (id, rx) = ctx.approvals.request_with_metadata(
+    let (id, rx) = ctx.approvals.request_with_metadata_for_run(
         tool,
         params,
         metadata.risk_class,
         metadata.gate,
         metadata.reason,
         ctx.approval_timeout,
+        Some(ctx.experiment_id.clone()),
     );
     let decision = match tokio::time::timeout(ctx.approval_timeout, rx).await {
         Ok(Ok(d)) => d,

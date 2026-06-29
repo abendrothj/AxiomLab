@@ -249,7 +249,6 @@ directives and expected outcomes live in `benchmarks/protocols.json`.
 | `AXIOMLAB_SILA_BIND` | `127.0.0.1:50051` | Bind address for the mock instrument server |
 | `AXIOMLAB_SIM_FAULTS` | `{}` | Deterministic simulator fault profile as JSON |
 | `AXIOMLAB_DATABASE_PATH` | `.artifacts/runtime/axiomlab.db` | SQLite operational state and worker leases |
-| `AXIOMLAB_APPROVALS_PATH` | `.artifacts/runtime/approvals.json` | Durable approval lifecycle journal; pending requests become interrupted on restart |
 | `AXIOMLAB_LAB_STATE_PATH` | `.artifacts/lab_state.json` | Reagent/vessel state |
 | `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | localhost / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |
 | `AXIOMLAB_MAX_ITERATIONS` | `50` | Orchestrator iteration cap |

@@ -122,6 +122,20 @@ impl ProtocolQueue {
             .collect()
     }
 
+    pub fn submitted_by(&self, id: &str) -> Option<String> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT submitted_by FROM directives WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
     pub fn cancel(&self, id: &str) -> bool {
         self.transition(id, QueueStatus::Pending, QueueStatus::Cancelled, None)
     }

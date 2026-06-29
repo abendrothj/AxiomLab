@@ -281,6 +281,22 @@ pub async fn approvals_resolve(
         Ok(p) => p,
         Err(e) => return denied(e),
     };
+    if let Some(request) = s
+        .approval_queue
+        .list_pending()
+        .into_iter()
+        .find(|request| request.id == id)
+    {
+        if let Some(run_id) = request.run_id.as_deref() {
+            if s.protocol_queue.submitted_by(run_id).as_deref() == Some(&principal.subject) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "submitter cannot approve their own run",
+                )
+                    .into_response();
+            }
+        }
+    }
     let decision = axiom_gate::Decision {
         approved: body.approved,
         notes: body.notes,

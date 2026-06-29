@@ -75,9 +75,7 @@ async fn main() {
             lab.seed_default_vessels(); // capacity registry for the ProofGate
             lab
         })),
-        approval_queue: Arc::new(ApprovalQueue::open(
-            std::env::var("AXIOMLAB_APPROVALS_PATH").unwrap_or_else(|_| ".artifacts/runtime/approvals.json".into()),
-        ).expect("open approval journal")),
+        approval_queue: Arc::new(ApprovalQueue::open_sqlite(&database_path).expect("open approval journal")),
         protocol_queue: Arc::new(ProtocolQueue::open(
             &database_path,
         ).expect("open protocol queue")),
@@ -250,6 +248,15 @@ mod tests {
         let resp = app.oneshot(Request::get("/api/approvals/history").header("cookie",cookie.split(';').next().unwrap()).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("\"status\":\"pending\""));
+    }
+
+    #[tokio::test]
+    async fn submitter_cannot_approve_own_run() {
+        let state=test_state();let run_id=state.protocol_queue.push_for("move","alice");
+        let (approval_id,_rx)=state.approval_queue.request_with_metadata_for_run("move_arm",&serde_json::json!({"x":1}),Some(axiom_types::RiskClass::Actuation),"ApprovalGate","review",std::time::Duration::from_secs(60),Some(run_id));
+        let (principal,cookie)=state.auth.create_session("alice",auth::Role::Approver).unwrap();let app=api_router(state);
+        let response=app.oneshot(Request::post(format!("/api/approvals/{approval_id}")).header("content-type","application/json").header("cookie",cookie.split(';').next().unwrap()).header("x-csrf-token",principal.csrf_token).body(Body::from(r#"{"approved":true,"notes":"ok"}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::FORBIDDEN);
     }
 
 }
