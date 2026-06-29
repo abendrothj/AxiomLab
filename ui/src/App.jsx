@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { api, getToken, setToken as saveToken, tokenIsRemembered } from "./api.js";
+import { api } from "./api.js";
 import { formatDeadline, routeFromHash, routes } from "./operator.js";
 
 const directiveTemplates = [
@@ -19,11 +19,12 @@ function useRoute() {
   return route;
 }
 
-function useLiveEvents() {
+function useLiveEvents(enabled) {
   const [events, setEvents] = useState([]);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onopen = () => setConnected(true);
@@ -37,7 +38,7 @@ function useLiveEvents() {
       }
     };
     return () => ws.close();
-  }, []);
+  }, [enabled]);
 
   return { events, connected };
 }
@@ -102,38 +103,16 @@ function StatusStrip({ status, audit, connected }) {
   );
 }
 
-function TokenSettings() {
-  const [token, setToken] = useState(getToken());
-  const [remember, setRemember] = useState(tokenIsRemembered());
-  const [saved, setSaved] = useState(false);
-
-  const persist = () => {
-    saveToken(token.trim(), remember);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1800);
-  };
-
+function AccountSettings({ principal, logout }) {
   return (
-    <Panel title="Access token" eyebrow="Mutating API auth">
-      <p className="muted tight">Used for queue submissions when the server has JWT auth enabled.</p>
-      <div className="row">
-        <input
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="Bearer token / JWT"
-          type="password"
-          autoComplete="off"
-        />
-        <button type="button" onClick={persist}>{saved ? "Saved" : "Save"}</button>
-      </div>
-      <label className="checkRow">
-        <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-        Remember across browser restarts. Leave unchecked for session-only storage.
-      </label>
-      {token && <button type="button" className="link" onClick={() => { setToken(""); saveToken(""); }}>Clear token</button>}
+    <Panel title="Signed-in account" eyebrow="Server-side session">
+      <dl className="facts"><div><dt>Subject</dt><dd>{principal.subject}</dd></div><div><dt>Role</dt><dd>{principal.role}</dd></div></dl>
+      <button type="button" onClick={logout}>Sign out</button>
     </Panel>
   );
 }
+
+function Login({ onLogin }) { const [subject,setSubject]=useState("operator"); const [role,setRole]=useState("operator"); return <main className="login"><Panel title="Sign in" eyebrow="AxiomLab identity"><p>Use your configured OIDC provider, or development login when enabled.</p><a className="button" href={api.loginUrl(location.href)}>Sign in with OIDC</a><div className="reviewGrid"><input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="development subject"/><select value={role} onChange={e=>setRole(e.target.value)}><option>viewer</option><option>operator</option><option>approver</option><option>admin</option></select></div><button onClick={()=>onLogin(subject,role)}>Development login</button></Panel></main> }
 
 function CommandCenter({ directive, setDirective, submit, busy }) {
   return (
@@ -162,14 +141,12 @@ function CommandCenter({ directive, setDirective, submit, busy }) {
 
 function ApprovalCard({ approval, onResolve }) {
   const [notes, setNotes] = useState("");
-  const [approver, setApprover] = useState(localStorage.getItem("axiomlab_approver") || "operator");
   const [busy, setBusy] = useState(false);
 
   const decide = async (approved) => {
     setBusy(true);
-    localStorage.setItem("axiomlab_approver", approver || "operator");
     try {
-      await onResolve(approval.id, approved, notes, approver || "operator");
+      await onResolve(approval.id, approved, notes);
     } finally {
       setBusy(false);
     }
@@ -193,7 +170,6 @@ function ApprovalCard({ approval, onResolve }) {
       <div className="approvalReason">{approval.reason || "Operator approval required"}</div>
       <JsonBlock value={approval.params} />
       <div className="reviewGrid">
-        <input value={approver} onChange={(e) => setApprover(e.target.value)} placeholder="approver id" />
         <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="decision notes" />
       </div>
       <div className="row end">
@@ -218,7 +194,7 @@ function ApprovalsPanel({ approvals, resolve }) {
   );
 }
 
-function QueuePanel({ queue, cancel }) {
+function QueuePanel({ queue, cancel, reconcile, canMutate = false }) {
   const ordered = [...queue].reverse();
   return (
     <Panel title="Directive queue" eyebrow="Work tracking">
@@ -232,7 +208,8 @@ function QueuePanel({ queue, cancel }) {
               </div>
               <p>{item.directive}</p>
               {item.summary && <p className="summary">{item.summary}</p>}
-              {item.status === "pending" && <button type="button" className="link" onClick={() => cancel(item.id)}>Cancel pending directive</button>}
+              {canMutate && item.status === "pending" && <button type="button" className="link" onClick={() => cancel(item.id)}>Cancel pending directive</button>}
+              {canMutate && item.status === "recovery_required" && <div className="row"><button type="button" className="danger" onClick={() => reconcile(item.id, false)}>Close as failed</button><button type="button" onClick={() => reconcile(item.id, true)}>Verified safe to retry</button></div>}
             </li>
           ))}
         </ul>
@@ -335,6 +312,8 @@ function EventsPanel({ events, connected }) {
 }
 
 export default function App() {
+  const [principal, setPrincipal] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const route = useRoute();
   const [status, setStatus] = useState(null);
   const [audit, setAudit] = useState(null);
@@ -345,9 +324,12 @@ export default function App() {
   const [directive, setDirective] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const { events, connected } = useLiveEvents();
+  const { events, connected } = useLiveEvents(Boolean(principal));
+
+  useEffect(() => { api.me().then(setPrincipal).catch(()=>setPrincipal(null)).finally(()=>setAuthLoading(false)); }, []);
 
   const refresh = useCallback(async () => {
+    if (!principal) return;
     try {
       const [s, a, ap, q, ag, l] = await Promise.all([
         api.status(),
@@ -367,7 +349,7 @@ export default function App() {
     } catch (e) {
       setErr(String(e));
     }
-  }, []);
+  }, [principal]);
 
   useEffect(() => {
     refresh();
@@ -390,14 +372,16 @@ export default function App() {
     }
   };
 
-  const resolve = async (id, approved, notes, approverId) => {
+  const resolve = async (id, approved, notes) => {
     try {
-      await api.resolveApproval(id, approved, notes, approverId);
+      await api.resolveApproval(id, approved, notes);
       await refresh();
     } catch (e) {
       setErr(String(e));
     }
   };
+
+  const reconcile = async (id, retry) => { const notes=window.prompt("Record the observed physical state and reconciliation decision:"); if(!notes?.trim()) return; try { await api.reconcile(id,retry,notes.trim()); await refresh(); } catch(e){setErr(String(e));} };
 
   const cancel = async (id) => {
     try {
@@ -424,6 +408,11 @@ export default function App() {
     if ((queue?.filter((q) => q.status === "running").length || 0) > 0) return "Protocol running";
     return "System idle; ready for directives";
   }, [approvals, queue]);
+  const canOperate = principal && ["operator", "admin"].includes(principal.role);
+  const canApprove = principal && ["approver", "admin"].includes(principal.role);
+
+  if (authLoading) return <div className="app"><div className="emptyState">Checking session…</div></div>;
+  if (!principal) return <Login onLogin={async(subject,role)=>{try{setPrincipal(await api.devLogin(subject,role));}catch(e){setErr(String(e));}}}/>;
 
   return (
     <div className="app">
@@ -434,6 +423,7 @@ export default function App() {
           <p>{priorityText}</p>
         </div>
         <button type="button" className="secondary" onClick={refresh}>Refresh</button>
+        <Pill tone="good">{principal.subject} · {principal.role}</Pill>
       </header>
       <nav className="navTabs" aria-label="Operator console sections">
         {routes.map(([key, label]) => (
@@ -449,18 +439,18 @@ export default function App() {
 
       {route === "overview" && (
         <main className="grid">
-          <ApprovalsPanel approvals={approvals} resolve={resolve} />
-          <CommandCenter directive={directive} setDirective={setDirective} submit={submit} busy={busy} />
-          <QueuePanel queue={queue.slice(-5)} cancel={cancel} />
+          {canApprove && <ApprovalsPanel approvals={approvals} resolve={resolve} />}
+          {canOperate && <CommandCenter directive={directive} setDirective={setDirective} submit={submit} busy={busy} />}
+          <QueuePanel queue={queue.slice(-5)} cancel={cancel} reconcile={reconcile} canMutate={canOperate} />
           <AgendaPanel agenda={agenda} />
           <EventsPanel events={events.slice(0, 12)} connected={connected} />
         </main>
       )}
-      {route === "approvals" && <main className="singleView"><ApprovalsPanel approvals={approvals} resolve={resolve} /></main>}
+      {route === "approvals" && <main className="singleView">{canApprove ? <ApprovalsPanel approvals={approvals} resolve={resolve} /> : <div className="emptyState">Approver role required.</div>}</main>}
       {route === "runs" && (
         <main className="grid">
-          <CommandCenter directive={directive} setDirective={setDirective} submit={submit} busy={busy} />
-          <QueuePanel queue={queue} cancel={cancel} />
+          {canOperate && <CommandCenter directive={directive} setDirective={setDirective} submit={submit} busy={busy} />}
+          <QueuePanel queue={queue} cancel={cancel} reconcile={reconcile} canMutate={canOperate} />
           <EventsPanel events={events} connected={connected} />
         </main>
       )}
@@ -471,7 +461,7 @@ export default function App() {
           <AgendaPanel agenda={agenda} />
         </main>
       )}
-      {route === "settings" && <main className="singleView narrow"><TokenSettings /></main>}
+      {route === "settings" && <main className="singleView narrow"><AccountSettings principal={principal} logout={async()=>{await api.logout();setPrincipal(null);}} /></main>}
     </div>
   );
 }

@@ -15,6 +15,7 @@ async function mockApi(page, overrides = {}) {
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();
+    if (path === "/api/auth/me") return route.fulfill({ json: { subject: "alice", role: "admin", csrf_token: "csrf" } });
     if (path === "/api/status") return route.fulfill({ json: state.status });
     if (path === "/api/audit") return route.fulfill({ json: state.audit });
     if (path === "/api/approvals" && method === "GET") return route.fulfill({ json: state.approvals });
@@ -60,9 +61,19 @@ test("operator reviews exact scope and denies an approval", async ({ page }) => 
   await page.goto("/#/approvals");
   await expect(page.getByRole("heading", { name: "move_arm" })).toBeVisible();
   await expect(page.getByText("Physical movement requires review", { exact: true })).toBeVisible();
-  await page.getByPlaceholder("approver id").fill("alice");
   await page.getByPlaceholder("decision notes").fill("Unexpected position");
   await page.getByRole("button", { name: "Deny" }).click();
   await expect(page.getByText("No pending approvals.", { exact: false })).toBeVisible();
-  expect(state.lastDecision).toEqual({ approved: false, notes: "Unexpected position", approver_id: "alice" });
+  expect(state.lastDecision).toEqual({ approved: false, notes: "Unexpected position" });
+});
+
+test("operator reconciles an interrupted run before retry", async ({ page }) => {
+  const run={id:"run-2",directive:"Dispense 100 µL",status:"recovery_required",summary:"Outcome uncertain",created_secs:Math.floor(Date.now()/1000)};
+  const state=await mockApi(page,{queue:[run]});
+  await page.route("**/api/queue/run-2/reconcile",async route=>{state.reconciliation=route.request().postDataJSON();state.queue=[];await route.fulfill({json:{reconciled:"run-2"}})});
+  page.on("dialog",dialog=>dialog.accept("Observed vessel at 100 µL; safe to retry"));
+  await page.goto("/#/runs");
+  await page.getByRole("button",{name:"Verified safe to retry"}).click();
+  await expect(page.getByText("Dispense 100 µL",{exact:true})).not.toBeVisible();
+  expect(state.reconciliation.retry).toBe(true);
 });

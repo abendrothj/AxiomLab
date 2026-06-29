@@ -1,43 +1,24 @@
-// Thin fetch wrappers over the server API. The optional bearer token (stored in
-// localStorage) is sent on mutating calls; POST /api/queue requires it when the
-// server has AXIOMLAB_JWT_SECRET configured.
+let csrfToken = "";
 
-export const getToken = () =>
-  sessionStorage.getItem("axiomlab_token") || localStorage.getItem("axiomlab_token") || "";
-export const tokenIsRemembered = () => Boolean(localStorage.getItem("axiomlab_token"));
-export const setToken = (token, remember = false) => {
-  sessionStorage.removeItem("axiomlab_token");
-  localStorage.removeItem("axiomlab_token");
-  if (token) {
-    (remember ? localStorage : sessionStorage).setItem("axiomlab_token", token);
-  }
-};
-
-async function get(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(`${path}: ${r.status}`);
-  return r.json();
-}
-
-async function send(method, path, body) {
-  const headers = { "content-type": "application/json" };
-  const token = getToken();
-  if (token) headers.authorization = `Bearer ${token}`;
-  const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
-  if (!r.ok) throw new Error(`${path}: ${r.status} ${await r.text()}`);
-  return r.json().catch(() => ({}));
+async function request(method, path, body) {
+  const headers = {};
+  if (body) headers["content-type"] = "application/json";
+  if (method !== "GET" && csrfToken) headers["x-csrf-token"] = csrfToken;
+  const response = await fetch(path, { method, headers, credentials: "same-origin", body: body ? JSON.stringify(body) : undefined });
+  if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`);
+  return response.status === 204 ? {} : response.json();
 }
 
 export const api = {
-  status: () => get("/api/status"),
-  audit: (limit = 25) => get(`/api/audit?limit=${limit}`),
-  verifyAudit: () => send("POST", "/api/audit/verify"),
-  agenda: () => get("/api/agenda"),
-  queue: () => get("/api/queue"),
-  pushDirective: (directive) => send("POST", "/api/queue", { directive }),
-  cancelQueued: (id) => send("DELETE", `/api/queue/${id}`),
-  approvals: () => get("/api/approvals"),
-  resolveApproval: (id, approved, notes, approverId = "operator") =>
-    send("POST", `/api/approvals/${id}`, { approved, notes, approver_id: approverId }),
-  lab: () => get("/api/lab"),
+  me: async () => { const principal = await request("GET", "/api/auth/me"); csrfToken = principal.csrf_token; return principal; },
+  loginUrl: (returnTo = "/") => `/api/auth/login?return_to=${encodeURIComponent(returnTo)}`,
+  devLogin: async (subject, role) => { const principal = await request("POST", "/api/auth/dev-login", { subject, role }); csrfToken = principal.csrf_token; return principal; },
+  logout: async () => { await request("POST", "/api/auth/logout"); csrfToken = ""; },
+  status: () => request("GET", "/api/status"), audit: (limit = 25) => request("GET", `/api/audit?limit=${limit}`),
+  verifyAudit: () => request("POST", "/api/audit/verify"), agenda: () => request("GET", "/api/agenda"),
+  queue: () => request("GET", "/api/queue"), pushDirective: (directive) => request("POST", "/api/queue", { directive }),
+  cancelQueued: (id) => request("DELETE", `/api/queue/${id}`),
+  reconcile: (id, retry, notes) => request("POST", `/api/queue/${id}/reconcile`, { retry, notes }),
+  approvals: () => request("GET", "/api/approvals"), resolveApproval: (id, approved, notes) => request("POST", `/api/approvals/${id}`, { approved, notes }),
+  lab: () => request("GET", "/api/lab"),
 };
