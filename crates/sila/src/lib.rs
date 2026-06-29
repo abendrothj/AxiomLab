@@ -6,14 +6,16 @@
 //! this crate contains transport + physics, never policy.
 
 mod grpc;
+mod mock;
 mod sim;
 
-/// Generated gRPC clients for the instrument services.
+/// Generated gRPC clients (and mock-server stubs) for the instrument services.
 pub mod pb {
     tonic::include_proto!("axiomlab.hardware");
 }
 
 pub use grpc::GrpcLab;
+pub use mock::{serve as serve_mock, spawn_mock_server};
 pub use sim::SimLab;
 
 use axiom_types::Action;

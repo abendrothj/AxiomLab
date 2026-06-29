@@ -144,8 +144,31 @@ unknown samples.
 
 - **Simulator (default):** an offline Beer-Lambert physics model. Used unless an
   endpoint is configured.
-- **Hardware:** set `AXIOMLAB_SILA_ENDPOINT=http://host:port` to dispatch the
-  liquid/spectrophotometer/thermal services over SiLA 2 gRPC.
+- **gRPC:** set `AXIOMLAB_SILA_ENDPOINT=http://host:port` to dispatch the
+  liquid/spectrophotometer/thermal services over gRPC (`instruments.proto`).
+
+### End-to-end gRPC without hardware
+
+A reference instrument server (the `instruments.proto` contract, backed by the
+same physics simulator) ships in this repo. Use it to exercise the entire gRPC
+path end to end:
+
+```bash
+# terminal 1 — the instrument server
+cargo run -p axiom-sila --bin mock-instrument-server          # listens on :50051
+
+# terminal 2 — point the system at it
+AXIOMLAB_SILA_ENDPOINT=http://127.0.0.1:50051 cargo run -p axiomlab-server
+# /api/status now reports "backend":"hardware"
+```
+
+This is verified automatically: `cargo test -p axiom-sila --test grpc_e2e` round-trips
+over a real connection, and `axiom-gate`'s `pipeline_executes_over_grpc` runs the
+full gate pipeline through it.
+
+> Note: the Python `sila_sim` server speaks **full SiLA 2** (different packages,
+> `SiLAFramework.proto`, wrapped standard types), so the current gRPC client does
+> not talk to it directly — a SiLA 2 client layer would be required for that.
 
 ---
 
@@ -164,7 +187,8 @@ unknown samples.
 | `AXIOMLAB_REVOCATION_LIST` | — | JSON `{key_ids:[], approval_ids:[]}` |
 | `AXIOMLAB_PROOF_MANIFEST` | `.artifacts/proof/manifest.signed.json` | Manifest path |
 | `AXIOMLAB_MANIFEST_PUBKEY` | embedded constant | Trusted manifest signing key |
-| `AXIOMLAB_SILA_ENDPOINT` | _(unset → simulator)_ | gRPC hardware endpoint |
+| `AXIOMLAB_SILA_ENDPOINT` | _(unset → simulator)_ | gRPC instrument endpoint |
+| `AXIOMLAB_SILA_BIND` | `127.0.0.1:50051` | Bind address for the mock instrument server |
 | `AXIOMLAB_LAB_STATE_PATH` | `.artifacts/lab_state.json` | Reagent/vessel state |
 | `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | localhost / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |
 | `AXIOMLAB_MAX_ITERATIONS` | `50` | Orchestrator iteration cap |

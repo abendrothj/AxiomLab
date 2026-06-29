@@ -207,6 +207,10 @@ mod tests {
     }
 
     fn ctx() -> (GateContext, tempfile::TempDir) {
+        ctx_with(Arc::new(SilaClients::simulator()))
+    }
+
+    fn ctx_with(clients: Arc<SilaClients>) -> (GateContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let chain = Arc::new(Chain::open(dir.path().join("audit.jsonl")));
         let signer: Arc<dyn axiom_audit::Signer> = Arc::new(LocalSigner::generate());
@@ -216,7 +220,7 @@ mod tests {
             Arc::new(Mutex::new(LabState::default())),
             chain,
             signer,
-            Arc::new(SilaClients::simulator()),
+            clients,
             Arc::new(ProofChecker::from_manifest_trusted(test_manifest())),
             Arc::new(CapabilityPolicy::default_lab()),
             Arc::new(ApprovalQueue::new()),
@@ -224,6 +228,22 @@ mod tests {
             Some(Duration::from_millis(200)),
         );
         (ctx, dir)
+    }
+
+    #[tokio::test]
+    async fn pipeline_executes_over_grpc() {
+        // Full pipeline → ExecuteGate → real gRPC → mock instrument server.
+        let (endpoint, server) = axiom_sila::spawn_mock_server().await.unwrap();
+        let (ctx, _d) = ctx_with(Arc::new(SilaClients::grpc(endpoint)));
+        let action = Action::new(
+            "dispense",
+            serde_json::json!({"vessel_id": "tube_1", "volume_ul": 100.0}),
+            RiskClass::LiquidHandling,
+        );
+        let result = Pipeline::standard().run(action, &ctx).await;
+        server.abort();
+        assert!(result.is_ok(), "pipeline over gRPC should succeed: {result:?}");
+        assert_eq!(ctx.audit_chain.verify().unwrap().entries_checked, 1);
     }
 
     #[tokio::test]
