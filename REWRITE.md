@@ -267,7 +267,7 @@ GET  /api/status              loop state, iteration count, phase
 GET  /api/audit               query + verify chain (paginated)
 POST /api/audit/verify        verify full chain integrity
 GET  /api/agenda              commissioning agenda with run status
-POST /api/queue               operator pushes a directive (JWT required)
+POST /api/queue               operator pushes a directive (session + CSRF required)
 GET  /api/queue               list pending/running/completed
 DELETE /api/queue/{id}        cancel a queued item
 GET  /api/approvals           list pending approval requests

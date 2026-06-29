@@ -53,8 +53,9 @@ enforced by Rust types and tests). The honest one-line claim:
 ## Roadmap (aligned to the two pillars)
 
 The enforcement substrate is implemented and usable as a hardware-free alpha.
-Production work should now prioritize identity, transactional recovery, and
-versioned protocols—not broader autonomy or more device types.
+Identity, SQLite run/approval persistence, leases, and fail-closed recovery are
+implemented. Production work should now prioritize versioned protocols and the
+remaining inventory/calibration migration—not broader autonomy or more devices.
 
 The authoritative phased plan is [ROADMAP.md](ROADMAP.md). In order:
 

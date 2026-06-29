@@ -24,7 +24,6 @@ use queue::ProtocolQueue;
 use state::AppState;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
-use tower_http::cors::CorsLayer;
 
 #[tokio::main]
 async fn main() {
@@ -86,6 +85,7 @@ async fn main() {
         capability: Arc::new(CapabilityPolicy::default_lab()),
         revocations: Arc::new(RevocationList::from_env()),
         auth: Arc::new(auth::AuthStore::open(&database_path).expect("open auth store")),
+        allow_self_approval: std::env::var("AXIOMLAB_ALLOW_SELF_APPROVAL").as_deref()==Ok("1"),
     };
 
     tokio::spawn(worker::run(state.clone()));
@@ -95,9 +95,7 @@ async fn main() {
         async move { h.render() }
     };
 
-    let mut app = api_router(state)
-        .route("/metrics", get(render))
-        .layer(CorsLayer::permissive());
+    let mut app = api_router(state).route("/metrics", get(render));
 
     // Serve the built UI if present.
     if std::path::Path::new("ui/dist").is_dir() {
@@ -180,6 +178,7 @@ mod tests {
             capability: Arc::new(CapabilityPolicy::default_lab()),
             revocations: Arc::new(RevocationList::new()),
             auth: Arc::new(auth::AuthStore::open(dir.path().join("state.db")).unwrap()),
+            allow_self_approval: false,
         }
     }
 
@@ -257,6 +256,15 @@ mod tests {
         let (principal,cookie)=state.auth.create_session("alice",auth::Role::Approver).unwrap();let app=api_router(state);
         let response=app.oneshot(Request::post(format!("/api/approvals/{approval_id}")).header("content-type","application/json").header("cookie",cookie.split(';').next().unwrap()).header("x-csrf-token",principal.csrf_token).body(Body::from(r#"{"approved":true,"notes":"ok"}"#)).unwrap()).await.unwrap();
         assert_eq!(response.status(),StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn development_can_explicitly_allow_self_approval() {
+        let mut state=test_state();state.allow_self_approval=true;let run_id=state.protocol_queue.push_for("move","alice");
+        let (approval_id,_rx)=state.approval_queue.request_with_metadata_for_run("move_arm",&serde_json::json!({"x":1}),Some(axiom_types::RiskClass::Actuation),"ApprovalGate","review",std::time::Duration::from_secs(60),Some(run_id));
+        let (principal,cookie)=state.auth.create_session("alice",auth::Role::Approver).unwrap();let app=api_router(state);
+        let response=app.oneshot(Request::post(format!("/api/approvals/{approval_id}")).header("content-type","application/json").header("cookie",cookie.split(';').next().unwrap()).header("x-csrf-token",principal.csrf_token).body(Body::from(r#"{"approved":true,"notes":"isolated development"}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
     }
 
 }

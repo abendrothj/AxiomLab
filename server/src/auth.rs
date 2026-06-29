@@ -155,6 +155,9 @@ impl AuthStore {
         }
     }
     pub fn begin_oidc(&self, return_to: &str) -> Result<String, String> {
+        if !return_to.starts_with('/') || return_to.starts_with("//") {
+            return Err("return_to must be a local path".into());
+        }
         let c = self.oidc.as_ref().ok_or("OIDC is not configured")?;
         let state = random();
         let nonce = random();

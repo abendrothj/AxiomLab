@@ -44,9 +44,9 @@ rest of the system is enforced by Rust types and tests.**
 
 ### 2. Tamper-evident audit
 
-The **audit chain is the evidence system of record.** Operational queue and
-approval projections are restart-durable JSON journals today; they are not yet
-a transactional database. Every gate decision and executed action is an append-only entry
+The **audit chain is the evidence system of record.** Operational directives,
+leases, sessions, and approvals are persisted in SQLite. Every gate decision
+and executed action is an append-only entry
 that:
 
 - hashes the previous entry (a SHA-256 hash chain), and
@@ -92,7 +92,7 @@ cargo run -p axiom-proofs --bin gen-manifest
 export AXIOMLAB_MANIFEST_PUBKEY=<key>
 
 # 3. Run the server (simulator backend by default)
-cargo run -p axiomlab-server
+AXIOMLAB_DEV_AUTH=1 cargo run -p axiomlab-server
 #    → listening on 0.0.0.0:8080
 
 # 4. Install and test the UI
@@ -120,7 +120,7 @@ rejected. That is the safe default.
 | GET | `/api/audit` | query entries (paginated) + verify summary |
 | POST | `/api/audit/verify` | verify full chain integrity |
 | GET | `/api/agenda` | commissioning agenda |
-| GET/POST | `/api/queue` | list / submit a directive (POST needs JWT) |
+| GET/POST | `/api/queue` | list / submit a directive (operator session) |
 | DELETE | `/api/queue/{id}` | cancel a queued directive |
 | POST | `/api/queue/{id}/reconcile` | resolve an interrupted run after physical-state review |
 | GET | `/api/approvals` | pending approval requests |
@@ -132,7 +132,7 @@ rejected. That is the safe default.
 | WS | `/ws` | live event stream |
 
 See [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md) for operational configuration
-(signing, key rotation, Rekor, JWT, approvals) and
+(signing, key rotation, Rekor, OIDC, approvals) and
 [OUTLINE & RESEARCH.md](OUTLINE%20&%20RESEARCH.md)
 for scope and positioning.
 
@@ -144,9 +144,9 @@ It is useful for safety-policy development, SiLA integration work, operator
 workflow evaluation, and reproducible failure testing. It is not production lab
 software yet.
 
-The next release should add OIDC/RBAC and SQLite-backed transactional state,
-followed by versioned protocols and explicit reconciliation for uncertain
-physical outcomes. The phased implementation plan and acceptance criteria are in
+OIDC/RBAC, SQLite directives and approvals, leases, and explicit reconciliation
+are implemented. The next release should add versioned protocols and migrate
+inventory/calibration projections. The phased plan is in
 [ROADMAP.md](ROADMAP.md).
 
 ---

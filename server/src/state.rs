@@ -3,8 +3,8 @@
 //! No `HypothesisManager`, no `DiscoveryJournal`, no notebook. The audit chain is
 //! the authoritative record; everything else is derived or transient.
 
-use crate::queue::ProtocolQueue;
 use crate::auth::AuthStore;
+use crate::queue::ProtocolQueue;
 use axiom_audit::{Chain, RevocationList, Signer};
 use axiom_gate::{ApprovalQueue, CapabilityPolicy};
 use axiom_proofs::ProofChecker;
@@ -31,6 +31,7 @@ pub struct AppState {
     pub capability: Arc<CapabilityPolicy>,
     pub revocations: Arc<RevocationList>,
     pub auth: Arc<AuthStore>,
+    pub allow_self_approval: bool,
 }
 
 impl AppState {

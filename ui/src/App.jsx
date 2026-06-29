@@ -112,7 +112,7 @@ function AccountSettings({ principal, logout }) {
   );
 }
 
-function Login({ onLogin }) { const [subject,setSubject]=useState("operator"); const [role,setRole]=useState("operator"); return <main className="login"><Panel title="Sign in" eyebrow="AxiomLab identity"><p>Use your configured OIDC provider, or development login when enabled.</p><a className="button" href={api.loginUrl(location.href)}>Sign in with OIDC</a><div className="reviewGrid"><input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="development subject"/><select value={role} onChange={e=>setRole(e.target.value)}><option>viewer</option><option>operator</option><option>approver</option><option>admin</option></select></div><button onClick={()=>onLogin(subject,role)}>Development login</button></Panel></main> }
+function Login({ onLogin }) { const [subject,setSubject]=useState("operator"); const [role,setRole]=useState("operator"); return <main className="login"><Panel title="Sign in" eyebrow="AxiomLab identity"><p>Use your configured OIDC provider, or development login when enabled.</p><a className="button" href={api.loginUrl(`${location.pathname}${location.hash}`)}>Sign in with OIDC</a><div className="reviewGrid"><input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="development subject"/><select value={role} onChange={e=>setRole(e.target.value)}><option>viewer</option><option>operator</option><option>approver</option><option>admin</option></select></div><button onClick={()=>onLogin(subject,role)}>Development login</button></Panel></main> }
 
 function CommandCenter({ directive, setDirective, submit, busy }) {
   return (

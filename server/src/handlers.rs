@@ -83,11 +83,15 @@ pub async fn auth_dev_login(
     }
 }
 pub async fn auth_logout(State(s): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(error) = s.auth.authorize(&headers, Role::Viewer, true) {
+        return denied(error);
+    }
     s.auth.revoke(&headers);
     (
         [(axum::http::header::SET_COOKIE, auth::clear_cookie())],
         StatusCode::NO_CONTENT,
     )
+        .into_response()
 }
 
 // ── /api/status ─────────────────────────────────────────────────────────────
@@ -281,19 +285,21 @@ pub async fn approvals_resolve(
         Ok(p) => p,
         Err(e) => return denied(e),
     };
-    if let Some(request) = s
-        .approval_queue
-        .list_pending()
-        .into_iter()
-        .find(|request| request.id == id)
-    {
-        if let Some(run_id) = request.run_id.as_deref() {
-            if s.protocol_queue.submitted_by(run_id).as_deref() == Some(&principal.subject) {
-                return (
-                    StatusCode::FORBIDDEN,
-                    "submitter cannot approve their own run",
-                )
-                    .into_response();
+    if !s.allow_self_approval {
+        if let Some(request) = s
+            .approval_queue
+            .list_pending()
+            .into_iter()
+            .find(|request| request.id == id)
+        {
+            if let Some(run_id) = request.run_id.as_deref() {
+                if s.protocol_queue.submitted_by(run_id).as_deref() == Some(&principal.subject) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        "submitter cannot approve their own run",
+                    )
+                        .into_response();
+                }
             }
         }
     }

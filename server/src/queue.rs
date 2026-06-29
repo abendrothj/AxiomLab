@@ -56,6 +56,7 @@ pub struct QueueItem {
 pub struct ProtocolQueue {
     connection: Mutex<Connection>,
     notify: Notify,
+    worker_id: String,
 }
 
 impl ProtocolQueue {
@@ -77,12 +78,13 @@ impl ProtocolQueue {
     fn from_connection(connection: Connection) -> rusqlite::Result<Self> {
         connection.execute_batch(include_str!("../migrations/0001_operational_state.sql"))?;
         connection.execute(
-            "UPDATE directives SET status='recovery_required', summary='Server stopped while execution outcome was uncertain', lease_owner=NULL, lease_expires_secs=NULL, updated_secs=?1, version=version+1 WHERE status='running'",
+            "UPDATE directives SET status='recovery_required', summary='Worker lease expired; physical outcome requires review', lease_owner=NULL, lease_expires_secs=NULL, updated_secs=?1, version=version+1 WHERE status='running' AND lease_expires_secs<?1",
             [now_secs()],
         )?;
         Ok(Self {
             connection: Mutex::new(connection),
             notify: Notify::new(),
+            worker_id: uuid::Uuid::new_v4().to_string(),
         })
     }
 
@@ -143,10 +145,11 @@ impl ProtocolQueue {
     pub fn claim_next(&self) -> Option<(String, String)> {
         let mut connection = self.connection.lock().unwrap();
         let transaction = connection.transaction().ok()?;
+        transaction.execute("UPDATE directives SET status='recovery_required',summary='Worker lease expired; physical outcome requires review',lease_owner=NULL,lease_expires_secs=NULL,updated_secs=?1,version=version+1 WHERE status='running' AND lease_expires_secs<?1",[now_secs()]).ok()?;
         let next: Option<(String,String)> = transaction.query_row("SELECT id,directive FROM directives WHERE status='pending' ORDER BY created_secs,id LIMIT 1", [], |row| Ok((row.get(0)?,row.get(1)?))).optional().ok()?;
         let (id, directive) = next?;
         let expiry = now_secs() + 30;
-        if transaction.execute("UPDATE directives SET status='running',lease_owner='worker-1',lease_expires_secs=?2,updated_secs=?3,version=version+1 WHERE id=?1 AND status='pending'", params![id,expiry,now_secs()]).ok()? != 1 { return None; }
+        if transaction.execute("UPDATE directives SET status='running',lease_owner=?4,lease_expires_secs=?2,updated_secs=?3,version=version+1 WHERE id=?1 AND status='pending'", params![id,expiry,now_secs(),self.worker_id]).ok()? != 1 { return None; }
         transaction.commit().ok()?;
         Some((id, directive))
     }
@@ -182,7 +185,7 @@ impl ProtocolQueue {
         self.connection.lock().unwrap().execute("UPDATE directives SET status=?3,summary=COALESCE(?4,summary),updated_secs=?5,version=version+1 WHERE id=?1 AND status=?2", params![id,from.as_str(),to.as_str(),summary,now_secs()]).unwrap_or(0)==1
     }
     pub async fn wait(&self) {
-        self.notify.notified().await;
+        tokio::select! { _=self.notify.notified()=>{}, _=tokio::time::sleep(std::time::Duration::from_secs(1))=>{} }
     }
 }
 
@@ -211,6 +214,14 @@ mod tests {
         let q = ProtocolQueue::open(&path).unwrap();
         let id = q.push("x");
         q.claim_next().unwrap();
+        q.connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE directives SET lease_expires_secs=0 WHERE id=?1",
+                [&id],
+            )
+            .unwrap();
         drop(q);
         let q = ProtocolQueue::open(&path).unwrap();
         assert_eq!(q.list()[0].status, QueueStatus::RecoveryRequired);
@@ -252,5 +263,16 @@ mod tests {
         let id = first.push("once");
         assert_eq!(first.claim_next().unwrap().0, id);
         assert!(second.claim_next().is_none());
+    }
+
+    #[test]
+    fn second_worker_does_not_interrupt_active_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let first = ProtocolQueue::open(&path).unwrap();
+        first.push("active");
+        first.claim_next().unwrap();
+        let second = ProtocolQueue::open(&path).unwrap();
+        assert_eq!(second.list()[0].status, QueueStatus::Running);
     }
 }

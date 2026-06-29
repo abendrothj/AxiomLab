@@ -12,14 +12,16 @@ and signed audit. Directive and approval lifecycle journals survive process
 restarts. Deterministic simulator faults, benchmark scenarios, Rust integration
 tests, and Chromium operator tests provide a hardware-free validation loop.
 
-The remaining work is mainly production systems engineering. JSON journals are
-single-process durability, JWT is submission-only authentication, protocols are
-free-form directives rather than versioned resources, and chemistry is a policy
+The identity and operational-state foundation is implemented: generic OIDC,
+server-side sessions, RBAC, CSRF, SQLite directives/approvals, leases, and
+fail-closed reconciliation. Protocols remain free-form directives, and chemistry is a policy
 table rather than a validated scientific model.
 
 ## Delivery order
 
 ### Phase 1 — Identity and authorization
+
+**Status: implemented for the single-node release.**
 
 **Goal:** every read, mutation, approval, and audit export has an authenticated
 human or service identity and an explicit permission decision.
@@ -38,6 +40,9 @@ when separation-of-duties policy is enabled; revoked sessions stop working; API
 and browser tests cover each role boundary.
 
 ### Phase 2 — Transactional operational state
+
+**Status: foundation implemented.** Directives, leases, sessions, and approvals
+use SQLite. Inventory and calibration projections still need migration.
 
 **Goal:** replace JSON projections with crash-safe, queryable state while keeping
 the signed audit chain as the evidence record.
@@ -119,10 +124,8 @@ pilot can be stopped, reconciled, and audited without relying on the LLM.
 
 ## Recommended next milestone
 
-Implement Phases 1 and 2 together as a **single-node trusted-operator release**:
-OIDC sessions, RBAC, SQLite repositories, worker leases, migrations, and
-crash-point integration tests. Do not add more instrument types until this
-foundation is complete.
+The single-node trusted-operator foundation is complete. Implement Phase 3 next:
+immutable protocol drafts, checkpoints, and uncertain-step reconciliation.
 
 ## Deliberate non-goals
 

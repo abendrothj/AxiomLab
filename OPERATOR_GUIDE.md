@@ -93,6 +93,21 @@ intentional — no valid proof, no actuation.
 
 ## 5. Operator approvals
 
+All operational routes require a server-side session. Production login begins
+at `/api/auth/login`; the configured OIDC provider returns to
+`/api/auth/callback`. For local development only:
+
+```bash
+AXIOMLAB_DEV_AUTH=1 cargo run -p axiomlab-server
+curl -c cookies.txt -H 'content-type: application/json' \
+  -d '{"subject":"alice","role":"admin"}' localhost:8080/api/auth/dev-login
+curl -b cookies.txt localhost:8080/api/auth/me
+```
+
+Use the returned `csrf_token` as `x-csrf-token` on mutations. Roles are
+`viewer`, `operator`, `approver`, `admin`, and `service`. Development login is
+disabled unless explicitly enabled.
+
 `Actuation`/`Destructive` actions block at the `ApprovalGate` until an operator
 decides.
 
@@ -100,7 +115,8 @@ decides.
 curl localhost:8080/api/approvals          # list pending {id, tool, params, scope_hash}
 curl -X POST localhost:8080/api/approvals/<id> \
   -H 'content-type: application/json' \
-  -d '{"approved":true,"notes":"reviewed","approver_id":"alice"}'
+  -b cookies.txt -H "x-csrf-token: <token from /api/auth/me>" \
+  -d '{"approved":true,"notes":"reviewed"}'
 ```
 
 - Approval is **scoped to `sha256(tool‖params)`** — once granted, an identical
@@ -109,6 +125,7 @@ curl -X POST localhost:8080/api/approvals/<id> \
 - A revoked approver key or approval id (see `AXIOMLAB_REVOCATION_LIST`) is
   rejected even when "approved".
 - No decision within the timeout → auto-deny.
+- Approver identity comes from the session, and submitters cannot approve their own runs.
 - Approval lifecycle records survive restarts. A request that was pending when
   the process stopped is recorded as `interrupted` and is never replayed or
   treated as granted. Query `GET /api/approvals/history` for the journal.
@@ -126,9 +143,9 @@ npm run test:e2e
 ## 6. Submitting work
 
 ```bash
-# Submit a directive (JWT required when AXIOMLAB_JWT_SECRET is set)
+# Submit a directive (operator session + CSRF required)
 curl -X POST localhost:8080/api/queue \
-  -H 'authorization: Bearer <jwt>' \
+  -b cookies.txt -H "x-csrf-token: <token from /api/auth/me>" \
   -H 'content-type: application/json' \
   -d '{"directive":"Calibrate the spectrophotometer, then dispense 50 µL into tube_1"}'
 ```
@@ -230,6 +247,7 @@ directives and expected outcomes live in `benchmarks/protocols.json`.
 |---|---|---|
 | `AXIOMLAB_BIND` | `0.0.0.0:8080` | Listen address |
 | `AXIOMLAB_DEV_AUTH` | _(unset)_ | `1` enables local development login; never enable in production |
+| `AXIOMLAB_ALLOW_SELF_APPROVAL` | _(unset)_ | `1` disables separation of duties for isolated development only |
 | `AXIOMLAB_OIDC_AUTHORIZATION_ENDPOINT` | — | OIDC authorization endpoint |
 | `AXIOMLAB_OIDC_TOKEN_ENDPOINT` | — | OIDC token endpoint |
 | `AXIOMLAB_OIDC_USERINFO_ENDPOINT` | — | OIDC UserInfo endpoint |
@@ -300,23 +318,21 @@ calibrated before measuring, recovered from a rejection, chain verifies).
 
 ## 11. Production-readiness boundary
 
-The current runtime is appropriate for a single-process virtual-lab alpha. Its
-durability is intentionally fail-closed but not transactional:
+The current runtime is appropriate for a single-node virtual-lab alpha:
 
-- Directive and approval projections use atomic JSON files. They do not support
-  multiple workers or cross-record transactions.
-- A run interrupted while marked `running` is requeued. Before real hardware,
-  replace this with a `recovery_required` state so uncertain actuation cannot be
-  replayed automatically.
+- Directives, sessions, approvals, and leases use SQLite. Inventory and
+  calibration projections retain their existing storage paths.
+- An expired lease becomes `recovery_required`; uncertain work is never replayed
+  until an operator records reconciliation notes.
 - A pending approval becomes `interrupted` after restart and is never granted or
   replayed. Approved scopes are not restored into a new process session.
-- JWT currently protects queue submission only. Approval identity supplied by
-  the request body is operator metadata, not strong authentication.
+- Operational routes require server-side sessions. Mutations require CSRF and
+  route-specific roles; approval identity is session-derived.
 - Chemistry compatibility is a reviewed policy table, not a substitute for a
   validated EHS process or instrument-specific risk assessment.
 - Simulator behavior is evidence about AxiomLab's control logic, not evidence
   that a physical instrument behaves identically.
 
-Do not connect consequential hardware until identity, transactional recovery,
-and uncertain-outcome reconciliation are implemented. The delivery sequence,
+Before consequential hardware, qualify OIDC, backup/restore, and protocol-level
+uncertain-step recovery. The delivery sequence,
 design choices, and acceptance tests are specified in `ROADMAP.md`.
