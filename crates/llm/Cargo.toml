@@ -1,0 +1,23 @@
+[package]
+name = "axiom-llm"
+description = "Thin LLM orchestrator: proposes actions; the gate pipeline enforces."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axiom-types = { workspace = true }
+axiom-audit = { workspace = true }
+axiom-gate = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+axiom-sila = { workspace = true }
+axiom-proofs = { workspace = true }

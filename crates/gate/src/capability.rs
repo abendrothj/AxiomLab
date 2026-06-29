@@ -46,6 +46,23 @@ impl CapabilityPolicy {
         ])
     }
 
+    /// A human-readable summary of the configured bounds, for the LLM mandate.
+    pub fn describe(&self) -> String {
+        let mut actions: Vec<&ActionCapability> = self.actions.values().collect();
+        actions.sort_by(|a, b| a.action.cmp(&b.action));
+        let mut out = String::new();
+        for cap in actions {
+            let mut limits: Vec<String> = cap
+                .numeric_limits
+                .iter()
+                .map(|(k, r)| format!("{k}∈[{}, {}]", r.min, r.max))
+                .collect();
+            limits.sort();
+            out.push_str(&format!("- {}: {}\n", cap.action, limits.join(", ")));
+        }
+        out
+    }
+
     /// Validate `params` for `action`. Unknown actions pass (no configured limit);
     /// out-of-range or missing numeric parameters are rejected.
     pub fn validate(&self, action: &str, params: &Value) -> Result<(), String> {
