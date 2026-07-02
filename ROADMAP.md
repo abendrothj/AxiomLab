@@ -26,14 +26,12 @@ table rather than a validated scientific model.
 **Goal:** every read, mutation, approval, and audit export has an authenticated
 human or service identity and an explicit permission decision.
 
-- Add OIDC Authorization Code + PKCE login and secure HTTP-only sessions.
+- Add OIDC Authorization Code login and secure HTTP-only sessions.
 - Define roles: `viewer`, `operator`, `approver`, `administrator`, and
   `service`, with route-level permissions.
 - Derive approver identity from the session; never accept `approver_id` from a
   request body.
-- Add CSRF protection, session expiry/revocation, security headers, and an
-  open-development-mode banner.
-- Record subject, role, session id, and authorization result in the audit chain.
+- Add CSRF protection, and session expiry/revocation.
 
 **Acceptance:** anonymous mutations fail; operators cannot approve their own run
 when separation-of-duties policy is enabled; revoked sessions stop working; API
@@ -47,11 +45,10 @@ use SQLite. Inventory and calibration projections still need migration.
 **Goal:** replace JSON projections with crash-safe, queryable state while keeping
 the signed audit chain as the evidence record.
 
-- Introduce a repository layer and SQLite first; retain a Postgres-compatible
-  schema for later multi-node deployment.
+- Introduce a repository layer and use SQLite for operational state storage.
 - Store directives, run attempts, approval records, inventory projections,
   calibrations, sessions, and worker leases transactionally.
-- Use idempotency keys and optimistic versions on every mutation.
+- Use optimistic versions on every mutation to prevent concurrent write conflicts.
 - Claim work using leases; expired leases become `recovery_required`, not
   automatically re-executed.
 - Add migrations, backup/restore tests, and rebuild projections from audit.

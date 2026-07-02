@@ -120,6 +120,11 @@ rejected. That is the safe default.
 | GET | `/api/audit` | query entries (paginated) + verify summary |
 | POST | `/api/audit/verify` | verify full chain integrity |
 | GET | `/api/agenda` | commissioning agenda |
+| GET | `/api/auth/login` | OIDC login redirect |
+| GET | `/api/auth/callback` | OIDC callback |
+| POST | `/api/auth/dev-login` | (dev only) sessionless login |
+| GET | `/api/auth/me` | current session identity + csrf token |
+| POST | `/api/auth/logout` | end session |
 | GET/POST | `/api/queue` | list / submit a directive (operator session) |
 | DELETE | `/api/queue/{id}` | cancel a queued directive |
 | POST | `/api/queue/{id}/reconcile` | resolve an interrupted run after physical-state review |

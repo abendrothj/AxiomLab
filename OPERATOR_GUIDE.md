@@ -268,7 +268,7 @@ directives and expected outcomes live in `benchmarks/protocols.json`.
 | `AXIOMLAB_SIM_FAULTS` | `{}` | Deterministic simulator fault profile as JSON |
 | `AXIOMLAB_DATABASE_PATH` | `.artifacts/runtime/axiomlab.db` | SQLite operational state and worker leases |
 | `AXIOMLAB_LAB_STATE_PATH` | `.artifacts/lab_state.json` | Reagent/vessel state |
-| `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | localhost / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |
+| `AXIOMLAB_LLM_ENDPOINT` / `_API_KEY` / `_MODEL` | `http://localhost:11434/v1` / `no-key` / `claude-opus-4-8` | LLM (OpenAI-compatible) |
 | `AXIOMLAB_MAX_ITERATIONS` | `50` | Orchestrator iteration cap |
 | `AXIOMLAB_MAX_REJECTIONS` | `5` | Gate rejections tolerated before a run aborts |
 | `AXIOMLAB_CALIBRATION_TTL_SECS` | `86400` | Lifetime of a recorded calibration |

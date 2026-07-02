@@ -6,7 +6,7 @@
 > known gaps below describe the rewrite checkpoint and are not current status.
 
 **Decision:** Full rewrite in-place on `main`.  
-**Preserved:** `verus_proofs/` (30 theorems), `sila_sim/` (Python mock), `agent_runtime/proto/` (SiLA 2 FDL).  
+**Preserved:** `verus_verified/` (binding Verus spec — 30+ theorems), `verus_proofs/` (build-time bridge), `sila_sim/` (Python mock), `agent_runtime/proto/` (SiLA 2 FDL).  
 **Deleted:** Everything else — rebuilt from scratch under the architecture below.
 
 ---
@@ -47,7 +47,8 @@ axiomlab/
 ├── server/           # Axum HTTP server, WebSocket, operator API
 ├── ui/               # React frontend (rebuilt clean)
 │
-├── verus_proofs/     # KEPT AS-IS
+├── verus_verified/   # Binding Verus spec — the formally-verified safety envelope
+├── verus_proofs/     # KEPT AS-IS (build-time bridge)
 ├── sila_sim/         # KEPT AS-IS
 └── REWRITE.md        # This file
 ```
@@ -324,7 +325,7 @@ Done — all legacy crates removed:
 - [x] `physical_types/` (absorbed into `crates/types/`)
 - [x] `server/` (replaced by new `server/`)
 - [x] `visualizer/` (replaced by new `ui/`)
-- [ ] `contracts/AuditVerifier.sol` — kept (planned future ZK work)
+- [ ] `contracts/AuditVerifier.sol` — removed (was kept for planned future ZK work, but not yet implemented)
 
 ---
 
@@ -335,11 +336,11 @@ Each crate is independently compilable and tested before the next is started. No
 - [x] 1. `crates/types/` — domain types, zero deps **(done — 8 tests pass)**
 - [x] 2. `crates/audit/` — chain + Rekor, depends on types **(done — 15 tests pass)**
 - [x] 3. `crates/chemistry/` — compatibility table **(done — 7 tests pass; returns `HazardLevel`, operates on reagent names)**
-- [x] 4. `crates/sila/` — proto codegen + clients **(done — 8 tests pass; unified `execute`, simulator + gRPC backends)**
+- [x] 4. `crates/sila/` — proto codegen + clients **(done — 13 tests pass; unified `execute`, simulator + gRPC backends)**
 - [x] 5. `crates/proofs/` — artifact loading + predicates **(done — 14 tests pass; predicates mirror verified bounds, called with actual params)**
-- [x] 6. `crates/gate/` — pipeline + all 7 gates **(done — 24 tests pass; full end-to-end pipeline tested)**
-- [x] 7. `crates/llm/` — orchestrator **(done — 10 tests pass; scripted client drives full pipeline)**
-- [x] 8. `server/` — HTTP server **(done — 11 tests pass; routes + worker, chain-derived, no SQLite/journal)**
+- [x] 6. `crates/gate/` — pipeline + all 7 gates **(done — 32 tests pass; full end-to-end pipeline tested)**
+- [x] 7. `crates/llm/` — orchestrator **(done — 18 tests pass; scripted client drives full pipeline)**
+- [x] 8. `server/` — HTTP server **(done — 15 tests pass; routes + worker, chain-derived, no SQLite/journal)**
 - [x] 9. `ui/` — frontend **(done — React + Vite, `npm run build` succeeds)**; legacy crates deleted
 
 Each step gets its own commit with passing tests before moving to the next.
@@ -355,11 +356,11 @@ All nine steps done. Workspace builds clean; full test suite green:
 | `axiom-types` | 8 |
 | `axiom-audit` | 15 |
 | `axiom-chemistry` | 7 |
-| `axiom-sila` | 8 |
+| `axiom-sila` | 13 |
 | `axiom-proofs` | 14 |
-| `axiom-gate` | 24 (incl. end-to-end pipeline) |
-| `axiom-llm` | 10 (incl. orchestrator→pipeline→audit) |
-| `axiomlab-server` | 11 (incl. HTTP integration) |
+| `axiom-gate` | 32 (incl. end-to-end pipeline) |
+| `axiom-llm` | 18 (incl. orchestrator→pipeline→audit) |
+| `axiomlab-server` | 15 (incl. HTTP integration) |
 | `verus_proofs` (kept) | 31 + integration |
 
 The server boots, loads + verifies a signed proof manifest, and serves the API.
@@ -384,7 +385,8 @@ The server boots, loads + verifies a signed proof manifest, and serves the API.
 
 ## What Does Not Change
 
-- `verus_proofs/` — kept verbatim. CI workflow unchanged.
+- `verus_verified/` — kept verbatim. Binding Verus spec for the safety envelope.
+- `verus_proofs/` — kept verbatim. Build-time bridge that extracts constants from the spec.
 - `sila_sim/` — kept verbatim. Python mock unchanged.
 - `agent_runtime/proto/` — moved to `crates/sila/proto/`. Content unchanged.
 - `.github/workflows/verus.yml` — unchanged.
