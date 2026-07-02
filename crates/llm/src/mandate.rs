@@ -46,13 +46,25 @@ pub fn build_mandate(directive: &str, ctx: &GateContext, last_rejection: Option<
     m.push_str(
         "propose_protocol — run a sequence of actions:\n\
          {\"tool\":\"propose_protocol\",\"steps\":[\
-         {\"tool\":\"dispense\",\"params\":{\"vessel_id\":\"tube_1\",\"reagent\":\"NaCl\",\"volume_ul\":50}}]}\n\
+         {\"tool\":\"dispense\",\"params\":{\"vessel_id\":\"tube_1\",\"reagent\":\"water\",\"volume_ul\":50}}]}\n\
          analyze_series — fit data / calibrate an instrument:\n\
          {\"tool\":\"analyze_series\",\"x\":[1,2,3,4,5],\"y\":[0.1,0.2,0.3,0.4,0.5],\"model\":\"linear\",\
          \"instrument\":\"spectrophotometer\",\"reference_material_ids\":[\"std-1\",\"std-2\",\"std-3\",\"std-4\",\"std-5\"]}\n\
          done — finish:\n\
          {\"tool\":\"done\",\"summary\":\"what was accomplished\"}\n\n",
     );
+
+    m.push_str("# Valid action tools (use EXACTLY these names inside propose_protocol steps)\n");
+    m.push_str("- dispense (params: vessel_id, reagent, volume_ul)\n");
+    m.push_str("- aspirate (params: vessel_id, volume_ul)\n");
+    m.push_str("- read_absorbance (params: vessel_id, wavelength_nm)\n");
+    m.push_str("- read_ph (params: vessel_id)\n");
+    m.push_str("- read_temperature (params: device_id)\n");
+    m.push_str("- set_temperature (params: device_id, target_temp_c)\n");
+    m.push_str("- incubate (params: device_id, temp_c, duration_s)\n");
+    m.push_str("- centrifuge (params: rpm, duration_s)\n");
+    m.push_str("- move_arm (params: x, y, z)\n");
+    m.push_str("- calibrate (params: instrument)\n\n");
 
     m.push_str("# Capability bounds (operational)\n");
     m.push_str(&ctx.capability.describe());
