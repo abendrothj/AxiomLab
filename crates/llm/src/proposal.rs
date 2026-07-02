@@ -112,7 +112,15 @@ pub fn parse(raw: &str) -> Result<Proposal, ParseError> {
             }
             Ok(Proposal::Protocol(actions))
         }
-        _ => Err(ParseError::UnknownTool),
+        _ => {
+            // Bare action tool → auto-wrap as a single-step propose_protocol
+            if let Some(tool) = v.get("tool").and_then(|t| t.as_str()) {
+                let params = v.get("params").cloned().unwrap_or_else(|| Value::Object(Default::default()));
+                let action = Action::new(tool, params, infer_risk(tool));
+                return Ok(Proposal::Protocol(vec![action]));
+            }
+            Err(ParseError::UnknownTool)
+        }
     }
 }
 
