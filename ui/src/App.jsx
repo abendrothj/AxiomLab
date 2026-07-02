@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useLabState } from './useLabState';
 import LabScene from './components/LabScene';
 import PipelineViz from './components/PipelineViz';
@@ -6,22 +6,14 @@ import CommandBar from './components/CommandBar';
 import ApprovalToast from './components/ApprovalToast';
 import StatusBar from './components/StatusBar';
 import LoginOverlay from './components/LoginOverlay';
-import { api } from './api';
 
 export default function App() {
   const { state, isDemo, submit, approveAction } = useLabState();
   const { system, pipeline, lab, arm, instruments, currentRun, currentAction, approvals } = state;
-  const [principal, setPrincipal] = useState(null);
-  const [authChecked, setAuthChecked] = useState(false);
+  const [principal, setPrincipal] = useState(isDemo ? { subject: 'demo' } : null);
 
   const highlightVessel = currentAction?.vessel || null;
 
-  useEffect(() => {
-    if (isDemo) { setAuthChecked(true); return; }
-    api.me().then(p => setPrincipal(p)).catch(() => {}).finally(() => setAuthChecked(true));
-  }, [isDemo]);
-
-  if (!authChecked) return <div className="app-shell"><div className="loading">Loading…</div></div>;
   if (!isDemo && !principal) return <LoginOverlay onLogin={setPrincipal} />;
 
   return (
