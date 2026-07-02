@@ -33,6 +33,7 @@ function createInitialState() {
     currentAction: null,
     approvals: [],
     events: [],
+    principal: null,
   };
 }
 

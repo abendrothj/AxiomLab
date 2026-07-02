@@ -502,3 +502,118 @@ html, body, #root {
   .side-panel { width: 100%; height: auto; flex-shrink: 0; border-left: none; border-top: 1px solid var(--border); }
   .lab-viewport { height: 50vh; }
 }
+
+/* ── Login Overlay ── */
+
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.login-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 32px;
+  width: 360px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.login-subtitle {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.login-field span {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.login-field input,
+.login-field select {
+  padding: 8px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.login-field input:focus,
+.login-field select:focus { border-color: var(--accent); }
+
+.login-error {
+  color: var(--red);
+  font-size: 11px;
+  padding: 8px;
+  background: var(--red-dim);
+  border-radius: 4px;
+}
+
+.login-btn {
+  padding: 10px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+  font-family: inherit;
+}
+
+.login-btn:hover:not(:disabled) { background: #3b8fe5; }
+.login-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.login-oidc {
+  display: block;
+  text-align: center;
+  margin-top: 12px;
+  padding: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-decoration: none;
+  border-radius: 6px;
+  transition: color 0.2s;
+}
+
+.login-oidc:hover { color: var(--accent); }
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: var(--text-muted);
+  font-size: 14px;
+}
